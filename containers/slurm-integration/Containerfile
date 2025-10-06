@@ -1,0 +1,69 @@
+# syntax=docker/dockerfile:1.4
+
+FROM debian:12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    SLURM_USER=slurm \
+    SLURM_GROUP=slurm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        slurmctld \
+        slurmd \
+        slurm-client \
+        munge \
+        dbus \
+        systemd \
+        systemd-sysv \
+        openssh-server \
+        sudo \
+        python3 \
+        python3-pip \
+        python3-venv \
+        python3-cryptography \
+        procps \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN if ! getent group ${SLURM_GROUP} >/dev/null; then groupadd --system ${SLURM_GROUP}; fi \
+    && if ! id -u ${SLURM_USER} >/dev/null 2>&1; then useradd -ms /bin/bash -g ${SLURM_GROUP} ${SLURM_USER}; fi \
+    && echo "${SLURM_USER}:${SLURM_USER}" | chpasswd \
+    && usermod -aG sudo ${SLURM_USER} \
+    && mkdir -p /home/${SLURM_USER}/.ssh /home/${SLURM_USER}/slurm_jobs \
+    && chmod 700 /home/${SLURM_USER}/.ssh \
+    && mkdir -p /home/${SLURM_USER} \
+    && chown -R ${SLURM_USER}:${SLURM_GROUP} /home/${SLURM_USER} \
+    && chown -R ${SLURM_USER}:${SLURM_GROUP} /home/${SLURM_USER}/slurm_jobs \
+    && usermod -d /home/${SLURM_USER} ${SLURM_USER} \
+    && usermod -s /bin/bash ${SLURM_USER} \
+    && mkdir -p /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /run/slurm \
+    && chown -R ${SLURM_USER}:${SLURM_GROUP} /var/spool/slurmctld /var/log/slurm \
+    && chown root:root /var/spool/slurmd
+
+RUN install -d -m 0700 -o munge -g munge /etc/munge \
+    && dd if=/dev/urandom of=/etc/munge/munge.key bs=1 count=1024 status=none \
+    && chown munge:munge /etc/munge/munge.key \
+    && chmod 0400 /etc/munge/munge.key \
+    && install -d -m 0700 -o munge -g munge /var/lib/munge
+
+RUN mkdir -p /var/run/sshd \
+    && ssh-keygen -A \
+    && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+    && sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config \
+    && sed -i 's@session\\s\+required\\s\+pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd \
+    && ln -sf /lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/ssh.service \
+    && ln -sf /lib/systemd/system/munge.service /etc/systemd/system/multi-user.target.wants/munge.service \
+    && ln -sf /lib/systemd/system/slurmd.service /etc/systemd/system/multi-user.target.wants/slurmd.service \
+    && ln -sf /lib/systemd/system/slurmctld.service /etc/systemd/system/multi-user.target.wants/slurmctld.service
+
+# Ensure control host is resolvable in all runs
+RUN echo 'slurm-control' > /etc/hostname \
+    && printf '\n127.0.0.1 slurm-control\n' >> /etc/hosts
+
+COPY slurm.conf /etc/slurm/slurm.conf
+
+EXPOSE 22
+
+# systemd as PID 1 - required for service management
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/sbin/init"]

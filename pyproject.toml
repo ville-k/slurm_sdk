@@ -1,0 +1,46 @@
+[project]
+name = "slurm-sdk"
+version = "0.2.0"
+description = "Pythonic SDK for Slurm."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Ville Kallioniemi", email = "ville.kallioniemi@gmail.com" }
+]
+requires-python = ">=3.9"
+dependencies = [
+    "paramiko>=3.5.1",
+    "requests>=2.32.3",
+    "rich>=13.9.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/slurm"]
+
+[dependency-groups]
+dev = [
+    "mkdocs-coverage>=2.0.0",
+    "mkdocs-material>=9.6.1",
+    "mkdocstrings>=0.30.1",
+    "mkdocstrings-python>=1.18.2",
+    "pytest>=8.3.4",
+    "pytest-cov>=7.0.0",
+    "pytest-integration>=0.2.3",
+    "pytest-testinfra>=10.0.0",
+]
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+addopts = [
+    "--cov=slurm",
+    "--cov-report=term-missing",
+    "--cov-report=xml:coverage.xml",
+    "--cov-report=html:coverage_html",
+]

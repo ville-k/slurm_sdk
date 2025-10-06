@@ -1,0 +1,511 @@
+import logging
+import time
+import pickle
+import os
+import threading
+
+from typing import Optional, Any, Dict, TYPE_CHECKING
+
+# Import backend types needed for isinstance checks
+from .api.ssh import SSHCommandBackend
+
+# Use TYPE_CHECKING to avoid circular imports
+if TYPE_CHECKING:
+    from .cluster import Cluster
+
+from .rendering import RESULT_FILENAME
+
+
+logger = logging.getLogger(__name__)
+
+
+class Job:
+    """Represents a submitted Slurm job, providing status tracking and result retrieval.
+
+    A Job instance is returned when you submit a task via `cluster.submit()`. It provides
+    methods to monitor the job's progress, wait for completion, and retrieve the return
+    value of your task function.
+
+    Jobs track their own metadata (working directory, output paths) to enable result
+    retrieval even after the scheduler has purged the job from its queue.
+
+    Examples:
+        Basic job lifecycle:
+
+            >>> job = submitter(arg1, arg2)
+            >>> print(f"Job ID: {job.id}")
+            >>> job.wait()
+            >>> result = job.get_result()
+
+        Check status without blocking:
+
+            >>> if job.is_completed():
+            ...     if job.is_successful():
+            ...         result = job.get_result()
+            ...     else:
+            ...         print(f"Job failed: {job.get_status()}")
+            ... elif job.is_running():
+            ...     print("Still running...")
+
+        Wait with timeout:
+
+            >>> success = job.wait(timeout=300)  # 5 minutes
+            >>> if not success:
+            ...     print("Timeout! Job still running.")
+            ...     job.cancel()
+
+    Attributes:
+        id: The Slurm job ID (string).
+        cluster: The Cluster instance this job was submitted to.
+        target_job_dir: Working directory on the cluster containing job artifacts.
+        pre_submission_id: SDK-generated unique ID for this job submission.
+    """
+
+    TERMINAL_STATES = {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMEOUT",
+        "NODE_FAIL",
+    }
+
+    def __init__(
+        self,
+        id: str,
+        cluster: Optional["Cluster"] = None,
+        task_func=None,
+        args=(),
+        kwargs=None,
+        target_job_dir: Optional[str] = None,
+        pre_submission_id: Optional[str] = None,
+        sbatch_options: Optional[Dict[str, Any]] = None,
+        stdout_path: Optional[str] = None,
+        stderr_path: Optional[str] = None,
+    ):
+        """
+        Initialize a Job object.
+
+        Args:
+            id: The Slurm job ID
+            cluster: The cluster the job is running on
+            task_func: The task function that was submitted
+            args: The positional arguments passed to the task function
+            kwargs: The keyword arguments passed to the task function
+            target_job_dir: The absolute path to the directory containing this job's files.
+            pre_submission_id: The unique ID used when creating the directory and filenames.
+            sbatch_options: The SBATCH options used for this job's submission.
+            stdout_path: Scheduler stdout path for this job, if known.
+            stderr_path: Scheduler stderr path for this job, if known.
+        """
+        self.id = id
+        logger.debug("[%s] Initializing Job", self.id)
+        if cluster is None:
+            raise ValueError(
+                "Cluster instance is required. The global cluster pattern has been removed. "
+                "Pass the cluster explicitly or use the Job returned from cluster.submit()."
+            )
+        self.cluster = cluster
+        self.task_func = task_func
+        self.args = args
+        self.kwargs = kwargs or {}
+
+        self.target_job_dir = target_job_dir
+        self.pre_submission_id = pre_submission_id
+        self.sbatch_options = dict(sbatch_options or {})
+        self.stdout_path = stdout_path
+        self.stderr_path = stderr_path
+        self.created_at = time.time()
+        self.started_at: Optional[float] = None
+        self.finished_at: Optional[float] = None
+        self._completed_context_emitted = False
+        self._completed_context_lock = threading.Lock()
+        if not self.target_job_dir or not self.pre_submission_id:
+            logger.warning(
+                "[%s] Job initialized without complete metadata. "
+                "Result retrieval may fail. This typically occurs when reconstructing "
+                "jobs via get_job(); Cluster.get_job() attempts to hydrate metadata when possible.",
+                self.id,
+            )
+
+        self._status_cache = None
+        self._status_cache_time = 0
+        self._completed = False
+
+        self._result_filename = (
+            f"slurm_job_{self.pre_submission_id}_{RESULT_FILENAME}"
+            if self.pre_submission_id
+            else None
+        )
+
+    def _update_status_cache(
+        self,
+        status: Dict[str, Any],
+        timestamp: Optional[float] = None,
+    ) -> None:
+        """Update cached status metadata and derived telemetry."""
+
+        self._status_cache = status
+        self._status_cache_time = timestamp or time.time()
+        self._update_status_telemetry(status, self._status_cache_time)
+        if status.get("JobState") in self.TERMINAL_STATES:
+            self._completed = True
+
+    def _update_status_telemetry(
+        self, status: Dict[str, Any], timestamp: float
+    ) -> None:
+        state = status.get("JobState")
+        if state == "RUNNING" and self.started_at is None:
+            self.started_at = timestamp
+        if state in self.TERMINAL_STATES:
+            self.finished_at = self.finished_at or timestamp
+
+    @property
+    def result_path(self) -> Optional[str]:
+        if not self.target_job_dir or not self._result_filename:
+            return None
+        return os.path.join(self.target_job_dir, self._result_filename)
+
+    def get_status(self) -> Dict[str, Any]:
+        """Query the current status of the job from the Slurm scheduler.
+
+        This method caches the status for 1 second to avoid excessive scheduler queries.
+        Common job states include: PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, TIMEOUT.
+
+        Returns:
+            Dictionary with job status and metadata. Always includes "JobState" key.
+            Common keys:
+            - "JobState": Current state string (e.g., "RUNNING", "COMPLETED")
+            - "ExitCode": Exit code string (e.g., "0:0" for success)
+            - "WorkDir": Job working directory
+            - "Error": Error message if query failed
+
+            Returns {"JobState": "UNKNOWN", "Error": "..."} if the status cannot
+            be retrieved.
+
+        Examples:
+            >>> status = job.get_status()
+            >>> print(status["JobState"])
+            RUNNING
+            >>> if status.get("ExitCode", "").startswith("0:0"):
+            ...     print("Job succeeded")
+        """
+        current_time = time.time()
+        if self._status_cache and current_time - self._status_cache_time < 1:
+            return self._status_cache
+
+        try:
+            status = self.cluster.backend.get_job_status(self.id)
+            timestamp = time.time()
+            self._update_status_cache(status, timestamp)
+
+            if status.get("JobState") in self.TERMINAL_STATES and hasattr(
+                self.cluster, "_emit_completed_context"
+            ):
+                try:
+                    self.cluster._emit_completed_context(self, status, timestamp)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug(
+                        "Error emitting completed context for job %s: %s",
+                        self.id,
+                        exc,
+                    )
+
+            return status
+        except Exception as e:
+            logger.error("Error getting job status: %s", e)
+            return {"JobState": "UNKNOWN", "Error": str(e)}
+
+    def is_running(self) -> bool:
+        """Check if the job is currently executing.
+
+        Returns:
+            True if the job state is "RUNNING", False otherwise (including
+            PENDING, COMPLETED, FAILED, etc.).
+        """
+        status = self.get_status()
+        return status.get("JobState") == "RUNNING"
+
+    def is_completed(self) -> bool:
+        """Check if the job has reached a terminal state.
+
+        Terminal states include: COMPLETED, FAILED, CANCELLED, TIMEOUT, NODE_FAIL.
+        A completed job is no longer running and will not transition to another state.
+
+        Returns:
+            True if the job is in a terminal state, False if still pending or running.
+        """
+        if self._completed:
+            return True
+
+        status = self.get_status()
+
+        if status.get("JobState") in self.TERMINAL_STATES:
+            self._completed = True
+            return True
+
+        return False
+
+    def is_successful(self) -> bool:
+        """Check if the job completed with a successful exit code.
+
+        A job is successful if its state is COMPLETED and its exit code is 0:0
+        (no errors). Jobs that failed, were cancelled, or timed out return False.
+
+        Returns:
+            True if the job completed successfully with exit code 0:0, False otherwise.
+
+        Note:
+            This does not automatically wait for completion. If the job is still
+            running, this returns False. Use `job.wait()` first to ensure completion.
+        """
+        status = self.get_status()
+        return status.get("JobState") == "COMPLETED" and status.get(
+            "ExitCode", ""
+        ).startswith("0:0")
+
+    def _get_job_specific_output_path(self) -> Optional[str]:
+        """Gets the absolute path to the job-specific output directory.
+
+        Returns None if metadata is missing, which can happen when the Job
+        is reconstructed via Cluster.get_job() and hydration fails.
+        """
+        if not hasattr(self, "target_job_dir") or not self.target_job_dir:
+            logger.error(
+                "Cannot determine job output path for %s. target_job_dir is missing.",
+                self.id,
+            )
+            return None
+        return self.target_job_dir
+
+    def get_result(self) -> Any:
+        """Retrieve the return value from the completed job.
+
+        This method waits for job completion if necessary, then downloads and
+        deserializes the pickled result file from the cluster.
+
+        The result must be pickle-serializable. Complex objects like open file
+        handles, database connections, or objects with custom serialization
+        requirements may not work.
+
+        Returns:
+            The object returned by your task function, deserialized from the
+            remote result file. Type matches your function's return type annotation.
+
+        Raises:
+            DownloadError: If the job did not complete successfully, or if the
+                result file cannot be found or downloaded. Common causes:
+                - Job failed (non-zero exit code)
+                - Job metadata missing (when using `get_job()`)
+                - Network issues during download
+                - Unpickling errors (incompatible Python versions, missing dependencies)
+
+        Examples:
+            >>> job = submitter(x=42)
+            >>> result = job.get_result()  # Blocks until complete
+
+            Handle potential failures:
+
+            >>> try:
+            ...     result = job.get_result()
+            ... except DownloadError as e:
+            ...     print(f"Failed: {e}")
+            ...     # Check job output files for debugging
+
+        Note:
+            For SSH backends, this downloads the result file to a temporary location
+            then loads it. For local backends, it reads the file directly.
+        """
+        if not self.is_completed():
+            self.wait()
+
+        status = self.get_status()
+        if not self.is_successful():
+            from .errors import DownloadError
+
+            raise DownloadError(
+                f"Job {self.id} did not succeed.\n"
+                f"State: {status.get('JobState')}\n"
+                f"Exit Code: {status.get('ExitCode')}\n"
+                + (
+                    f"Check job output in: {self.target_job_dir}"
+                    if self.target_job_dir
+                    else ""
+                )
+            )
+
+        try:
+            job_specific_dir = self._get_job_specific_output_path()
+            if not job_specific_dir:
+                raise RuntimeError(
+                    f"Could not determine job directory path for job {self.id}"
+                )
+
+            if not self._result_filename:
+                raise RuntimeError(
+                    f"Could not determine result filename for job {self.id}.\n"
+                    f"Missing pre_submission_id. This job may have been created via get_job() "
+                    f"which cannot always recover all metadata. "
+                    f"For full result access, use the Job object returned from submit()."
+                )
+
+            result_file_path = os.path.join(job_specific_dir, self._result_filename)
+            logger.debug("[%s] Expecting result file at: %s", self.id, result_file_path)
+
+        except Exception as e:
+            logger.error("[%s] Error determining result file path: %s", self.id, e)
+            return None
+
+        if isinstance(self.cluster.backend, SSHCommandBackend):
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                local_temp_path = temp_file.name
+
+            try:
+                logger.debug(
+                    "[%s] Downloading remote result %s to %s",
+                    self.id,
+                    result_file_path,
+                    local_temp_path,
+                )
+                self.cluster.backend.download_file(result_file_path, local_temp_path)
+
+                with open(local_temp_path, "rb") as f:
+                    return pickle.load(f)
+            except FileNotFoundError as e:
+                logger.error(
+                    "[%s] Remote result file not found: %s", self.id, result_file_path
+                )
+                from .errors import DownloadError
+
+                raise DownloadError(
+                    f"Remote result file not found: {result_file_path}"
+                ) from e
+            except Exception as e:
+                logger.error(
+                    "[%s] Error downloading or loading result from %s: %s",
+                    self.id,
+                    result_file_path,
+                    e,
+                )
+                logger.debug("Exception detail:", exc_info=True)
+                from .errors import DownloadError
+
+                raise DownloadError(
+                    f"Failed to download or deserialize result from {result_file_path}: {e}"
+                ) from e
+        else:
+            try:
+                local_result_path = result_file_path
+                if not os.path.isabs(local_result_path):
+                    local_result_path = os.path.abspath(local_result_path)
+
+                logger.debug("[%s] Loading local result %s", self.id, local_result_path)
+                with open(local_result_path, "rb") as f:
+                    return pickle.load(f)
+            except FileNotFoundError as e:
+                logger.error(
+                    "[%s] Local result file not found: %s", self.id, local_result_path
+                )
+                from .errors import DownloadError
+
+                raise DownloadError(
+                    f"Local result file not found: {local_result_path}"
+                ) from e
+            except Exception as e:
+                logger.error(
+                    "[%s] Error loading local result from %s: %s",
+                    self.id,
+                    local_result_path,
+                    e,
+                )
+                logger.debug("Exception detail:", exc_info=True)
+                from .errors import DownloadError
+
+                raise DownloadError(
+                    f"Failed to load or deserialize local result from {local_result_path}: {e}"
+                ) from e
+
+    def wait(self, timeout: Optional[float] = None, poll_interval: float = 5.0) -> bool:
+        """Block until the job reaches a terminal state (completed, failed, cancelled, etc.).
+
+        This method polls the scheduler at regular intervals until the job finishes
+        or the timeout is reached. It's useful when you need to wait for a job before
+        proceeding with subsequent tasks.
+
+        Args:
+            timeout: Maximum time to wait in seconds. If None (default), waits indefinitely
+                until the job completes. Use a timeout to prevent indefinite blocking if
+                the job hangs.
+            poll_interval: Seconds between status checks. Default is 5 seconds. Lower
+                values provide faster response but increase scheduler load. Higher values
+                reduce load but delay detection of completion.
+
+        Returns:
+            True if the job completed successfully (state COMPLETED, exit code 0:0).
+            False if the job failed, was cancelled, timed out, or the wait timeout
+            was exceeded.
+
+        Examples:
+            Wait indefinitely for success:
+
+                >>> if job.wait():
+                ...     result = job.get_result()
+                ... else:
+                ...     print("Job failed!")
+
+            Wait with timeout:
+
+                >>> if job.wait(timeout=300, poll_interval=10):
+                ...     result = job.get_result()
+                ... else:
+                ...     print("Timeout or failure")
+                ...     job.cancel()  # Clean up
+
+        Note:
+            This method checks `is_completed()` and `is_successful()` at each interval.
+            It does not check for result file existence - only job state from the scheduler.
+        """
+        start_time = time.time()
+
+        while True:
+            if self.is_completed():
+                success = self.is_successful()
+                logger.debug(
+                    "[%s] Completed with status: %s",
+                    self.id,
+                    self.get_status().get("JobState"),
+                )
+                logger.debug(
+                    "[%s] Exit code: %s", self.id, self.get_status().get("ExitCode")
+                )
+
+                return success
+
+            if timeout is not None and time.time() - start_time > timeout:
+                logger.error("[%s] Timeout waiting for job", self.id)
+                return False
+
+            time.sleep(poll_interval)
+
+    def cancel(self) -> bool:
+        """Cancel the job via `scancel`.
+
+        Attempts to cancel the job if it's pending or running. Has no effect if
+        the job has already completed.
+
+        Returns:
+            True if the cancellation command succeeded, False if it failed.
+            Note that True only indicates the command was issued, not that the
+            job was necessarily cancelled (it may have already completed).
+
+        Examples:
+            >>> if not job.wait(timeout=60):
+            ...     print("Timeout! Cancelling...")
+            ...     job.cancel()
+        """
+        try:
+            return self.cluster.backend.cancel_job(self.id)
+        except Exception as e:
+            logger.error("Error cancelling job: %s", e)
+            return False
