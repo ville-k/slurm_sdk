@@ -98,9 +98,13 @@ def render_job_script(
     target_job_dir: str,
     pre_submission_id: str,
     callbacks: List[BaseCallback],
+    cluster: Any = None,
 ) -> str:
     """
     Renders the SLURM sbatch script using an explicit target directory path.
+
+    Args:
+        cluster: Optional cluster instance for workflow support (provides Slurmfile path and env name).
     """
 
     sbatch_params = normalize_sbatch_options(task_definition)
@@ -149,6 +153,20 @@ def render_job_script(
     script_lines.append("")
     script_lines.append(f'echo "Target Job Directory (from Python): {target_job_dir}"')
     script_lines.append(f"export JOB_DIR={shlex.quote(target_job_dir)}")
+
+    # Export cluster configuration for workflow support
+    if cluster is not None:
+        slurmfile_path = getattr(cluster, "slurmfile_path", None)
+        env_name = getattr(cluster, "env_name", None)
+        # The Slurmfile will be uploaded to the job directory as "Slurmfile.toml"
+        if slurmfile_path:
+            remote_slurmfile_path = f"{target_job_dir}/Slurmfile.toml"
+            script_lines.append(
+                f"export SLURM_SDK_SLURMFILE={shlex.quote(remote_slurmfile_path)}"
+            )
+        if env_name:
+            script_lines.append(f"export SLURM_SDK_ENV={shlex.quote(env_name)}")
+
     script_lines.append("")
     script_lines.append('echo "SLURM Job ID: ${SLURM_JOB_ID:-}"')
     script_lines.append('echo "Running on host: $(hostname)"')

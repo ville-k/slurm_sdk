@@ -1,6 +1,115 @@
-from typing import Any, Callable, Dict, Optional
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Optional,
+    TypeVar,
+    TYPE_CHECKING,
+    overload,
+    ParamSpec,
+)
 
 from .task import SlurmTask, normalize_sbatch_options
+
+# Type variables for generic signatures
+P = ParamSpec("P")  # For parameter types
+R = TypeVar("R")  # For return types
+
+if TYPE_CHECKING:
+    from .job import Job
+
+
+# TYPE_CHECKING overloads for proper type hints
+if TYPE_CHECKING:
+    # Overload for @workflow without arguments
+    @overload
+    def workflow(func: Callable[P, R]) -> Callable[P, "Job[R]"]: ...
+
+    # Overload for @workflow(time=..., ...)
+    @overload
+    def workflow(
+        func: None = None,
+        *,
+        time: str = "01:00:00",
+        **sbatch_kwargs: Any,
+    ) -> Callable[[Callable[P, R]], Callable[P, "Job[R]"]]: ...
+
+
+def workflow(
+    func: Optional[Callable[..., Any]] = None,
+    *,
+    time: str = "01:00:00",
+    **sbatch_kwargs: Any,
+):
+    """Decorator for workflow orchestrator tasks.
+
+    Workflows are special tasks that can submit other tasks. They automatically
+    receive a WorkflowContext parameter that provides access to the cluster,
+    shared directory, and task management utilities.
+
+    The @workflow decorator is essentially @task with workflow-specific defaults
+    and a flag marking it as a workflow orchestrator.
+
+    Args:
+        func: The function to decorate. Typically not specified directly.
+        time: Default time limit for the orchestrator (default: "01:00:00").
+        **sbatch_kwargs: SBATCH directive parameters (same as @task).
+
+    Returns:
+        SlurmTask instance marked as a workflow.
+
+    Examples:
+        Basic workflow with context injection:
+
+            >>> from slurm.workflow import WorkflowContext
+            >>> @workflow(time="02:00:00")
+            ... def my_workflow(data: list[str], ctx: WorkflowContext):
+            ...     # Context is automatically injected by runner
+            ...     jobs = [process(item) for item in data]
+            ...     return [job.get_result() for job in jobs]
+
+        Workflow using shared directory:
+
+            >>> @workflow(time="04:00:00", mem="8G")
+            ... def training_workflow(config: dict, ctx: WorkflowContext):
+            ...     # Save config to shared directory
+            ...     config_path = ctx.shared_dir / "config.pkl"
+            ...     with open(config_path, "wb") as f:
+            ...         pickle.dump(config, f)
+            ...
+            ...     # Submit tasks that can access shared directory
+            ...     jobs = train.map([{"lr": lr} for lr in config["learning_rates"]])
+            ...     return jobs.get_results()
+    """
+
+    # Use the @task decorator with workflow-specific settings
+    def decorator(inner: Callable[..., Any]) -> SlurmTask:
+        task_instance = task(inner, time=time, **sbatch_kwargs)
+        # Mark this task as a workflow
+        task_instance._is_workflow = True
+        return task_instance
+
+    if callable(func):
+        return decorator(func)
+
+    return decorator
+
+
+# TYPE_CHECKING overloads for task decorator
+if TYPE_CHECKING:
+    # Overload for @task without arguments
+    @overload
+    def task(func: Callable[P, R]) -> Callable[P, "Job[R]"]: ...
+
+    # Overload for @task(time=..., ...)
+    @overload
+    def task(
+        func: None = None,
+        *,
+        packaging: Optional[Dict[str, Any]] = None,
+        container_file: Optional[str] = None,
+        **sbatch_kwargs: Any,
+    ) -> Callable[[Callable[P, R]], Callable[P, "Job[R]"]]: ...
 
 
 def task(

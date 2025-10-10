@@ -21,8 +21,8 @@ def test_task_as_function_creates_slurm_task():
     assert my_task.sbatch_options["mem"] == "2G"
     assert my_task.sbatch_options["job_name"] == "my_function"
 
-    # Verify the wrapped function works
-    assert my_task(5, 3) == 8
+    # Verify the unwrapped function works
+    assert my_task.unwrapped(5, 3) == 8
 
 
 def test_dynamic_task_with_container_file():
@@ -45,8 +45,8 @@ def test_dynamic_task_with_container_file():
     assert container_task.sbatch_options["time"] == "00:30:00"
     assert container_task.sbatch_options["mem"] == "4G"
 
-    # Verify function works
-    assert container_task("hello") == "HELLO"
+    # Verify unwrapped function works
+    assert container_task.unwrapped("hello") == "HELLO"
 
 
 def test_multiple_tasks_from_same_function():
@@ -72,9 +72,9 @@ def test_multiple_tasks_from_same_function():
     assert heavy_compute.sbatch_options["mem"] == "32G"
     assert heavy_compute.sbatch_options["job_name"] == "heavy"
 
-    # Both should execute the same function
-    assert quick_compute(5) == 25
-    assert heavy_compute(5) == 25
+    # Both should execute the same function (using unwrapped for local execution)
+    assert quick_compute.unwrapped(5) == 25
+    assert heavy_compute.unwrapped(5) == 25
 
 
 def test_task_function_equals_decorator():
@@ -103,9 +103,9 @@ def test_task_function_equals_decorator():
         == dynamic_func.sbatch_options["cpus_per_task"]
     )
 
-    # Both should execute correctly
-    assert decorated_func(10) == 20
-    assert dynamic_func(10) == 20
+    # Both should execute correctly (using unwrapped for local execution)
+    assert decorated_func.unwrapped(10) == 20
+    assert dynamic_func.unwrapped(10) == 20
 
 
 def test_dynamic_task_with_custom_job_name():

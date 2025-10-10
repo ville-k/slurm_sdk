@@ -29,6 +29,7 @@ from slurm.runtime import (
     current_job_context,
     _function_wants_job_context,
 )
+from slurm.workflow import WorkflowContext
 
 logger = logging.getLogger("slurm.runner")
 
@@ -47,6 +48,88 @@ def _run_callbacks(callbacks: List[BaseCallback], method_name: str, *args, **kwa
             logger.warning(
                 f"Runner: Error executing callback {type(callback).__name__}.{method_name}: {e}"
             )
+
+
+def _function_wants_workflow_context(func):
+    """Check if function expects a WorkflowContext parameter."""
+    import inspect
+
+    try:
+        sig = inspect.signature(func)
+        for param in sig.parameters.values():
+            # Check by annotation
+            annotation = param.annotation
+            if annotation != inspect.Parameter.empty:
+                if annotation is WorkflowContext:
+                    return True
+                # Check string annotations
+                if isinstance(annotation, str) and "WorkflowContext" in annotation:
+                    return True
+                # Check name attribute
+                if (
+                    hasattr(annotation, "__name__")
+                    and annotation.__name__ == "WorkflowContext"
+                ):
+                    return True
+            # Check by parameter name
+            if param.name in ("ctx", "context", "workflow_context"):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _bind_workflow_context(func, args, kwargs, workflow_context):
+    """Inject workflow_context into function if it expects it.
+
+    Returns (args, kwargs, injected).
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(func)
+        params = list(sig.parameters.values())
+
+        # Find the parameter that wants WorkflowContext
+        target_param = None
+        for param in params:
+            annotation = param.annotation
+            # Check by annotation
+            if annotation != inspect.Parameter.empty:
+                if annotation is WorkflowContext:
+                    target_param = param
+                    break
+                if isinstance(annotation, str) and "WorkflowContext" in annotation:
+                    target_param = param
+                    break
+                if (
+                    hasattr(annotation, "__name__")
+                    and annotation.__name__ == "WorkflowContext"
+                ):
+                    target_param = param
+                    break
+            # Check by parameter name
+            if param.name in ("ctx", "context", "workflow_context"):
+                target_param = param
+                break
+
+        if target_param is None:
+            return args, kwargs, False
+
+        param_name = target_param.name
+
+        # If already provided, don't inject
+        if param_name in kwargs:
+            return args, kwargs, False
+
+        # Inject as keyword argument
+        new_kwargs = dict(kwargs)
+        new_kwargs[param_name] = workflow_context
+        return args, new_kwargs, True
+
+    except Exception as e:
+        logger.warning(f"Error binding workflow context: {e}")
+        return args, kwargs, False
 
 
 def main():
@@ -157,6 +240,67 @@ def main():
         logger.debug("Deserialized Args: %s", task_args)
         logger.debug("Deserialized Kwargs: %s", task_kwargs)
 
+        # Resolve JobResultPlaceholder objects by loading their results
+        from slurm.task import JobResultPlaceholder
+
+        def resolve_placeholder(value):
+            """Recursively resolve JobResultPlaceholder objects."""
+            if isinstance(value, JobResultPlaceholder):
+                # Load the result from the job directory
+                # The job directory follows the pattern: {base}/{task_name}/{timestamp}_{job_id}/
+                # We need to find it based on the job_id
+                logger.debug(
+                    "Resolving JobResultPlaceholder for job_id=%s", value.job_id
+                )
+
+                # For now, we'll search for the result file based on job_id
+                # This is a simplified approach - in production, you'd want proper metadata tracking
+                job_base_dir = os.environ.get(
+                    "SLURM_JOBS_DIR", os.path.expanduser("~/slurm_jobs")
+                )
+
+                # Search for the result file
+                # Pattern: {job_base_dir}/**/*_{job_id}/slurm_job_*_result.pkl
+                import glob
+
+                search_pattern = f"{job_base_dir}/**/slurm_job_*_result.pkl"
+                for result_path in glob.glob(search_pattern, recursive=True):
+                    # Check if this result file is from the correct job_id
+                    # We'll need to check the metadata.json file
+                    result_dir = os.path.dirname(result_path)
+                    metadata_path = os.path.join(result_dir, "metadata.json")
+                    if os.path.exists(metadata_path):
+                        try:
+                            import json
+
+                            with open(metadata_path, "r") as f:
+                                metadata = json.load(f)
+                            if metadata.get("job_id") == value.job_id:
+                                logger.debug("Found result file: %s", result_path)
+                                with open(result_path, "rb") as f:
+                                    return pickle.load(f)
+                        except Exception as e:
+                            logger.warning(
+                                "Error reading metadata from %s: %s", metadata_path, e
+                            )
+
+                raise FileNotFoundError(
+                    f"Could not find result file for job_id={value.job_id}"
+                )
+            elif isinstance(value, (list, tuple)):
+                return type(value)(resolve_placeholder(item) for item in value)
+            elif isinstance(value, dict):
+                return {k: resolve_placeholder(v) for k, v in value.items()}
+            else:
+                return value
+
+        # Resolve placeholders in args and kwargs
+        task_args = resolve_placeholder(task_args)
+        task_kwargs = resolve_placeholder(task_kwargs)
+
+        logger.debug("Resolved Args: %s", task_args)
+        logger.debug("Resolved Kwargs: %s", task_kwargs)
+
         logger.debug("Calling on_begin_run_job callbacks...")
         try:
             run_start_time = time.time()
@@ -185,6 +329,17 @@ def main():
         logger.debug("Getting function %s from module...", args.function)
         func = getattr(module, args.function)
 
+        # If this is a @task decorated function, unwrap it for direct execution
+        # The decorator prevents direct calls outside a Cluster context, but we're
+        # running inside a SLURM job so we need the underlying function
+        if hasattr(func, "unwrapped"):
+            logger.debug("Unwrapping @task decorated function for execution")
+            func = func.unwrapped
+
+        # Track whether we activated a workflow context
+        workflow_context_token = None
+
+        # Check if function wants JobContext
         if _function_wants_job_context(func):
             task_args, task_kwargs, injected = _bind_job_context(
                 func, task_args, task_kwargs, job_context
@@ -201,9 +356,179 @@ def main():
                     args.module,
                     args.function,
                 )
+        # Check if function wants WorkflowContext (for @workflow functions)
+        elif _function_wants_workflow_context(func):
+            # Build WorkflowContext for workflow orchestrators
+            from pathlib import Path
+            from slurm.cluster import Cluster
+
+            # We need to recreate the cluster connection for the workflow
+            # The workflow needs to be able to submit jobs
+            workflow_job_dir = Path(job_dir) if job_dir else Path.cwd()
+            shared_dir = workflow_job_dir / "shared"
+
+            # Create a cluster instance for the workflow to use
+            # Try to load from environment variables set by the job script
+            slurmfile_path = os.environ.get("SLURM_SDK_SLURMFILE")
+            env_name = os.environ.get("SLURM_SDK_ENV")
+
+            cluster = None
+            if slurmfile_path:
+                try:
+                    logger.debug(
+                        f"Loading cluster from SLURM_SDK_SLURMFILE={slurmfile_path}, env={env_name}"
+                    )
+                    cluster = Cluster.from_env(slurmfile_path, env=env_name)
+
+                    # For nested workflow tasks, reuse the parent workflow's container image
+                    # Remove dockerfile/context to prevent rebuilding; set explicit image reference
+                    if (
+                        cluster.packaging_defaults
+                        and cluster.packaging_defaults.get("type") == "container"
+                    ):
+                        pkg = dict(cluster.packaging_defaults)
+
+                        # Construct the full image reference if not already present
+                        if not pkg.get("image"):
+                            registry = pkg.get("registry", "").rstrip("/")
+                            name = pkg.get("name", "")
+                            tag = pkg.get("tag", "latest")
+
+                            if registry and name:
+                                image_ref = f"{registry}/{name.lstrip('/')}:{tag}"
+                            elif name:
+                                image_ref = f"{name}:{tag}"
+                            else:
+                                image_ref = None
+
+                            if image_ref:
+                                pkg["image"] = image_ref
+                                logger.debug(
+                                    f"Constructed image reference: {image_ref}"
+                                )
+
+                        # Remove dockerfile, context, and the fields used to construct the image
+                        # This prevents _resolve_image_reference from adding the registry prefix again
+                        pkg.pop("dockerfile", None)
+                        pkg.pop("context", None)
+                        pkg.pop("registry", None)
+                        pkg.pop("name", None)
+                        pkg.pop("tag", None)
+                        # Disable push since image already exists in registry
+                        pkg["push"] = False
+                        cluster.packaging_defaults = pkg
+                        logger.debug(
+                            "Configured nested tasks to reuse parent container image (no build/push)"
+                        )
+                    else:
+                        # If not using containers, fall back to 'none' packaging
+                        cluster.packaging_defaults = {"type": "none"}
+                        logger.debug(
+                            "Overrode packaging config to use 'none' for nested workflow tasks"
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not load cluster from {slurmfile_path}: {e}")
+
+            # Fallback: try without path
+            if cluster is None:
+                try:
+                    logger.debug("Trying to load cluster from discovered Slurmfile")
+                    cluster = Cluster.from_env(env=env_name)
+
+                    # For nested workflow tasks, reuse the parent workflow's container image
+                    if (
+                        cluster.packaging_defaults
+                        and cluster.packaging_defaults.get("type") == "container"
+                    ):
+                        pkg = dict(cluster.packaging_defaults)
+
+                        # Construct the full image reference if not already present
+                        if not pkg.get("image"):
+                            registry = pkg.get("registry", "").rstrip("/")
+                            name = pkg.get("name", "")
+                            tag = pkg.get("tag", "latest")
+
+                            if registry and name:
+                                image_ref = f"{registry}/{name.lstrip('/')}:{tag}"
+                            elif name:
+                                image_ref = f"{name}:{tag}"
+                            else:
+                                image_ref = None
+
+                            if image_ref:
+                                pkg["image"] = image_ref
+                                logger.debug(
+                                    f"Constructed image reference: {image_ref}"
+                                )
+
+                        # Remove dockerfile, context, and the fields used to construct the image
+                        # This prevents _resolve_image_reference from adding the registry prefix again
+                        pkg.pop("dockerfile", None)
+                        pkg.pop("context", None)
+                        pkg.pop("registry", None)
+                        pkg.pop("name", None)
+                        pkg.pop("tag", None)
+                        pkg["push"] = False
+                        cluster.packaging_defaults = pkg
+                        logger.debug(
+                            "Configured nested tasks to reuse parent container image (no build/push)"
+                        )
+                    else:
+                        cluster.packaging_defaults = {"type": "none"}
+                        logger.debug(
+                            "Overrode packaging config to use 'none' for nested workflow tasks"
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not load cluster from Slurmfile: {e}")
+
+            if cluster is None:
+                logger.error("Workflow requires cluster but could not create one")
+                raise RuntimeError(
+                    "Workflow execution requires a Cluster instance but none could be created. "
+                    "Set SLURM_SDK_SLURMFILE and SLURM_SDK_ENV environment variables, or ensure "
+                    "a Slurmfile exists in the job directory."
+                )
+
+            workflow_context = WorkflowContext(
+                cluster=cluster,
+                workflow_job_id=job_id_env or "unknown",
+                workflow_job_dir=workflow_job_dir,
+                shared_dir=shared_dir,
+                local_mode=False,
+            )
+
+            task_args, task_kwargs, injected = _bind_workflow_context(
+                func, task_args, task_kwargs, workflow_context
+            )
+            if injected:
+                logger.debug(
+                    "Injected WorkflowContext into %s.%s",
+                    args.module,
+                    args.function,
+                )
+            else:
+                logger.debug(
+                    "WorkflowContext requested by %s.%s but argument already provided",
+                    args.module,
+                    args.function,
+                )
+
+            # Activate the cluster context for the workflow execution
+            # This allows tasks called within the workflow to submit jobs
+            from slurm.context import set_active_context
+
+            logger.debug("Activating cluster context for workflow execution")
+            workflow_context_token = set_active_context(workflow_context)
 
         logger.info("Executing task")
         result = func(*task_args, **task_kwargs)
+
+        # Deactivate cluster context if it was activated for a workflow
+        if workflow_context_token is not None:
+            from slurm.context import reset_active_context
+
+            reset_active_context(workflow_context_token)
+            logger.debug("Deactivated cluster context after workflow execution")
         logger.info("Task execution complete")
 
         end_time = time.time()

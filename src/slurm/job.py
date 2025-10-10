@@ -4,7 +4,7 @@ import pickle
 import os
 import threading
 
-from typing import Optional, Any, Dict, TYPE_CHECKING
+from typing import Optional, Any, Dict, TYPE_CHECKING, TypeVar, Generic
 
 # Import backend types needed for isinstance checks
 from .api.ssh import SSHCommandBackend
@@ -18,8 +18,11 @@ from .rendering import RESULT_FILENAME
 
 logger = logging.getLogger(__name__)
 
+# Type variable for Job's generic return type
+T = TypeVar("T")
 
-class Job:
+
+class Job(Generic[T]):
     """Represents a submitted Slurm job, providing status tracking and result retrieval.
 
     A Job instance is returned when you submit a task via `cluster.submit()`. It provides
@@ -277,7 +280,7 @@ class Job:
             return None
         return self.target_job_dir
 
-    def get_result(self) -> Any:
+    def get_result(self, timeout: Optional[float] = None) -> T:
         """Retrieve the return value from the completed job.
 
         This method waits for job completion if necessary, then downloads and
@@ -287,6 +290,11 @@ class Job:
         handles, database connections, or objects with custom serialization
         requirements may not work.
 
+        Args:
+            timeout: Optional timeout in seconds to wait for job completion.
+                If None (default), waits indefinitely. If the timeout is exceeded,
+                raises DownloadError.
+
         Returns:
             The object returned by your task function, deserialized from the
             remote result file. Type matches your function's return type annotation.
@@ -295,6 +303,7 @@ class Job:
             DownloadError: If the job did not complete successfully, or if the
                 result file cannot be found or downloaded. Common causes:
                 - Job failed (non-zero exit code)
+                - Job timed out while waiting for completion
                 - Job metadata missing (when using `get_job()`)
                 - Network issues during download
                 - Unpickling errors (incompatible Python versions, missing dependencies)
@@ -302,6 +311,13 @@ class Job:
         Examples:
             >>> job = submitter(x=42)
             >>> result = job.get_result()  # Blocks until complete
+
+            With timeout:
+
+            >>> try:
+            ...     result = job.get_result(timeout=300)  # 5 minutes max
+            ... except DownloadError as e:
+            ...     print(f"Failed or timed out: {e}")
 
             Handle potential failures:
 
@@ -316,7 +332,19 @@ class Job:
             then loads it. For local backends, it reads the file directly.
         """
         if not self.is_completed():
-            self.wait()
+            success = self.wait(timeout=timeout)
+            if not success:
+                from .errors import DownloadError
+
+                raise DownloadError(
+                    f"Job {self.id} did not complete successfully within timeout.\n"
+                    f"State: {self.get_status().get('JobState')}\n"
+                    + (
+                        f"Check job output in: {self.target_job_dir}"
+                        if self.target_job_dir
+                        else ""
+                    )
+                )
 
         status = self.get_status()
         if not self.is_successful():

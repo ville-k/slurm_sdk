@@ -3,7 +3,7 @@ This module provides the Cluster class for submitting and managing jobs on SLURM
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Tuple
+from typing import Any, Dict, List, Optional, Callable, Tuple, Union
 import sys
 import traceback
 import uuid
@@ -12,6 +12,8 @@ import os
 import re
 import time
 import threading
+import json
+from datetime import datetime
 
 from .job import Job
 from .api import create_backend
@@ -136,6 +138,40 @@ def _looks_like_path(value: str) -> bool:
         or value.startswith("~")
         or value.endswith(".toml")
     )
+
+
+def _generate_timestamp_id() -> tuple[str, str]:
+    """Generate timestamp and unique ID for hierarchical directory structure.
+
+    Returns:
+        tuple: (timestamp, unique_id) where timestamp is YYYYMMDD_HHMMSS format
+            and unique_id is an 8-character hex string.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_id = uuid.uuid4().hex[:8]
+    return timestamp, unique_id
+
+
+def _sanitize_task_name(name: str) -> str:
+    """Sanitize task name for filesystem use.
+
+    Args:
+        name: Raw task name.
+
+    Returns:
+        Sanitized task name safe for filesystem paths.
+
+    Examples:
+        >>> _sanitize_task_name("Train Model")
+        'train_model'
+        >>> _sanitize_task_name("model:v2")
+        'model_v2'
+    """
+    name = name.lower()
+    name = re.sub(r"[^\w\-]", "_", name)
+    name = re.sub(r"_+", "_", name)
+    name = name.strip("_")
+    return name or "task"
 
 
 class Cluster:
@@ -380,6 +416,9 @@ class Cluster:
         cluster_instance.packaging_defaults = environment.config.get(  # type: ignore[attr-defined]
             "packaging",
         )
+        cluster_instance.submit_defaults = environment.config.get(  # type: ignore[attr-defined]
+            "submit",
+        )
 
         return cluster_instance
 
@@ -387,6 +426,7 @@ class Cluster:
         self,
         task_func: SlurmTask,
         packaging_config: Optional[Dict[str, Any]] = None,
+        after: Optional[Union[Job, List[Job]]] = None,
         **sbatch_options,
     ) -> Callable[..., Job]:
         """Prepare a task for submission to the cluster.
@@ -410,6 +450,9 @@ class Cluster:
                 By default, uses packaging config from the Slurmfile or the task's
                 decorator. Common keys: `{"type": "wheel"}` or `{"type": "container",
                 "image": "myimage:latest"}`.
+            after: Job dependency. If provided, this task will wait for the specified
+                job(s) to complete successfully before running. Can be a single Job
+                or a list of Jobs. Creates an "afterok" dependency.
             **sbatch_options: SBATCH directive overrides (e.g., `account="myaccount"`,
                 `partition="gpu"`, `time="02:00:00"`). These override both the task
                 decorator's defaults and Slurmfile settings. Use underscores in
@@ -471,6 +514,21 @@ class Cluster:
         func_to_render: Callable
         task_defaults: Dict[str, Any] = {}
         normalized_overrides = normalize_sbatch_options(sbatch_options)
+
+        # Process dependency parameter (after)
+        if after is not None:
+            # Convert Job or List[Job] to dependency string
+            job_ids = []
+            if isinstance(after, list):
+                job_ids = [job.id for job in after]
+            else:
+                job_ids = [after.id]
+
+            # Create dependency string (afterok means after successful completion)
+            if job_ids:
+                dependency_str = "afterok:" + ":".join(job_ids)
+                normalized_overrides["dependency"] = dependency_str
+
         if not isinstance(task_func, SlurmTask):
             raise ValueError(
                 f"Expected SlurmTask instance, got {type(task_func).__name__}. "
@@ -562,7 +620,14 @@ class Cluster:
 
             packaging_strategy = _prepare_packaging()
 
-            pre_submission_id = uuid.uuid4().hex[:12]
+            # Generate timestamp and unique ID for hierarchical structure
+            timestamp, unique_id = _generate_timestamp_id()
+            pre_submission_id = f"{timestamp}_{unique_id}"
+
+            # Get task name and sanitize it
+            task_name = task_defaults.get("job_name", task_func.func.__name__)
+            sanitized_task_name = _sanitize_task_name(task_name)
+
             resolved_job_base_dir = getattr(self.backend, "job_base_dir", None)
             if resolved_job_base_dir is None:
                 import tempfile
@@ -575,12 +640,51 @@ class Cluster:
                     _os.makedirs(resolved_job_base_dir, exist_ok=True)
                 except Exception:
                     pass
-            target_job_dir = f"{resolved_job_base_dir}/{pre_submission_id}"
+
+            # Check if we're in a workflow context for nested structure
+            from .context import get_active_context
+            from .workflow import WorkflowContext
+
+            ctx = get_active_context()
+            if isinstance(ctx, WorkflowContext):
+                # Nested in workflow: {workflow_dir}/tasks/{task_name}/{timestamp}_{unique_id}/
+                target_job_dir = os.path.join(
+                    str(ctx.workflow_job_dir),
+                    "tasks",
+                    sanitized_task_name,
+                    f"{timestamp}_{unique_id}",
+                )
+            else:
+                # Regular task: {job_base_dir}/{task_name}/{timestamp}_{unique_id}/
+                target_job_dir = os.path.join(
+                    resolved_job_base_dir,
+                    sanitized_task_name,
+                    f"{timestamp}_{unique_id}",
+                )
             logger.debug(
                 "[%s] Target job directory path: %s", pre_submission_id, target_job_dir
             )
 
-            effective_sbatch_options: Dict[str, Any] = dict(task_defaults)
+            # Build effective SBATCH options with proper precedence:
+            # 1. Slurmfile [submit] defaults (lowest priority)
+            # 2. Task decorator defaults
+            # 3. Runtime overrides (highest priority)
+            effective_sbatch_options: Dict[str, Any] = {}
+
+            # Add Slurmfile submit defaults if available
+            slurmfile_submit_defaults = getattr(self, "submit_defaults", None)
+            if slurmfile_submit_defaults and isinstance(
+                slurmfile_submit_defaults, dict
+            ):
+                # Normalize the Slurmfile submit defaults
+                effective_sbatch_options.update(
+                    normalize_sbatch_options(slurmfile_submit_defaults)
+                )
+
+            # Add task defaults
+            effective_sbatch_options.update(task_defaults)
+
+            # Add runtime overrides
             effective_sbatch_options.update(submit_overrides)
 
             stdout_path = effective_sbatch_options.get("output")
@@ -623,6 +727,7 @@ class Cluster:
                 target_job_dir=target_job_dir,
                 pre_submission_id=pre_submission_id,
                 callbacks=self.callbacks,
+                cluster=self,  # Pass cluster for workflow support
             )
             logger.debug(
                 "[%s] --- RENDERED SBATCH SCRIPT ---\n%s\n[%s] --- END RENDERED SCRIPT ---",
@@ -631,8 +736,9 @@ class Cluster:
                 pre_submission_id,
             )
 
-            submit_account = normalized_overrides.get("account")
-            submit_partition = normalized_overrides.get("partition")
+            # Get account and partition from effective options (which includes Slurmfile defaults)
+            submit_account = effective_sbatch_options.get("account")
+            submit_partition = effective_sbatch_options.get("partition")
             logger.debug("[%s] submit_account: %s", pre_submission_id, submit_account)
             logger.debug(
                 "[%s] submit_partition: %s", pre_submission_id, submit_partition
@@ -686,6 +792,105 @@ class Cluster:
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
             )
+
+            # Generate metadata.json
+            is_workflow = getattr(task_func, "_is_workflow", False)
+            logger.debug(
+                "[%s] is_workflow=%s (from task_func attribute)",
+                pre_submission_id,
+                is_workflow,
+            )
+            metadata = {
+                "job_id": job_id,
+                "pre_submission_id": pre_submission_id,
+                "task_name": sanitized_task_name,
+                "timestamp": timestamp,
+                "submitted_at": time.time(),
+                "status": "PENDING",
+                "is_workflow": is_workflow,
+            }
+
+            # Check if we're in a workflow context (for parent_workflow tracking)
+            from .context import get_active_context
+            from .workflow import WorkflowContext
+
+            ctx = get_active_context()
+            if isinstance(ctx, WorkflowContext):
+                metadata["parent_workflow"] = ctx.workflow_job_id
+            else:
+                metadata["parent_workflow"] = None
+
+            # Write metadata file via backend
+            metadata_path = os.path.join(target_job_dir, "metadata.json")
+            try:
+                # For SSH backend, use _upload_string_to_file
+                if hasattr(self.backend, "_upload_string_to_file"):
+                    self.backend._upload_string_to_file(
+                        json.dumps(metadata, indent=2), metadata_path
+                    )
+                elif hasattr(self.backend, "write_file"):
+                    # Future: if we add a write_file() method to backends
+                    self.backend.write_file(
+                        metadata_path, json.dumps(metadata, indent=2)
+                    )
+                else:
+                    # For local backends, write directly
+                    import os as _os
+
+                    _os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+                    with open(metadata_path, "w") as f:
+                        json.dump(metadata, f, indent=2)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Failed to write metadata.json: %s", pre_submission_id, exc
+                )
+
+            # Upload Slurmfile for workflow support
+            logger.debug(
+                "[%s] Checking workflow Slurmfile upload: is_workflow=%s",
+                pre_submission_id,
+                is_workflow,
+            )
+            if is_workflow:
+                slurmfile_path = getattr(self, "slurmfile_path", None)
+                logger.debug(
+                    "[%s] slurmfile_path=%s, exists=%s",
+                    pre_submission_id,
+                    slurmfile_path,
+                    os.path.exists(slurmfile_path) if slurmfile_path else False,
+                )
+                if slurmfile_path and os.path.exists(slurmfile_path):
+                    try:
+                        with open(slurmfile_path, "r") as f:
+                            slurmfile_content = f.read()
+                        remote_slurmfile_path = os.path.join(
+                            target_job_dir, "Slurmfile.toml"
+                        )
+                        if hasattr(self.backend, "_upload_string_to_file"):
+                            self.backend._upload_string_to_file(
+                                slurmfile_content, remote_slurmfile_path
+                            )
+                            logger.debug(
+                                "[%s] Uploaded Slurmfile to %s",
+                                pre_submission_id,
+                                remote_slurmfile_path,
+                            )
+                        else:
+                            logger.warning(
+                                "[%s] Backend does not have _upload_string_to_file method",
+                                pre_submission_id,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] Failed to upload Slurmfile: %s",
+                            pre_submission_id,
+                            exc,
+                        )
+                else:
+                    logger.debug(
+                        "[%s] Skipping Slurmfile upload: path missing or doesn't exist",
+                        pre_submission_id,
+                    )
 
             submit_end_ctx = SubmitEndContext(
                 job=job,
@@ -905,3 +1110,40 @@ class Cluster:
             the backend implementation.
         """
         return self.backend.get_cluster_info()
+
+    def __enter__(self) -> "Cluster":
+        """Enter cluster context - enables submitless execution.
+
+        When used as a context manager, tasks and workflows can be called
+        directly without explicit .submit() calls. The context is tracked
+        using contextvars for async/thread safety.
+
+        Returns:
+            The Cluster instance itself.
+
+        Example:
+            >>> with Cluster.from_env() as cluster:
+            ...     job = my_task("arg")  # Automatically submits
+            ...     result = job.get_result()
+        """
+        from .context import set_active_context
+
+        self._context_token = set_active_context(self)
+        return self
+
+    def __exit__(self, *args) -> bool:
+        """Exit cluster context - restore previous context.
+
+        Args:
+            *args: Exception info (exc_type, exc_value, traceback) if an
+                exception occurred, or (None, None, None) for normal exit.
+
+        Returns:
+            False to propagate any exception that occurred.
+        """
+        from .context import reset_active_context
+
+        if hasattr(self, "_context_token"):
+            reset_active_context(self._context_token)
+            delattr(self, "_context_token")
+        return False
