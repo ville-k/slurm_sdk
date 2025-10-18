@@ -22,6 +22,7 @@ from slurm.callbacks.callbacks import (
     ExecutionLocus,
     RunBeginContext,
     RunEndContext,
+    WorkflowCallbackContext,
 )
 from slurm.runtime import (
     JobContext,
@@ -520,15 +521,61 @@ def main():
             logger.debug("Activating cluster context for workflow execution")
             workflow_context_token = set_active_context(workflow_context)
 
+            # Emit workflow begin event after context is set up
+            logger.debug("Calling on_workflow_begin callbacks...")
+            try:
+                from pathlib import Path
+
+                workflow_begin_ctx = WorkflowCallbackContext(
+                    workflow_job_id=job_id_env or "unknown",
+                    workflow_job_dir=Path(job_dir) if job_dir else Path.cwd(),
+                    workflow_name=args.function,
+                    workflow_context=workflow_context,
+                    timestamp=time.time(),
+                    cluster=None,  # Cluster not serializable/available in runner
+                )
+                _run_callbacks(callbacks, "on_workflow_begin_ctx", workflow_begin_ctx)
+            except Exception as e:
+                logger.warning(f"Error calling workflow begin callbacks: {e}")
+
         logger.info("Executing task")
-        result = func(*task_args, **task_kwargs)
 
-        # Deactivate cluster context if it was activated for a workflow
-        if workflow_context_token is not None:
-            from slurm.context import reset_active_context
+        # Execute and track result/exception for workflow end event
+        task_result = None
+        task_exception = None
+        try:
+            result = func(*task_args, **task_kwargs)
+            task_result = result
+        except Exception as e:
+            task_exception = e
+            raise
+        finally:
+            # Emit workflow end event if we activated workflow context
+            if workflow_context_token is not None:
+                logger.debug("Calling on_workflow_end callbacks...")
+                try:
+                    from pathlib import Path
 
-            reset_active_context(workflow_context_token)
-            logger.debug("Deactivated cluster context after workflow execution")
+                    workflow_end_ctx = WorkflowCallbackContext(
+                        workflow_job_id=job_id_env or "unknown",
+                        workflow_job_dir=Path(job_dir) if job_dir else Path.cwd(),
+                        workflow_name=args.function,
+                        workflow_context=workflow_context,
+                        timestamp=time.time(),
+                        result=task_result,
+                        exception=task_exception,
+                        cluster=None,
+                    )
+                    _run_callbacks(callbacks, "on_workflow_end_ctx", workflow_end_ctx)
+                except Exception as e:
+                    logger.warning(f"Error calling workflow end callbacks: {e}")
+
+            # Deactivate cluster context if it was activated for a workflow
+            if workflow_context_token is not None:
+                from slurm.context import reset_active_context
+
+                reset_active_context(workflow_context_token)
+                logger.debug("Deactivated cluster context after workflow execution")
         logger.info("Task execution complete")
 
         end_time = time.time()

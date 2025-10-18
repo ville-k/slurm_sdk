@@ -26,6 +26,7 @@ from .callbacks import (
     PackagingEndContext,
     SubmitBeginContext,
     SubmitEndContext,
+    WorkflowTaskSubmitContext,
 )
 from .task import SlurmTask, normalize_sbatch_options
 from .packaging import get_packaging_strategy
@@ -817,6 +818,42 @@ class Cluster:
             ctx = get_active_context()
             if isinstance(ctx, WorkflowContext):
                 metadata["parent_workflow"] = ctx.workflow_job_id
+
+                # Emit workflow task submission event
+                logger.debug("Calling on_workflow_task_submitted callbacks...")
+                try:
+                    from pathlib import Path as PathType
+
+                    submit_ctx = WorkflowTaskSubmitContext(
+                        parent_workflow_id=ctx.workflow_job_id,
+                        parent_workflow_dir=ctx.workflow_job_dir,
+                        parent_workflow_name=task_func.func.__name__
+                        if hasattr(task_func, "func")
+                        else str(ctx.workflow_job_id).split("_")[0],
+                        child_job_id=job_id,
+                        child_job_dir=PathType(target_job_dir),
+                        child_task_name=sanitized_task_name,
+                        child_is_workflow=is_workflow,
+                        timestamp=time.time(),
+                        cluster=self,
+                    )
+                    for callback in self.callbacks:
+                        if not callback.should_run_on_client(
+                            "on_workflow_task_submitted_ctx"
+                        ):
+                            continue
+                        try:
+                            callback.on_workflow_task_submitted_ctx(submit_ctx)
+                        except Exception as exc:
+                            logger.debug(
+                                "Callback %s failed in on_workflow_task_submitted_ctx: %s",
+                                type(callback).__name__,
+                                exc,
+                            )
+                except Exception as e:
+                    logger.warning(
+                        f"Error calling workflow task submitted callbacks: {e}"
+                    )
             else:
                 metadata["parent_workflow"] = None
 
@@ -863,15 +900,70 @@ class Cluster:
                     try:
                         with open(slurmfile_path, "r") as f:
                             slurmfile_content = f.read()
+
+                        # Modify Slurmfile for workflow execution inside cluster
+                        # Replace external hostname/port with internal cluster hostname and standard SSH port
+                        import re
+
+                        # Get environment name to modify the correct section
+                        env_name = getattr(self, "env_name", "default")
+
+                        # Determine the hostname to use inside the cluster
+                        # Query the actual cluster to get its hostname
+                        try:
+                            result = self.backend.execute_command("hostname")
+                            internal_hostname = result.strip()
+                            if not internal_hostname:
+                                internal_hostname = "localhost"
+                        except:
+                            internal_hostname = "localhost"
+
+                        # Create a workflow-specific Slurmfile with internal SSH config
+                        modified_content = slurmfile_content
+
+                        # Replace hostname value for SSH backend
+                        modified_content = re.sub(
+                            r'(hostname\s*=\s*)"[^"]*"',
+                            f'\\1"{internal_hostname}"',
+                            modified_content
+                        )
+
+                        # Replace port with standard SSH port 22
+                        modified_content = re.sub(
+                            r'(\bport\s*=\s*)\d+',
+                            r'\g<1>22',
+                            modified_content
+                        )
+
+                        # Remove password authentication, use key-based
+                        modified_content = re.sub(
+                            r'password\s*=\s*"[^"]*"\s*\n',
+                            '',
+                            modified_content
+                        )
+
+                        # Enable key-based authentication
+                        modified_content = re.sub(
+                            r'look_for_keys\s*=\s*false',
+                            'look_for_keys = true',
+                            modified_content
+                        )
+
+                        logger.debug(
+                            "[%s] Modified Slurmfile for workflow: hostname=%s, port=22, key-based auth",
+                            pre_submission_id,
+                            internal_hostname,
+                        )
+
                         remote_slurmfile_path = os.path.join(
                             target_job_dir, "Slurmfile.toml"
                         )
                         if hasattr(self.backend, "_upload_string_to_file"):
                             self.backend._upload_string_to_file(
-                                slurmfile_content, remote_slurmfile_path
+                                modified_content, remote_slurmfile_path
                             )
                             logger.debug(
-                                "[%s] Uploaded Slurmfile to %s",
+                                "[%s] Uploaded modified Slurmfile to %s",
                                 pre_submission_id,
                                 remote_slurmfile_path,
                             )

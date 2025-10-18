@@ -172,9 +172,6 @@ def render_job_script(
     script_lines.append('echo "Running on host: $(hostname)"')
     script_lines.append('echo "Working directory: $(pwd)"')
     script_lines.append('echo "Job output directory JOB_DIR: $JOB_DIR"')
-    script_lines.append(
-        "echo \"Python version: $(python --version || echo 'Python not found')\""
-    )
     script_lines.append("")
 
     try:

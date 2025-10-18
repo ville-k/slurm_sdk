@@ -20,9 +20,11 @@ except Exception:  # pragma: no cover - fallback for minimal environments
     TextColumn = None  # type: ignore
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    from pathlib import Path
     from ..cluster import Cluster
     from ..job import Job
     from ..packaging import PackagingStrategy
+    from ..workflow import WorkflowContext
 
 
 class ExecutionLocus(str, Enum):
@@ -158,6 +160,59 @@ class CompletedContext:
     job_context: Optional[JobContext] = None
 
 
+@dataclass
+class WorkflowCallbackContext:
+    """Context for workflow lifecycle events (begin/end).
+
+    Emitted when a workflow orchestrator starts or completes execution.
+    This is distinct from the regular job lifecycle events that also fire
+    for the workflow job itself.
+    """
+
+    # Workflow identification
+    workflow_job_id: str
+    workflow_job_dir: "Path"
+    workflow_name: str  # Task function name
+
+    # Workflow context (if available)
+    workflow_context: Optional["WorkflowContext"]
+
+    # Timing
+    timestamp: float
+
+    # Result (on_workflow_end only)
+    result: Optional[Any] = None
+    exception: Optional[Exception] = None
+
+    # Cluster reference (may be None in runner context)
+    cluster: Optional["Cluster"] = None
+
+
+@dataclass
+class WorkflowTaskSubmitContext:
+    """Context for child task submission events.
+
+    Emitted when a workflow submits a child task (which may itself be
+    a workflow). Enables tracking of parent-child relationships and
+    orchestration progress.
+    """
+
+    # Parent workflow info
+    parent_workflow_id: str
+    parent_workflow_dir: "Path"
+    parent_workflow_name: str
+
+    # Child task info
+    child_job_id: str
+    child_job_dir: "Path"
+    child_task_name: str
+    child_is_workflow: bool  # True if child is also a workflow
+
+    # Timing and cluster
+    timestamp: float
+    cluster: "Cluster"
+
+
 _DEFAULT_HOOK_LOCI: Dict[str, ExecutionLocus] = {
     "on_begin_package_ctx": ExecutionLocus.CLIENT,
     "on_end_package_ctx": ExecutionLocus.CLIENT,
@@ -167,12 +222,17 @@ _DEFAULT_HOOK_LOCI: Dict[str, ExecutionLocus] = {
     "on_begin_run_job_ctx": ExecutionLocus.RUNNER,
     "on_end_run_job_ctx": ExecutionLocus.RUNNER,
     "on_completed_ctx": ExecutionLocus.BOTH,
+    "on_workflow_begin_ctx": ExecutionLocus.RUNNER,
+    "on_workflow_end_ctx": ExecutionLocus.RUNNER,
+    "on_workflow_task_submitted_ctx": ExecutionLocus.CLIENT,
 }
 
 _RUNNER_HOOKS: Tuple[str, ...] = (
     "on_begin_run_job_ctx",
     "on_end_run_job_ctx",
     "on_completed_ctx",
+    "on_workflow_begin_ctx",
+    "on_workflow_end_ctx",
 )
 
 
@@ -223,6 +283,45 @@ class BaseCallback:
     ) -> None:  # pragma: no cover - default no-op
         pass
 
+    def on_workflow_begin_ctx(
+        self, ctx: WorkflowCallbackContext
+    ) -> None:  # pragma: no cover - default no-op
+        """Called when workflow orchestrator starts execution.
+
+        This fires AFTER on_begin_run_job_ctx for the workflow job itself.
+        Marks the point where WorkflowContext is created and orchestration begins.
+
+        Args:
+            ctx: Workflow-specific callback context
+        """
+        pass
+
+    def on_workflow_end_ctx(
+        self, ctx: WorkflowCallbackContext
+    ) -> None:  # pragma: no cover - default no-op
+        """Called when workflow orchestrator completes execution.
+
+        This fires BEFORE on_end_run_job_ctx for the workflow job itself.
+        Marks the point where orchestration is complete and result is ready.
+
+        Args:
+            ctx: Workflow-specific callback context with result info
+        """
+        pass
+
+    def on_workflow_task_submitted_ctx(
+        self, ctx: WorkflowTaskSubmitContext
+    ) -> None:  # pragma: no cover - default no-op
+        """Called when workflow submits a child task.
+
+        Fires immediately after a task/workflow is submitted from within
+        a workflow context. Enables tracking of parent-child relationships.
+
+        Args:
+            ctx: Context with parent workflow and child task info
+        """
+        pass
+
     def get_execution_locus(self, hook_name: str) -> ExecutionLocus:
         if hook_name in self.execution_loci:
             return ExecutionLocus(self.execution_loci[hook_name])
@@ -269,6 +368,8 @@ class LoggerCallback(BaseCallback):
             self.poll_interval_secs = poll_interval
 
         self._last_state: Optional[str] = None
+        # Track workflow nesting depth for indented logging
+        self._workflow_depth: Dict[str, int] = {}
 
     def on_begin_package_ctx(self, ctx: PackagingBeginContext) -> None:
         task_name = getattr(ctx.task, "sbatch_options", {}).get(
@@ -338,6 +439,60 @@ class LoggerCallback(BaseCallback):
             "Job %s finished with state=%s exit=%s", ctx.job_id, state, exit_code
         )
 
+    def on_workflow_begin_ctx(self, ctx: WorkflowCallbackContext) -> None:
+        """Log workflow orchestration start."""
+        # Determine nesting depth (root workflows start at 0)
+        parent_depth = 0
+        if ctx.workflow_context and hasattr(ctx.workflow_context, "workflow_job_id"):
+            # Check if this is a nested workflow by looking for parent
+            parent_id = getattr(ctx.workflow_context, "parent_workflow_id", None)
+            if parent_id and parent_id in self._workflow_depth:
+                parent_depth = self._workflow_depth[parent_id] + 1
+
+        self._workflow_depth[ctx.workflow_job_id] = parent_depth
+        indent = "  " * parent_depth
+
+        self.logger.info(
+            "%s[Workflow] '%s' started (job_id=%s)",
+            indent,
+            ctx.workflow_name,
+            ctx.workflow_job_id,
+        )
+
+    def on_workflow_task_submitted_ctx(self, ctx: WorkflowTaskSubmitContext) -> None:
+        """Log child task submission."""
+        parent_depth = self._workflow_depth.get(ctx.parent_workflow_id, 0)
+        indent = "  " * (parent_depth + 1)
+        task_type = "workflow" if ctx.child_is_workflow else "task"
+
+        self.logger.info(
+            "%s[%s] -> %s '%s' (job_id=%s)",
+            indent,
+            ctx.parent_workflow_name,
+            task_type,
+            ctx.child_task_name,
+            ctx.child_job_id,
+        )
+
+        # Track child workflow depth
+        if ctx.child_is_workflow:
+            self._workflow_depth[ctx.child_job_id] = parent_depth + 1
+
+    def on_workflow_end_ctx(self, ctx: WorkflowCallbackContext) -> None:
+        """Log workflow orchestration completion."""
+        parent_depth = self._workflow_depth.get(ctx.workflow_job_id, 0)
+        indent = "  " * parent_depth
+
+        if ctx.exception:
+            self.logger.error(
+                "%s[Workflow] '%s' failed: %s",
+                indent,
+                ctx.workflow_name,
+                ctx.exception,
+            )
+        else:
+            self.logger.info("%s[Workflow] '%s' completed", indent, ctx.workflow_name)
+
 
 class RichLoggerCallback(BaseCallback):
     """Log lifecycle transitions with rich progress bars and formatted output.
@@ -377,6 +532,8 @@ class RichLoggerCallback(BaseCallback):
         self._job_label: Optional[str] = None
         self._last_state: Optional[str] = None
         self._phase: Optional[str] = None
+        # Track workflow nesting depth for indented logging
+        self._workflow_depth: Dict[str, int] = {}
 
     def _ensure_progress(self) -> None:
         """Create and start the progress display if not already running."""
@@ -541,13 +698,92 @@ class RichLoggerCallback(BaseCallback):
                 f"[yellow]Job {ctx.job_id}[/yellow] finished with state={state} exit={exit_code}"
             )
 
+    def on_workflow_begin_ctx(self, ctx: WorkflowCallbackContext) -> None:
+        """Log workflow orchestration start with rich formatting."""
+        # Determine nesting depth (root workflows start at 0)
+        parent_depth = 0
+        if ctx.workflow_context and hasattr(ctx.workflow_context, "workflow_job_id"):
+            # Check if this is a nested workflow by looking for parent
+            parent_id = getattr(ctx.workflow_context, "parent_workflow_id", None)
+            if parent_id and parent_id in self._workflow_depth:
+                parent_depth = self._workflow_depth[parent_id] + 1
+
+        self._workflow_depth[ctx.workflow_job_id] = parent_depth
+        indent = "  " * parent_depth
+
+        self._log(
+            f"{indent}🔵 [bold blue]Workflow[/bold blue] '{ctx.workflow_name}' started "
+            f"(job_id={ctx.workflow_job_id})"
+        )
+
+    def on_workflow_task_submitted_ctx(self, ctx: WorkflowTaskSubmitContext) -> None:
+        """Log child task submission with rich formatting."""
+        parent_depth = self._workflow_depth.get(ctx.parent_workflow_id, 0)
+        indent = "  " * (parent_depth + 1)
+
+        if ctx.child_is_workflow:
+            icon = "🔵"
+            task_type = "[bold blue]workflow[/bold blue]"
+        else:
+            icon = "⚪"
+            task_type = "[dim]task[/dim]"
+
+        self._log(
+            f"{indent}{icon} [{ctx.parent_workflow_name}] → {task_type} "
+            f"'{ctx.child_task_name}' (job_id={ctx.child_job_id})"
+        )
+
+        # Track child workflow depth
+        if ctx.child_is_workflow:
+            self._workflow_depth[ctx.child_job_id] = parent_depth + 1
+
+    def on_workflow_end_ctx(self, ctx: WorkflowCallbackContext) -> None:
+        """Log workflow orchestration completion with rich formatting."""
+        parent_depth = self._workflow_depth.get(ctx.workflow_job_id, 0)
+        indent = "  " * parent_depth
+
+        if ctx.exception:
+            self._log(
+                f"{indent}❌ [bold red]Workflow[/bold red] '{ctx.workflow_name}' failed: "
+                f"{ctx.exception}"
+            )
+        else:
+            self._log(
+                f"{indent}✅ [bold green]Workflow[/bold green] '{ctx.workflow_name}' completed"
+            )
+
 
 class BenchmarkCallback(BaseCallback):
-    """A callback that measures high-level durations."""
+    """A callback that measures performance metrics and timing for tasks and workflows.
+
+    This callback tracks:
+    - Task-level timing (packaging, submission, execution)
+    - Workflow orchestration overhead
+    - Child task submission rate
+    - Parallel vs sequential execution patterns
+    - End-to-end workflow duration
+
+    Example:
+        >>> from slurm import Cluster
+        >>> from slurm.callbacks import BenchmarkCallback
+        >>>
+        >>> benchmark = BenchmarkCallback()
+        >>> cluster = Cluster.from_env(callbacks=[benchmark])
+        >>>
+        >>> # After workflow completes
+        >>> metrics = benchmark.get_workflow_metrics("workflow_job_id")
+        >>> print(f"Orchestration overhead: {metrics['orchestration_overhead_ms']:.2f}ms")
+        >>> print(f"Child tasks submitted: {metrics['child_count']}")
+        >>> print(f"Average submission interval: {metrics['avg_submission_interval_ms']:.2f}ms")
+    """
 
     def __init__(self) -> None:
         self._timestamps: Dict[str, float] = {}
         self.logger = logging.getLogger(__name__)
+
+        # Workflow-specific tracking
+        self._workflows: Dict[str, Dict[str, Any]] = {}
+        self._child_to_parent: Dict[str, str] = {}
 
     def on_begin_package_ctx(self, ctx: PackagingBeginContext) -> None:
         self._timestamps["package"] = ctx.timestamp
@@ -577,6 +813,158 @@ class BenchmarkCallback(BaseCallback):
         if ctx.start_time is not None and ctx.end_time is not None:
             self.logger.info("Total elapsed time: %.2fs", ctx.end_time - ctx.start_time)
 
+        # Track child task completion for workflow metrics
+        if ctx.job_id and ctx.job_id in self._child_to_parent:
+            parent_id = self._child_to_parent[ctx.job_id]
+            if parent_id in self._workflows:
+                wf_data = self._workflows[parent_id]
+                wf_data["completed_count"] += 1
+                if ctx.duration:
+                    wf_data["child_durations"].append(ctx.duration)
+
+    def on_workflow_begin_ctx(self, ctx: WorkflowCallbackContext) -> None:
+        """Track workflow orchestration start."""
+        self._workflows[ctx.workflow_job_id] = {
+            "name": ctx.workflow_name,
+            "start_time": ctx.timestamp,
+            "end_time": None,
+            "child_count": 0,
+            "completed_count": 0,
+            "submission_times": [],
+            "child_durations": [],
+        }
+
+    def on_workflow_task_submitted_ctx(self, ctx: WorkflowTaskSubmitContext) -> None:
+        """Track child task submissions for throughput analysis."""
+        if ctx.parent_workflow_id in self._workflows:
+            wf_data = self._workflows[ctx.parent_workflow_id]
+            wf_data["child_count"] += 1
+            wf_data["submission_times"].append(ctx.timestamp)
+            self._child_to_parent[ctx.child_job_id] = ctx.parent_workflow_id
+
+    def on_workflow_end_ctx(self, ctx: WorkflowCallbackContext) -> None:
+        """Calculate and report workflow performance metrics."""
+        wf_data = self._workflows.get(ctx.workflow_job_id)
+        if wf_data:
+            wf_data["end_time"] = ctx.timestamp
+            duration = ctx.timestamp - wf_data["start_time"]
+
+            # Calculate orchestration overhead (time between submissions)
+            submission_times = wf_data["submission_times"]
+            if len(submission_times) >= 2:
+                intervals = [
+                    (submission_times[i] - submission_times[i - 1]) * 1000  # ms
+                    for i in range(1, len(submission_times))
+                ]
+                avg_interval = sum(intervals) / len(intervals)
+                max_interval = max(intervals)
+                min_interval = min(intervals)
+
+                self.logger.info(
+                    "[Workflow] '%s' orchestration metrics:",
+                    wf_data["name"],
+                )
+                self.logger.info("  Duration: %.2fs", duration)
+                self.logger.info("  Child tasks: %d", wf_data["child_count"])
+                self.logger.info("  Avg submission interval: %.2fms", avg_interval)
+                self.logger.info(
+                    "  Min/Max interval: %.2fms / %.2fms", min_interval, max_interval
+                )
+
+                # Calculate throughput
+                if duration > 0:
+                    throughput = wf_data["child_count"] / duration
+                    self.logger.info(
+                        "  Submission throughput: %.2f tasks/sec", throughput
+                    )
+            else:
+                self.logger.info(
+                    "[Workflow] '%s' completed in %.2fs (%d child tasks)",
+                    wf_data["name"],
+                    duration,
+                    wf_data["child_count"],
+                )
+
+            # Report child task duration statistics
+            if wf_data["child_durations"]:
+                durations = wf_data["child_durations"]
+                avg_duration = sum(durations) / len(durations)
+                max_duration = max(durations)
+                min_duration = min(durations)
+                self.logger.info(
+                    "  Child task durations: avg=%.2fs min=%.2fs max=%.2fs",
+                    avg_duration,
+                    min_duration,
+                    max_duration,
+                )
+
+    def get_workflow_metrics(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+        """Get detailed performance metrics for a workflow.
+
+        Args:
+            workflow_id: The workflow job ID
+
+        Returns:
+            Dictionary with workflow performance metrics, or None if not found.
+            Includes:
+            - name: Workflow name
+            - duration_seconds: Total workflow duration
+            - child_count: Number of child tasks submitted
+            - completed_count: Number of child tasks completed
+            - orchestration_overhead_ms: Average time between submissions
+            - submission_throughput: Tasks submitted per second
+            - child_avg_duration: Average child task execution time
+        """
+        wf_data = self._workflows.get(workflow_id)
+        if not wf_data:
+            return None
+
+        metrics: Dict[str, Any] = {
+            "name": wf_data["name"],
+            "child_count": wf_data["child_count"],
+            "completed_count": wf_data["completed_count"],
+        }
+
+        # Duration metrics
+        if wf_data["end_time"]:
+            duration = wf_data["end_time"] - wf_data["start_time"]
+            metrics["duration_seconds"] = duration
+
+            if wf_data["child_count"] > 0 and duration > 0:
+                metrics["submission_throughput"] = wf_data["child_count"] / duration
+
+        # Orchestration overhead
+        submission_times = wf_data["submission_times"]
+        if len(submission_times) >= 2:
+            intervals = [
+                (submission_times[i] - submission_times[i - 1]) * 1000
+                for i in range(1, len(submission_times))
+            ]
+            metrics["orchestration_overhead_ms"] = sum(intervals) / len(intervals)
+            metrics["min_submission_interval_ms"] = min(intervals)
+            metrics["max_submission_interval_ms"] = max(intervals)
+
+        # Child task duration stats
+        if wf_data["child_durations"]:
+            durations = wf_data["child_durations"]
+            metrics["child_avg_duration"] = sum(durations) / len(durations)
+            metrics["child_min_duration"] = min(durations)
+            metrics["child_max_duration"] = max(durations)
+
+        return metrics
+
+    def get_all_workflow_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Get performance metrics for all tracked workflows.
+
+        Returns:
+            Dictionary mapping workflow_id to metrics dict
+        """
+        return {
+            wf_id: self.get_workflow_metrics(wf_id)
+            for wf_id in self._workflows
+            if self.get_workflow_metrics(wf_id) is not None
+        }
+
 
 __all__ = [
     "BaseCallback",
@@ -592,4 +980,6 @@ __all__ = [
     "RunEndContext",
     "SubmitBeginContext",
     "SubmitEndContext",
+    "WorkflowCallbackContext",
+    "WorkflowTaskSubmitContext",
 ]

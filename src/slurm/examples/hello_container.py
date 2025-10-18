@@ -52,8 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--env",
-        default="local",
-        help=("Environment key within the Slurmfile to load (defaults to 'local')."),
+        default="default",
+        help=("Environment key within the Slurmfile to load (defaults to 'default')."),
     )
     return parser
 

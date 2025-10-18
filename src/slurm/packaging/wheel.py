@@ -222,11 +222,11 @@ class WheelPackagingStrategy(PackagingStrategy):
         # Installation
         commands.append("echo 'Installing wheel and dependencies using pip...'")
         if self.upgrade_pip:
-            commands.append("python -m pip install --upgrade pip")
-        install_cmd = f"python -m pip install {extra_index_cmd} {install_wheel_path}{extras_str} {deps_str}"
+            commands.append('"$PY_EXEC" -m pip install --upgrade pip')
+        install_cmd = f'"$PY_EXEC" -m pip install {extra_index_cmd} {install_wheel_path}{extras_str} {deps_str}'
         commands.append(install_cmd.strip())
 
-        commands.append("echo 'Installation complete. Python: $(which python)'")
+        commands.append('echo "Installation complete. Python: $(which \\"$PY_EXEC\\")"')
         commands.append("echo '--- Environment Setup Complete ---'")
 
         return commands

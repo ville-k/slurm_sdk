@@ -12,6 +12,8 @@ from .callbacks import (
     RunEndContext,
     SubmitBeginContext,
     SubmitEndContext,
+    WorkflowCallbackContext,
+    WorkflowTaskSubmitContext,
 )
 
 __all__ = [
@@ -28,4 +30,6 @@ __all__ = [
     "RunEndContext",
     "SubmitBeginContext",
     "SubmitEndContext",
+    "WorkflowCallbackContext",
+    "WorkflowTaskSubmitContext",
 ]
