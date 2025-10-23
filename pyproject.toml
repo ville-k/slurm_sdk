@@ -1,6 +1,6 @@
 [project]
 name = "slurm-sdk"
-version = "0.2.0"
+version = "0.3.0"
 description = "Pythonic SDK for Slurm."
 readme = "README.md"
 license = "MIT"
