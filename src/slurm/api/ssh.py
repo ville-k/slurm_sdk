@@ -761,6 +761,39 @@ class SSHCommandBackend(BackendBase):
             raise RuntimeError("Job base directory not resolved yet.")
         return self.job_base_dir
 
+    def read_file(self, remote_path: str) -> str:
+        """
+        Read a file from the remote host.
+
+        Args:
+            remote_path: The path to the remote file.
+
+        Returns:
+            str: The file contents as a string.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            RuntimeError: If the read operation fails.
+        """
+        try:
+            logger.debug(f"Reading remote file: {remote_path}")
+            sftp = self._get_sftp_client()
+
+            with sftp.open(remote_path, "r") as remote_file:
+                content = remote_file.read().decode("utf-8")
+
+            logger.debug(f"Successfully read {len(content)} bytes from {remote_path}")
+            return content
+
+        except IOError as e:
+            # Paramiko raises IOError for file not found
+            if e.errno == 2:  # ENOENT - No such file or directory
+                raise FileNotFoundError(f"Remote file not found: {remote_path}") from e
+            raise RuntimeError(f"Failed to read file {remote_path}: {e}") from e
+        except Exception as e:
+            logger.error(f"Error reading file {remote_path}: {e}")
+            raise RuntimeError(f"Failed to read file {remote_path}: {e}") from e
+
     def _resolve_remote_path(self, path: str) -> str:
         """Resolves a path (potentially containing ~) on the remote host."""
         if not path:

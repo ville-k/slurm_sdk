@@ -20,13 +20,13 @@ def add_task(a: int, b: int) -> int:
     return a + b
 
 
-@workflow(time="00:05:00", cpus_per_task=1, mem="100M")
+@workflow(time="00:10:00", cpus_per_task=1, mem="100M")
 def simple_workflow(value: int, ctx: WorkflowContext):
     """A simple workflow that orchestrates tasks."""
     job1 = simple_task(value)
-    job2 = simple_task(value + 1)
-
     result1 = job1.get_result()
+
+    job2 = simple_task(value + 1)
     result2 = job2.get_result()
 
     # Combine results
@@ -34,14 +34,14 @@ def simple_workflow(value: int, ctx: WorkflowContext):
     return final_job.get_result()
 
 
-@workflow(time="00:03:00")
+@workflow(time="00:05:00", cpus_per_task=1, mem="100M")
 def inner_workflow(x: int, ctx: WorkflowContext):
     """Inner workflow."""
     job = simple_task(x)
     return job.get_result()
 
 
-@workflow(time="00:05:00")
+@workflow(time="00:08:00", cpus_per_task=1, mem="100M")
 def outer_workflow(x: int, ctx: WorkflowContext):
     """Outer workflow that calls inner workflow."""
     inner_job = inner_workflow(x)
@@ -52,32 +52,32 @@ def outer_workflow(x: int, ctx: WorkflowContext):
     return final_job.get_result()
 
 
-@task(time="00:01:00")
+@task(time="00:01:00", cpus_per_task=1, mem="100M")
 def failing_task() -> int:
     """A task that always fails."""
     raise ValueError("Intentional failure for testing")
 
 
-@workflow(time="00:03:00")
+@workflow(time="00:05:00", cpus_per_task=1, mem="100M")
 def failing_workflow(ctx: WorkflowContext):
     """A workflow with a failing task."""
     job = failing_task()
     return job.get_result()
 
 
-@task(time="00:01:00")
+@task(time="00:01:00", cpus_per_task=1, mem="100M")
 def quick_task(x: int) -> int:
     """A very quick task."""
     return x + 1
 
 
-@workflow(time="00:05:00")
+@workflow(time="00:08:00", cpus_per_task=1, mem="100M")
 def sequential_workflow(start: int, ctx: WorkflowContext):
     """Submit tasks sequentially to test submission throughput."""
-    jobs = []
+    results = []
     for i in range(5):
         job = quick_task(start + i)
-        jobs.append(job)
+        result = job.get_result()
+        results.append(result)
 
-    results = [j.get_result() for j in jobs]
     return sum(results)

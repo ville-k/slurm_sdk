@@ -31,28 +31,33 @@ def test_workflow_with_callbacks(slurm_cluster):
 
     # Submit workflow
     job = slurm_cluster.submit(simple_workflow)(5)
-    result = job.wait(timeout=180, poll_interval=5)
+    job.wait(timeout=180, poll_interval=5)
+    result = job.get_result()
 
     # If job failed, fetch and print logs for debugging
     if not job.is_successful():
         status = job.get_status()
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print(f"JOB FAILED - Status: {status}")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
 
         # Try to fetch stdout
-        if hasattr(job, 'stdout_path') and job.stdout_path:
+        if hasattr(job, "stdout_path") and job.stdout_path:
             try:
-                stdout_content = slurm_cluster.backend.execute_command(f"cat {job.stdout_path}")
+                stdout_content = slurm_cluster.backend.execute_command(
+                    f"cat {job.stdout_path}"
+                )
                 print(f"\n--- STDOUT ({job.stdout_path}) ---")
                 print(stdout_content)
             except Exception as e:
                 print(f"Could not read stdout: {e}")
 
         # Try to fetch stderr
-        if hasattr(job, 'stderr_path') and job.stderr_path:
+        if hasattr(job, "stderr_path") and job.stderr_path:
             try:
-                stderr_content = slurm_cluster.backend.execute_command(f"cat {job.stderr_path}")
+                stderr_content = slurm_cluster.backend.execute_command(
+                    f"cat {job.stderr_path}"
+                )
                 print(f"\n--- STDERR ({job.stderr_path}) ---")
                 print(stderr_content)
             except Exception as e:
@@ -66,7 +71,9 @@ def test_workflow_with_callbacks(slurm_cluster):
             print(ls_output)
 
             # Check Slurmfile content
-            slurmfile_content = slurm_cluster.backend.execute_command(f"cat {job_dir}/Slurmfile.toml")
+            slurmfile_content = slurm_cluster.backend.execute_command(
+                f"cat {job_dir}/Slurmfile.toml"
+            )
             print(f"\n--- Slurmfile.toml Content ---")
             print(slurmfile_content)
 
@@ -96,7 +103,7 @@ def test_workflow_with_callbacks(slurm_cluster):
         except Exception as e:
             print(f"Could not check files: {e}")
 
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
     # Check result
     assert job.is_successful(), f"Job failed: {job.get_status()}"
@@ -135,7 +142,8 @@ def test_nested_workflow_with_callbacks(slurm_cluster):
 
     # Submit outer workflow
     job = slurm_cluster.submit(outer_workflow)(7)
-    result = job.wait(timeout=300, poll_interval=5)
+    job.wait(timeout=300, poll_interval=5)
+    result = job.get_result()
 
     # Check result: simple_task(7) = 14, add_task(14, 10) = 24
     assert job.is_successful()
@@ -168,11 +176,15 @@ def test_workflow_exception_handling(slurm_cluster):
     # Submit workflow (should fail)
     job = slurm_cluster.submit(failing_workflow)()
 
-    with pytest.raises(Exception):
-        job.wait(timeout=180, poll_interval=5)
+    # Wait for job to complete
+    job.wait(timeout=400, poll_interval=5)
 
     # Job should not be successful
     assert not job.is_successful()
+
+    # get_result() should raise an exception
+    with pytest.raises(Exception):
+        job.get_result()
 
     # Benchmark should still have tracked the workflow
     metrics = benchmark.get_workflow_metrics(job.id)
@@ -193,7 +205,8 @@ def test_benchmark_callback_metrics_accuracy(slurm_cluster):
 
     # Submit workflow
     job = slurm_cluster.submit(sequential_workflow)(10)
-    result = job.wait(timeout=300, poll_interval=5)
+    job.wait(timeout=300, poll_interval=5)
+    result = job.get_result()
 
     # Check result: (11 + 12 + 13 + 14 + 15) = 65
     assert result == 65
@@ -210,12 +223,16 @@ def test_benchmark_callback_metrics_accuracy(slurm_cluster):
 
     # Check orchestration overhead metrics
     if "orchestration_overhead_ms" in metrics:
-        print(f"Average submission interval: {metrics['orchestration_overhead_ms']:.2f}ms")
+        print(
+            f"Average submission interval: {metrics['orchestration_overhead_ms']:.2f}ms"
+        )
         assert metrics["orchestration_overhead_ms"] > 0
 
     # Check throughput
     if "submission_throughput" in metrics:
-        print(f"Submission throughput: {metrics['submission_throughput']:.2f} tasks/sec")
+        print(
+            f"Submission throughput: {metrics['submission_throughput']:.2f} tasks/sec"
+        )
         assert metrics["submission_throughput"] > 0
 
     print(f"\nWorkflow performance metrics:")

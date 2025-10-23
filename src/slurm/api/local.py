@@ -52,9 +52,7 @@ class LocalBackend(BackendBase):
         self._raw_job_base_dir = job_base_dir or "~/slurm_jobs"
         self.job_base_dir = self._resolve_path(self._raw_job_base_dir)
 
-        logger.debug(
-            "LocalBackend using job base directory: %s", self.job_base_dir
-        )
+        logger.debug("LocalBackend using job base directory: %s", self.job_base_dir)
 
         # Create the base job directory if it doesn't exist
         os.makedirs(self.job_base_dir, exist_ok=True)
@@ -172,10 +170,7 @@ class LocalBackend(BackendBase):
 
         # Write script to temporary file
         with tempfile.NamedTemporaryFile(
-            mode='w',
-            suffix='.sh',
-            delete=False,
-            newline='\n'
+            mode="w", suffix=".sh", delete=False, newline="\n"
         ) as f:
             f.write(script)
             script_path = f.name
@@ -185,29 +180,26 @@ class LocalBackend(BackendBase):
             os.chmod(script_path, 0o755)
 
             # Build sbatch command
-            sbatch_cmd_parts = [
-                'sbatch',
-                f'--chdir={shlex.quote(target_job_dir)}'
-            ]
+            sbatch_cmd_parts = ["sbatch", f"--chdir={shlex.quote(target_job_dir)}"]
 
             if account:
-                sbatch_cmd_parts.append(f'--account={shlex.quote(account)}')
+                sbatch_cmd_parts.append(f"--account={shlex.quote(account)}")
             if partition:
-                sbatch_cmd_parts.append(f'--partition={shlex.quote(partition)}')
+                sbatch_cmd_parts.append(f"--partition={shlex.quote(partition)}")
 
             sbatch_cmd_parts.append(shlex.quote(script_path))
-            sbatch_cmd = ' '.join(sbatch_cmd_parts)
+            sbatch_cmd = " ".join(sbatch_cmd_parts)
 
             logger.debug("Submitting with command: %s", sbatch_cmd)
-            logger.debug("--- BEGIN SCRIPT CONTENT ---\n%s\n--- END SCRIPT CONTENT ---", script)
+            logger.debug(
+                "--- BEGIN SCRIPT CONTENT ---\n%s\n--- END SCRIPT CONTENT ---", script
+            )
 
             # Execute sbatch
             stdout, stderr, return_code = self._run_command(sbatch_cmd, check=False)
 
             if return_code != 0:
-                raise RuntimeError(
-                    f"Failed to submit job: {stderr}"
-                )
+                raise RuntimeError(f"Failed to submit job: {stderr}")
 
             # Parse job ID from output
             match = re.search(r"Submitted batch job (\d+)", stdout)
@@ -242,8 +234,7 @@ class LocalBackend(BackendBase):
         """
         try:
             stdout, stderr, return_code = self._run_command(
-                f"scontrol show job {job_id}",
-                check=False
+                f"scontrol show job {job_id}", check=False
             )
 
             logger.debug("Job status stdout: %s", stdout)
@@ -298,8 +289,7 @@ class LocalBackend(BackendBase):
         logger.debug("Cancelling job: %s", job_id)
 
         stdout, stderr, return_code = self._run_command(
-            f"scancel {job_id}",
-            check=False
+            f"scancel {job_id}", check=False
         )
 
         if return_code != 0:
@@ -320,8 +310,7 @@ class LocalBackend(BackendBase):
         """
         try:
             stdout, stderr, return_code = self._run_command(
-                "squeue -h -o '%A|%j|%T|%u|%M|%l|%P|%a'",
-                check=False
+                "squeue -h -o '%A|%j|%T|%u|%M|%l|%P|%a'", check=False
             )
 
             if return_code != 0:
@@ -381,8 +370,7 @@ class LocalBackend(BackendBase):
         """
         try:
             stdout, stderr, return_code = self._run_command(
-                "sinfo -h -o '%R|%a|%l|%D|%T'",
-                check=False
+                "sinfo -h -o '%R|%a|%l|%D|%T'", check=False
             )
 
             if return_code != 0:
@@ -439,3 +427,32 @@ class LocalBackend(BackendBase):
             )
 
         return stdout
+
+    def read_file(self, file_path: str) -> str:
+        """
+        Read a file from the local filesystem.
+
+        Args:
+            file_path: The path to the file to read
+
+        Returns:
+            str: The file contents as a string
+
+        Raises:
+            FileNotFoundError: If the file does not exist
+            RuntimeError: If the read operation fails
+        """
+        try:
+            logger.debug(f"Reading local file: {file_path}")
+
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            logger.debug(f"Successfully read {len(content)} bytes from {file_path}")
+            return content
+
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"File not found: {file_path}") from e
+        except Exception as e:
+            logger.error(f"Error reading file {file_path}: {e}")
+            raise RuntimeError(f"Failed to read file {file_path}: {e}") from e

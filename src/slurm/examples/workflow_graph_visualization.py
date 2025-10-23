@@ -52,7 +52,7 @@ class WorkflowGraphCallback(BaseCallback):
     Note: This callback tracks tasks submitted directly from the client, but
     child tasks submitted from within workflows (which run on the cluster) are
     not captured unless the callback is picklable and transported to the cluster.
-    
+
     For full workflow graph tracking including child tasks, the callback would
     need to be picklable (requires_pickling=True) and handle distributed state
     management.
@@ -60,7 +60,7 @@ class WorkflowGraphCallback(BaseCallback):
 
     # This callback only runs on the client side
     requires_pickling = False
-    
+
     # Override execution loci to run on CLIENT only
     execution_loci = {
         "on_workflow_begin_ctx": "client",
@@ -76,7 +76,7 @@ class WorkflowGraphCallback(BaseCallback):
     def on_begin_submit_job_ctx(self, ctx: SubmitBeginContext):
         """Track when workflows/tasks are about to be submitted from the client."""
         # Check if this is a workflow submission
-        if hasattr(ctx.task, '_is_workflow') and ctx.task._is_workflow:
+        if hasattr(ctx.task, "_is_workflow") and ctx.task._is_workflow:
             # We'll use the pre_submission_id temporarily and update with actual job_id later
             self.graph[ctx.pre_submission_id] = {
                 "name": ctx.task.func.__name__,
@@ -236,7 +236,7 @@ def ml_pipeline(dataset_name: str, ctx: WorkflowContext):
     2. Preprocess
     3. Train multiple models in parallel
     4. Evaluate each model
-    
+
     Args:
         dataset_name: Name of the dataset to process
         ctx: WorkflowContext (automatically injected)
@@ -265,7 +265,7 @@ def ml_pipeline(dataset_name: str, ctx: WorkflowContext):
 def main():
     """Run the workflow graph visualization example."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description="Run workflow graph visualization example."
     )
@@ -285,7 +285,7 @@ def main():
         help="Name of the dataset to process",
     )
     args = parser.parse_args()
-    
+
     print("=" * 70)
     print("Workflow Graph Visualization Example")
     print("=" * 70)

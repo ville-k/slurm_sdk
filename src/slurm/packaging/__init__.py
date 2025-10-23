@@ -8,12 +8,14 @@ from .base import PackagingStrategy
 from .none import NonePackagingStrategy
 from .container import ContainerPackagingStrategy
 from .wheel import WheelPackagingStrategy
+from .inherit import InheritPackagingStrategy
 
 
 _STRATEGIES = {
     "wheel": WheelPackagingStrategy,
     "none": NonePackagingStrategy,
     "container": ContainerPackagingStrategy,
+    "inherit": InheritPackagingStrategy,
 }
 
 
@@ -49,4 +51,5 @@ __all__ = [
     "WheelPackagingStrategy",
     "NonePackagingStrategy",
     "ContainerPackagingStrategy",
+    "InheritPackagingStrategy",
 ]

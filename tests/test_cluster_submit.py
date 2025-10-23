@@ -31,12 +31,6 @@ def add_one(x: int) -> int:
 
 
 def test_cluster_submit_with_local_backend(monkeypatch, tmp_path):
-    import pytest
-
-    pytest.skip(
-        "LocalBackend execution has issues with this specific test - works in test_callbacks.py but hangs here. Needs investigation."
-    )
-
     # Construct a bare Cluster and use the LocalBackend
     cluster = object.__new__(Cluster)
     cluster.backend_type = "LocalBackend"

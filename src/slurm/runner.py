@@ -6,15 +6,17 @@ and serialization of the result.
 
 import argparse
 import importlib
+import json
 import logging
 import os
 import pickle
-import sys
-import traceback
-import time
-import socket
 import platform
-from typing import List
+import socket
+import sys
+import time
+import traceback
+from datetime import datetime
+from typing import List, Optional
 
 from slurm.callbacks.callbacks import (
     BaseCallback,
@@ -27,8 +29,8 @@ from slurm.callbacks.callbacks import (
 from slurm.runtime import (
     JobContext,
     _bind_job_context,
-    current_job_context,
     _function_wants_job_context,
+    current_job_context,
 )
 from slurm.workflow import WorkflowContext
 
@@ -131,6 +133,75 @@ def _bind_workflow_context(func, args, kwargs, workflow_context):
     except Exception as e:
         logger.warning(f"Error binding workflow context: {e}")
         return args, kwargs, False
+
+
+def _write_environment_metadata(
+    job_dir: str,
+    packaging_type: str,
+    job_id: Optional[str] = None,
+    workflow_name: Optional[str] = None,
+    pre_submission_id: Optional[str] = None,
+) -> None:
+    """
+    Write environment metadata for child tasks to inherit.
+
+    This metadata file allows child tasks using InheritPackagingStrategy
+    to discover and activate the parent workflow's execution environment.
+
+    Args:
+        job_dir: The workflow job directory
+        packaging_type: The type of packaging used (wheel, container, etc.)
+        job_id: The SLURM job ID
+        workflow_name: The name of the workflow function
+        pre_submission_id: The pre-submission ID
+    """
+    from pathlib import Path
+
+    try:
+        metadata_path = Path(job_dir) / ".slurm_environment.json"
+
+        # Detect current environment details
+        venv_path = os.environ.get("VIRTUAL_ENV")
+        python_executable = sys.executable
+        python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        container_image = os.environ.get("SINGULARITY_NAME") or os.environ.get(
+            "SLURM_CONTAINER_IMAGE"
+        )
+
+        # Build metadata structure
+        metadata = {
+            "version": "1.0",
+            "packaging_type": packaging_type,
+            "environment": {
+                "venv_path": venv_path,
+                "python_executable": python_executable,
+                "python_version": python_version,
+                "container_image": container_image,
+                "activated": bool(venv_path or container_image),
+            },
+            "shared_paths": {
+                "job_dir": job_dir,
+                "shared_dir": str(Path(job_dir) / "shared"),
+                "tasks_dir": str(Path(job_dir) / "tasks"),
+            },
+            "parent_job": {
+                "slurm_job_id": job_id or "unknown",
+                "pre_submission_id": pre_submission_id or "unknown",
+                "workflow_name": workflow_name or "unknown",
+            },
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+
+        # Write metadata file
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        logger.info(f"Wrote environment metadata to {metadata_path}")
+        logger.debug(f"Metadata: {json.dumps(metadata, indent=2)}")
+
+    except Exception as e:
+        logger.warning(f"Failed to write environment metadata: {e}")
+        # Non-fatal - child tasks will fall back to other strategies
 
 
 def main():
@@ -361,6 +432,7 @@ def main():
         elif _function_wants_workflow_context(func):
             # Build WorkflowContext for workflow orchestrators
             from pathlib import Path
+
             from slurm.cluster import Cluster
 
             # We need to recreate the cluster connection for the workflow
@@ -374,12 +446,15 @@ def main():
             env_name = os.environ.get("SLURM_SDK_ENV")
 
             cluster = None
+            parent_packaging_type: Optional[str] = None
             if slurmfile_path:
                 try:
                     logger.debug(
                         f"Loading cluster from SLURM_SDK_SLURMFILE={slurmfile_path}, env={env_name}"
                     )
                     cluster = Cluster.from_env(slurmfile_path, env=env_name)
+                    if cluster.packaging_defaults:
+                        parent_packaging_type = cluster.packaging_defaults.get("type")
 
                     # For nested workflow tasks, reuse the parent workflow's container image
                     # Remove dockerfile/context to prevent rebuilding; set explicit image reference
@@ -422,10 +497,14 @@ def main():
                             "Configured nested tasks to reuse parent container image (no build/push)"
                         )
                     else:
-                        # If not using containers, fall back to 'none' packaging
-                        cluster.packaging_defaults = {"type": "none"}
-                        logger.debug(
-                            "Overrode packaging config to use 'none' for nested workflow tasks"
+                        # If not using containers, use 'inherit' packaging
+                        # Child tasks will read .slurm_environment.json to activate parent's venv
+                        cluster.packaging_defaults = {
+                            "type": "inherit",
+                            "parent_job_dir": job_dir,
+                        }
+                        logger.info(
+                            f"Configured child tasks to inherit environment from {job_dir}"
                         )
                 except Exception as e:
                     logger.warning(f"Could not load cluster from {slurmfile_path}: {e}")
@@ -435,6 +514,8 @@ def main():
                 try:
                     logger.debug("Trying to load cluster from discovered Slurmfile")
                     cluster = Cluster.from_env(env=env_name)
+                    if cluster.packaging_defaults and parent_packaging_type is None:
+                        parent_packaging_type = cluster.packaging_defaults.get("type")
 
                     # For nested workflow tasks, reuse the parent workflow's container image
                     if (
@@ -475,9 +556,14 @@ def main():
                             "Configured nested tasks to reuse parent container image (no build/push)"
                         )
                     else:
-                        cluster.packaging_defaults = {"type": "none"}
-                        logger.debug(
-                            "Overrode packaging config to use 'none' for nested workflow tasks"
+                        # If not using containers, use 'inherit' packaging
+                        # Child tasks will read .slurm_environment.json to activate parent's venv
+                        cluster.packaging_defaults = {
+                            "type": "inherit",
+                            "parent_job_dir": job_dir,
+                        }
+                        logger.info(
+                            f"Configured child tasks to inherit environment from {job_dir}"
                         )
                 except Exception as e:
                     logger.warning(f"Could not load cluster from Slurmfile: {e}")
@@ -513,6 +599,27 @@ def main():
                     args.module,
                     args.function,
                 )
+
+            # Write environment metadata for child tasks to inherit
+            # This must happen BEFORE child tasks are submitted
+            # The packaging_type should reflect the PARENT's actual environment (wheel/container),
+            # not what children will use (inherit)
+            if parent_packaging_type not in {"wheel", "container"}:
+                parent_packaging_type = (
+                    "wheel"
+                    if os.environ.get("VIRTUAL_ENV")
+                    else "container"
+                    if os.environ.get("SINGULARITY_NAME")
+                    or os.environ.get("SLURM_CONTAINER_IMAGE")
+                    else "none"
+                )
+            _write_environment_metadata(
+                job_dir=str(workflow_job_dir),
+                packaging_type=parent_packaging_type,
+                job_id=job_id_env,
+                workflow_name=args.function,
+                pre_submission_id=args.pre_submission_id,
+            )
 
             # Activate the cluster context for the workflow execution
             # This allows tasks called within the workflow to submit jobs

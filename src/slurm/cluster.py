@@ -14,6 +14,7 @@ import time
 import threading
 import json
 from datetime import datetime
+import shlex
 
 from .job import Job
 from .api import create_backend
@@ -925,29 +926,94 @@ class Cluster:
                         modified_content = re.sub(
                             r'(hostname\s*=\s*)"[^"]*"',
                             f'\\1"{internal_hostname}"',
-                            modified_content
+                            modified_content,
                         )
 
                         # Replace port with standard SSH port 22
                         modified_content = re.sub(
-                            r'(\bport\s*=\s*)\d+',
-                            r'\g<1>22',
-                            modified_content
+                            r"(\bport\s*=\s*)\d+", r"\g<1>22", modified_content
                         )
 
                         # Remove password authentication, use key-based
                         modified_content = re.sub(
-                            r'password\s*=\s*"[^"]*"\s*\n',
-                            '',
-                            modified_content
+                            r'password\s*=\s*"[^"]*"\s*\n', "", modified_content
                         )
 
                         # Enable key-based authentication
                         modified_content = re.sub(
-                            r'look_for_keys\s*=\s*false',
-                            'look_for_keys = true',
-                            modified_content
+                            r"look_for_keys\s*=\s*false",
+                            "look_for_keys = true",
+                            modified_content,
                         )
+
+                        # Stage SSH keys inside the workflow job directory for nested submissions
+                        ssh_dir = os.path.join(target_job_dir, ".ssh")
+                        private_key_path = os.path.join(ssh_dir, "id_rsa")
+                        public_key_path = os.path.join(ssh_dir, "id_rsa.pub")
+                        try:
+                            copy_commands = [
+                                f"mkdir -p {shlex.quote(ssh_dir)}",
+                                f"cp ~/.ssh/id_rsa {shlex.quote(private_key_path)}",
+                                f"cp ~/.ssh/id_rsa.pub {shlex.quote(public_key_path)}",
+                                f"chmod 600 {shlex.quote(private_key_path)}",
+                                f"chmod 644 {shlex.quote(public_key_path)}",
+                            ]
+                            self.backend.execute_command(" && ".join(copy_commands))
+                            logger.debug(
+                                "[%s] Staged SSH keys for workflow job in %s",
+                                pre_submission_id,
+                                ssh_dir,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "[%s] Failed to stage SSH keys for workflow job: %s",
+                                pre_submission_id,
+                                exc,
+                            )
+
+                        # Ensure backend config references the staged private key
+                        section_header = f"[{env_name}.cluster.backend_config]"
+                        key_field_name = "key_filename"
+                        lines = modified_content.splitlines()
+                        new_lines: List[str] = []
+                        in_section = False
+                        key_filename_set = False
+
+                        for line in lines:
+                            stripped = line.strip()
+                            if stripped.startswith("[") and stripped.endswith("]"):
+                                if in_section and not key_filename_set:
+                                    new_lines.append(
+                                        f'{key_field_name} = "{private_key_path}"'
+                                    )
+                                in_section = stripped == section_header
+                                key_filename_set = False
+                                new_lines.append(line)
+                                continue
+
+                            if in_section:
+                                if stripped.startswith("private_key"):
+                                    # Drop legacy private_key entries in favor of key_filename
+                                    continue
+                                if stripped.startswith(key_field_name):
+                                    new_lines.append(
+                                        f'{key_field_name} = "{private_key_path}"'
+                                    )
+                                    key_filename_set = True
+                                    continue
+
+                            new_lines.append(line)
+
+                        if in_section and not key_filename_set:
+                            new_lines.append(f'{key_field_name} = "{private_key_path}"')
+
+                        if lines:
+                            newline_suffix = (
+                                "\n" if modified_content.endswith("\n") else ""
+                            )
+                            modified_content = "\n".join(new_lines) + newline_suffix
+                        else:
+                            modified_content = "\n".join(new_lines)
 
                         logger.debug(
                             "[%s] Modified Slurmfile for workflow: hostname=%s, port=22, key-based auth",

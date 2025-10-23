@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
@@ -20,7 +23,6 @@ except Exception:  # pragma: no cover - fallback for minimal environments
     TextColumn = None  # type: ignore
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
-    from pathlib import Path
     from ..cluster import Cluster
     from ..job import Job
     from ..packaging import PackagingStrategy
@@ -213,6 +215,9 @@ class WorkflowTaskSubmitContext:
     cluster: "Cluster"
 
 
+WORKFLOW_METRICS_FILENAME = ".slurm_benchmark_metrics.json"
+
+
 _DEFAULT_HOOK_LOCI: Dict[str, ExecutionLocus] = {
     "on_begin_package_ctx": ExecutionLocus.CLIENT,
     "on_end_package_ctx": ExecutionLocus.CLIENT,
@@ -370,6 +375,190 @@ class LoggerCallback(BaseCallback):
         self._last_state: Optional[str] = None
         # Track workflow nesting depth for indented logging
         self._workflow_depth: Dict[str, int] = {}
+
+    def __getstate__(self) -> Dict[str, Any]:
+        state = self.__dict__.copy()
+        logger = state.pop("logger", None)
+        if logger is not None:
+            state["_logger_name"] = getattr(logger, "name", __name__)
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        logger_name = state.pop("_logger_name", __name__)
+        self.__dict__.update(state)
+        self.logger = logging.getLogger(logger_name)
+
+    def _log_workflow_metrics(
+        self, workflow_name: str, metrics: Dict[str, Any]
+    ) -> None:
+        child_count = metrics.get("child_count", 0)
+        duration = metrics.get("duration_seconds")
+
+        if duration is not None:
+            self.logger.info(
+                "[Workflow] '%s' completed in %.2fs (%d child tasks)",
+                workflow_name,
+                duration,
+                child_count,
+            )
+        else:
+            self.logger.info(
+                "[Workflow] '%s' completed (%d child tasks)",
+                workflow_name,
+                child_count,
+            )
+
+        overhead = metrics.get("orchestration_overhead_ms")
+        if overhead is not None:
+            self.logger.info("  Avg submission interval: %.2fms", overhead)
+            min_interval = metrics.get("min_submission_interval_ms")
+            max_interval = metrics.get("max_submission_interval_ms")
+            if min_interval is not None and max_interval is not None:
+                self.logger.info(
+                    "  Min/Max interval: %.2fms / %.2fms",
+                    min_interval,
+                    max_interval,
+                )
+
+            throughput = metrics.get("submission_throughput")
+            if throughput is not None:
+                self.logger.info(
+                    "  Submission throughput: %.2f tasks/sec",
+                    throughput,
+                )
+
+        child_avg = metrics.get("child_avg_duration")
+        if child_avg is not None:
+            self.logger.info(
+                "  Child task durations: avg=%.2fs min=%.2fs max=%.2fs",
+                child_avg,
+                metrics.get("child_min_duration"),
+                metrics.get("child_max_duration"),
+            )
+
+    def _persist_metrics_to_disk(
+        self, workflow_dir: Path, metrics: Dict[str, Any]
+    ) -> None:
+        try:
+            workflow_dir.mkdir(parents=True, exist_ok=True)
+            metrics_path = workflow_dir / WORKFLOW_METRICS_FILENAME
+            with metrics_path.open("w", encoding="utf-8") as fh:
+                json.dump(metrics, fh, indent=2)
+        except Exception as exc:  # pragma: no cover - best effort logging only
+            self.logger.debug(
+                "Failed to write workflow metrics to %s: %s",
+                workflow_dir,
+                exc,
+            )
+
+    def _load_metrics_from_disk(
+        self,
+        workflow_id: str,
+        job_dir: Optional[str],
+        cluster: Optional["Cluster"],
+    ) -> None:
+        if not job_dir or cluster is None:
+            return
+
+        metrics_path = os.path.join(job_dir, WORKFLOW_METRICS_FILENAME)
+        try:
+            content = cluster.backend.read_file(metrics_path)
+        except FileNotFoundError:
+            self.logger.debug(
+                "Workflow metrics file not found at %s for %s",
+                metrics_path,
+                workflow_id,
+            )
+            return
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to read workflow metrics file %s: %s",
+                metrics_path,
+                exc,
+            )
+            return
+
+        try:
+            metrics = json.loads(content)
+        except json.JSONDecodeError as exc:
+            self.logger.warning(
+                "Invalid workflow metrics JSON at %s: %s",
+                metrics_path,
+                exc,
+            )
+            return
+
+        if not isinstance(metrics, dict):
+            self.logger.debug(
+                "Ignoring workflow metrics at %s: expected dict, got %s",
+                metrics_path,
+                type(metrics).__name__,
+            )
+            return
+
+        self._persisted_metrics[workflow_id] = metrics
+
+    def _persist_metrics_to_disk(
+        self, workflow_dir: Path, metrics: Dict[str, Any]
+    ) -> None:
+        try:
+            workflow_dir.mkdir(parents=True, exist_ok=True)
+            metrics_path = workflow_dir / WORKFLOW_METRICS_FILENAME
+            with metrics_path.open("w", encoding="utf-8") as fh:
+                json.dump(metrics, fh, indent=2)
+        except Exception as exc:  # pragma: no cover - best effort logging only
+            self.logger.debug(
+                "Failed to write workflow metrics to %s: %s",
+                workflow_dir,
+                exc,
+            )
+
+    def _load_metrics_from_disk(
+        self,
+        workflow_id: str,
+        job_dir: Optional[str],
+        cluster: Optional["Cluster"],
+    ) -> None:
+        if not job_dir or cluster is None:
+            return
+
+        metrics_path = os.path.join(job_dir, WORKFLOW_METRICS_FILENAME)
+        try:
+            content = cluster.backend.read_file(metrics_path)
+        except FileNotFoundError:
+            self.logger.debug(
+                "Workflow metrics file not found at %s for %s",
+                metrics_path,
+                workflow_id,
+            )
+            return
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to read workflow metrics file %s: %s",
+                metrics_path,
+                exc,
+            )
+            return
+
+        try:
+            metrics = json.loads(content)
+        except json.JSONDecodeError as exc:
+            self.logger.warning(
+                "Invalid workflow metrics JSON at %s: %s",
+                metrics_path,
+                exc,
+            )
+            return
+
+        if not isinstance(metrics, dict):
+            self.logger.debug(
+                "Ignoring workflow metrics at %s: expected dict, got %s",
+                metrics_path,
+                type(metrics).__name__,
+            )
+            return
+
+        self._persisted_metrics[workflow_id] = metrics
 
     def on_begin_package_ctx(self, ctx: PackagingBeginContext) -> None:
         task_name = getattr(ctx.task, "sbatch_options", {}).get(
@@ -784,6 +973,19 @@ class BenchmarkCallback(BaseCallback):
         # Workflow-specific tracking
         self._workflows: Dict[str, Dict[str, Any]] = {}
         self._child_to_parent: Dict[str, str] = {}
+        self._persisted_metrics: Dict[str, Dict[str, Any]] = {}
+
+    def __getstate__(self) -> Dict[str, Any]:
+        state = self.__dict__.copy()
+        logger = state.pop("logger", None)
+        if logger is not None:
+            state["_logger_name"] = getattr(logger, "name", __name__)
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        logger_name = state.pop("_logger_name", __name__)
+        self.__dict__.update(state)
+        self.logger = logging.getLogger(logger_name)
 
     def on_begin_package_ctx(self, ctx: PackagingBeginContext) -> None:
         self._timestamps["package"] = ctx.timestamp
@@ -822,6 +1024,16 @@ class BenchmarkCallback(BaseCallback):
                 if ctx.duration:
                     wf_data["child_durations"].append(ctx.duration)
 
+        if (
+            ctx.emitted_by is ExecutionLocus.CLIENT
+            and ctx.job is not None
+            and getattr(getattr(ctx.job, "task_func", None), "_is_workflow", False)
+            and ctx.job_id
+        ):
+            job_dir = ctx.job_dir or getattr(ctx.job, "target_job_dir", None)
+            cluster = getattr(ctx.job, "cluster", None)
+            self._load_metrics_from_disk(ctx.job_id, job_dir, cluster)
+
     def on_workflow_begin_ctx(self, ctx: WorkflowCallbackContext) -> None:
         """Track workflow orchestration start."""
         self._workflows[ctx.workflow_job_id] = {
@@ -843,60 +1055,25 @@ class BenchmarkCallback(BaseCallback):
             self._child_to_parent[ctx.child_job_id] = ctx.parent_workflow_id
 
     def on_workflow_end_ctx(self, ctx: WorkflowCallbackContext) -> None:
-        """Calculate and report workflow performance metrics."""
+        """Calculate and persist workflow performance metrics."""
         wf_data = self._workflows.get(ctx.workflow_job_id)
-        if wf_data:
-            wf_data["end_time"] = ctx.timestamp
-            duration = ctx.timestamp - wf_data["start_time"]
+        if not wf_data:
+            return
 
-            # Calculate orchestration overhead (time between submissions)
-            submission_times = wf_data["submission_times"]
-            if len(submission_times) >= 2:
-                intervals = [
-                    (submission_times[i] - submission_times[i - 1]) * 1000  # ms
-                    for i in range(1, len(submission_times))
-                ]
-                avg_interval = sum(intervals) / len(intervals)
-                max_interval = max(intervals)
-                min_interval = min(intervals)
+        self._populate_child_stats_from_dir(wf_data, ctx.workflow_job_dir)
+        wf_data["end_time"] = ctx.timestamp
+        metrics = self._build_metrics_from_data(wf_data)
+        self._persisted_metrics[ctx.workflow_job_id] = metrics
 
-                self.logger.info(
-                    "[Workflow] '%s' orchestration metrics:",
-                    wf_data["name"],
-                )
-                self.logger.info("  Duration: %.2fs", duration)
-                self.logger.info("  Child tasks: %d", wf_data["child_count"])
-                self.logger.info("  Avg submission interval: %.2fms", avg_interval)
-                self.logger.info(
-                    "  Min/Max interval: %.2fms / %.2fms", min_interval, max_interval
-                )
+        workflow_dir = ctx.workflow_job_dir
+        if workflow_dir:
+            try:
+                workflow_path = Path(workflow_dir)
+            except TypeError:
+                workflow_path = Path(str(workflow_dir))
+            self._persist_metrics_to_disk(workflow_path, metrics)
 
-                # Calculate throughput
-                if duration > 0:
-                    throughput = wf_data["child_count"] / duration
-                    self.logger.info(
-                        "  Submission throughput: %.2f tasks/sec", throughput
-                    )
-            else:
-                self.logger.info(
-                    "[Workflow] '%s' completed in %.2fs (%d child tasks)",
-                    wf_data["name"],
-                    duration,
-                    wf_data["child_count"],
-                )
-
-            # Report child task duration statistics
-            if wf_data["child_durations"]:
-                durations = wf_data["child_durations"]
-                avg_duration = sum(durations) / len(durations)
-                max_duration = max(durations)
-                min_duration = min(durations)
-                self.logger.info(
-                    "  Child task durations: avg=%.2fs min=%.2fs max=%.2fs",
-                    avg_duration,
-                    min_duration,
-                    max_duration,
-                )
+        self._log_workflow_metrics(wf_data.get("name", ctx.workflow_job_id), metrics)
 
     def get_workflow_metrics(self, workflow_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed performance metrics for a workflow.
@@ -915,43 +1092,15 @@ class BenchmarkCallback(BaseCallback):
             - submission_throughput: Tasks submitted per second
             - child_avg_duration: Average child task execution time
         """
+        persisted = self._persisted_metrics.get(workflow_id)
+        if persisted is not None:
+            return dict(persisted)
+
         wf_data = self._workflows.get(workflow_id)
         if not wf_data:
             return None
 
-        metrics: Dict[str, Any] = {
-            "name": wf_data["name"],
-            "child_count": wf_data["child_count"],
-            "completed_count": wf_data["completed_count"],
-        }
-
-        # Duration metrics
-        if wf_data["end_time"]:
-            duration = wf_data["end_time"] - wf_data["start_time"]
-            metrics["duration_seconds"] = duration
-
-            if wf_data["child_count"] > 0 and duration > 0:
-                metrics["submission_throughput"] = wf_data["child_count"] / duration
-
-        # Orchestration overhead
-        submission_times = wf_data["submission_times"]
-        if len(submission_times) >= 2:
-            intervals = [
-                (submission_times[i] - submission_times[i - 1]) * 1000
-                for i in range(1, len(submission_times))
-            ]
-            metrics["orchestration_overhead_ms"] = sum(intervals) / len(intervals)
-            metrics["min_submission_interval_ms"] = min(intervals)
-            metrics["max_submission_interval_ms"] = max(intervals)
-
-        # Child task duration stats
-        if wf_data["child_durations"]:
-            durations = wf_data["child_durations"]
-            metrics["child_avg_duration"] = sum(durations) / len(durations)
-            metrics["child_min_duration"] = min(durations)
-            metrics["child_max_duration"] = max(durations)
-
-        return metrics
+        return self._build_metrics_from_data(wf_data)
 
     def get_all_workflow_metrics(self) -> Dict[str, Dict[str, Any]]:
         """Get performance metrics for all tracked workflows.
@@ -959,11 +1108,18 @@ class BenchmarkCallback(BaseCallback):
         Returns:
             Dictionary mapping workflow_id to metrics dict
         """
-        return {
-            wf_id: self.get_workflow_metrics(wf_id)
-            for wf_id in self._workflows
-            if self.get_workflow_metrics(wf_id) is not None
+        results: Dict[str, Dict[str, Any]] = {
+            wf_id: metrics.copy() for wf_id, metrics in self._persisted_metrics.items()
         }
+
+        for wf_id in self._workflows:
+            if wf_id in results:
+                continue
+            metrics = self.get_workflow_metrics(wf_id)
+            if metrics is not None:
+                results[wf_id] = metrics
+
+        return results
 
 
 __all__ = [
@@ -983,3 +1139,185 @@ __all__ = [
     "WorkflowCallbackContext",
     "WorkflowTaskSubmitContext",
 ]
+
+
+def _benchmark_build_metrics_from_data(
+    self: "BenchmarkCallback", wf_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    metrics: Dict[str, Any] = {
+        "name": wf_data.get("name"),
+        "child_count": wf_data.get("child_count", 0),
+        "completed_count": wf_data.get("completed_count", 0),
+    }
+
+    start_time = wf_data.get("start_time")
+    end_time = wf_data.get("end_time")
+    if isinstance(start_time, (int, float)) and isinstance(end_time, (int, float)):
+        duration = end_time - start_time
+        if duration >= 0:
+            metrics["duration_seconds"] = duration
+            child_count = metrics["child_count"]
+            if child_count and duration > 0:
+                metrics["submission_throughput"] = child_count / duration
+
+    submission_times = wf_data.get("submission_times") or []
+    if isinstance(submission_times, list) and len(submission_times) >= 2:
+        intervals = [
+            (submission_times[i] - submission_times[i - 1]) * 1000
+            for i in range(1, len(submission_times))
+        ]
+        if intervals:
+            metrics["orchestration_overhead_ms"] = sum(intervals) / len(intervals)
+            metrics["min_submission_interval_ms"] = min(intervals)
+            metrics["max_submission_interval_ms"] = max(intervals)
+
+    child_durations = wf_data.get("child_durations") or []
+    if isinstance(child_durations, list) and child_durations:
+        metrics["child_avg_duration"] = sum(child_durations) / len(child_durations)
+        metrics["child_min_duration"] = min(child_durations)
+        metrics["child_max_duration"] = max(child_durations)
+
+    return metrics
+
+
+def _benchmark_log_workflow_metrics(
+    self: "BenchmarkCallback", workflow_name: str, metrics: Dict[str, Any]
+) -> None:
+    child_count = metrics.get("child_count", 0)
+    duration = metrics.get("duration_seconds")
+
+    if duration is not None:
+        self.logger.info(
+            "[Workflow] '%s' completed in %.2fs (%d child tasks)",
+            workflow_name,
+            duration,
+            child_count,
+        )
+    else:
+        self.logger.info(
+            "[Workflow] '%s' completed (%d child tasks)",
+            workflow_name,
+            child_count,
+        )
+
+    overhead = metrics.get("orchestration_overhead_ms")
+    if overhead is not None:
+        self.logger.info("  Avg submission interval: %.2fms", overhead)
+        min_interval = metrics.get("min_submission_interval_ms")
+        max_interval = metrics.get("max_submission_interval_ms")
+        if min_interval is not None and max_interval is not None:
+            self.logger.info(
+                "  Min/Max interval: %.2fms / %.2fms",
+                min_interval,
+                max_interval,
+            )
+
+        throughput = metrics.get("submission_throughput")
+        if throughput is not None:
+            self.logger.info(
+                "  Submission throughput: %.2f tasks/sec",
+                throughput,
+            )
+
+    child_avg = metrics.get("child_avg_duration")
+    if child_avg is not None:
+        self.logger.info(
+            "  Child task durations: avg=%.2fs min=%.2fs max=%.2fs",
+            child_avg,
+            metrics.get("child_min_duration"),
+            metrics.get("child_max_duration"),
+        )
+
+
+def _benchmark_persist_metrics_to_disk(
+    self: "BenchmarkCallback", workflow_dir: Path, metrics: Dict[str, Any]
+) -> None:
+    try:
+        workflow_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = workflow_dir / WORKFLOW_METRICS_FILENAME
+        with metrics_path.open("w", encoding="utf-8") as fh:
+            json.dump(metrics, fh, indent=2)
+    except Exception as exc:  # pragma: no cover - best effort logging only
+        self.logger.debug(
+            "Failed to write workflow metrics to %s: %s",
+            workflow_dir,
+            exc,
+        )
+
+
+def _benchmark_load_metrics_from_disk(
+    self: "BenchmarkCallback",
+    workflow_id: str,
+    job_dir: Optional[str],
+    cluster: Optional["Cluster"],
+) -> None:
+    if not job_dir or cluster is None:
+        return
+
+    metrics_path = os.path.join(job_dir, WORKFLOW_METRICS_FILENAME)
+    try:
+        content = cluster.backend.read_file(metrics_path)
+    except FileNotFoundError:
+        self.logger.debug(
+            "Workflow metrics file not found at %s for %s",
+            metrics_path,
+            workflow_id,
+        )
+        return
+    except Exception as exc:
+        self.logger.warning(
+            "Failed to read workflow metrics file %s: %s",
+            metrics_path,
+            exc,
+        )
+        return
+
+    try:
+        metrics = json.loads(content)
+    except json.JSONDecodeError as exc:
+        self.logger.warning(
+            "Invalid workflow metrics JSON at %s: %s",
+            metrics_path,
+            exc,
+        )
+        return
+
+    if not isinstance(metrics, dict):
+        self.logger.debug(
+            "Ignoring workflow metrics at %s: expected dict, got %s",
+            metrics_path,
+            type(metrics).__name__,
+        )
+        return
+
+    self._persisted_metrics[workflow_id] = metrics
+
+
+def _benchmark_populate_child_stats_from_dir(
+    self: "BenchmarkCallback", wf_data: Dict[str, Any], workflow_dir: Optional[Path]
+) -> None:
+    if not workflow_dir:
+        return
+
+    try:
+        tasks_dir = Path(workflow_dir) / "tasks"
+    except TypeError:
+        tasks_dir = Path(str(workflow_dir)) / "tasks"
+
+    if not tasks_dir.exists():
+        return
+
+    count = sum(1 for _ in tasks_dir.rglob("metadata.json"))
+    if count:
+        wf_data["child_count"] = count
+        wf_data["completed_count"] = count
+
+
+BenchmarkCallback._populate_child_stats_from_dir = (
+    _benchmark_populate_child_stats_from_dir  # type: ignore[attr-defined]
+)
+# Attach helper implementations to BenchmarkCallback to support pickled instances
+BenchmarkCallback._build_metrics_from_data = _benchmark_build_metrics_from_data  # type: ignore[attr-defined]
+BenchmarkCallback._log_workflow_metrics = _benchmark_log_workflow_metrics  # type: ignore[attr-defined]
+BenchmarkCallback._persist_metrics_to_disk = _benchmark_persist_metrics_to_disk  # type: ignore[attr-defined]
+BenchmarkCallback._load_metrics_from_disk = _benchmark_load_metrics_from_disk  # type: ignore[attr-defined]
