@@ -426,10 +426,28 @@ class SSHCommandBackend(BackendBase):
 
             if return_code != 0:
                 if "Invalid job id specified" in stderr:
-                    raise BackendCommandError(f"Job not found: {job_id}")
+                    raise BackendCommandError(
+                        f"Job {job_id} not found in SLURM queue.\n\n"
+                        f"This job may have:\n"
+                        f"  1. Already completed and been purged from the queue\n"
+                        f"  2. Never existed (wrong job ID)\n"
+                        f"  3. Been cancelled\n\n"
+                        f"To check job history:\n"
+                        f"  sacct -j {job_id}  # Show completed/failed jobs\n"
+                        f"  squeue -j {job_id}  # Show only running/pending jobs"
+                    )
                 # Non-zero exit indicates command failure
                 error_msg = stderr.strip() or "Unknown error"
-                raise BackendCommandError(f"Failed to get job status for {job_id}: {error_msg}")
+                raise BackendCommandError(
+                    f"Failed to get status for job {job_id}.\n\n"
+                    f"SLURM command failed with: {error_msg}\n\n"
+                    f"Possible causes:\n"
+                    f"  1. SLURM controller is down or unreachable\n"
+                    f"  2. Permission issues accessing job information\n"
+                    f"  3. Network connectivity problems\n\n"
+                    f"To diagnose:\n"
+                    f"  scontrol show job {job_id}  # Run this manually to see SLURM's response"
+                )
 
             # Parse the output
             status = {}
@@ -450,7 +468,19 @@ class SSHCommandBackend(BackendBase):
             raise
         except Exception as e:
             logger.error("Failed to get job status for %s: %s", job_id, e)
-            raise BackendError(f"Failed to get status for job {job_id}") from e
+            raise BackendError(
+                f"Unexpected error while getting status for job {job_id}.\n\n"
+                f"Error: {e}\n\n"
+                f"This may indicate:\n"
+                f"  1. SSH connection was lost\n"
+                f"  2. Parsing error in SLURM output format\n"
+                f"  3. Unexpected SLURM response\n\n"
+                f"To diagnose:\n"
+                f"  1. Check SSH connection: ssh {hostname} echo 'connected'\n"
+                f"  2. Try manual SLURM command: ssh {hostname} scontrol show job {job_id}".format(
+                    hostname=getattr(self, "hostname", "cluster")
+                )
+            ) from e
 
     def cancel_job(self, job_id: str) -> bool:
         """
@@ -574,7 +604,21 @@ class SSHCommandBackend(BackendBase):
             raise
         except Exception as e:
             logger.error("Failed to get cluster info: %s", e)
-            raise BackendError("Failed to get cluster info") from e
+            raise BackendError(
+                "Failed to get cluster information.\n\n"
+                f"Error: {e}\n\n"
+                "This usually happens when:\n"
+                "  1. SLURM controller is not running\n"
+                "  2. Network issues prevent SSH connection\n"
+                "  3. 'sinfo' command is not available on the cluster\n\n"
+                "To diagnose:\n"
+                "  1. Check SLURM controller status: ssh {hostname} systemctl status slurmctld\n"
+                "  2. Verify sinfo works: ssh {hostname} sinfo\n"
+                "  3. Check SSH connection: ssh {hostname} echo 'connected'\n\n"
+                "Note: This error won't affect job submission, but may limit partition information.".format(
+                    hostname=getattr(self, "hostname", "cluster")
+                )
+            ) from e
 
     def __del__(self):
         """
@@ -586,19 +630,22 @@ class SSHCommandBackend(BackendBase):
                 if hasattr(self, "remote_temp_dir"):
                     try:
                         self._run_command(f"rm -rf {self.remote_temp_dir}")
-                    except (IOError, OSError, paramiko.SSHException) as e:
+                    except Exception as e:
+                        # Catch all exceptions in __del__ - we can't propagate them anyway
                         logger.debug(f"Error cleaning up remote temp dir: {e}")
 
                 # Close the SFTP connection
                 if hasattr(self, "sftp") and self.sftp:
                     try:
                         self.sftp.close()
-                    except (IOError, OSError, paramiko.SSHException) as e:
+                    except Exception as e:
+                        # Catch all exceptions in __del__ - we can't propagate them anyway
                         logger.debug(f"Error closing SFTP connection: {e}")
 
                 # Close the SSH connection
                 self.client.close()
-            except (IOError, OSError, paramiko.SSHException) as e:
+            except Exception as e:
+                # Catch all exceptions in __del__ - we can't propagate them anyway
                 logger.debug(f"Error during cleanup: {e}")
 
     def _upload_file(self, local_path: str, remote_path: str) -> None:

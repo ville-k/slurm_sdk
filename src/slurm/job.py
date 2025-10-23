@@ -224,7 +224,21 @@ class Job(Generic[T]):
             return status
         except Exception as e:
             logger.error("Error getting job status for job %s: %s", self.id, e)
-            raise BackendError(f"Failed to get status for job {self.id}") from e
+            raise BackendError(
+                f"Failed to get status for job {self.id}.\n\n"
+                f"Error: {e}\n\n"
+                "This error usually indicates a communication issue with the SLURM cluster.\n\n"
+                "Possible causes:\n"
+                "  1. Network or SSH connection was lost\n"
+                "  2. SLURM controller is down\n"
+                "  3. Job information is temporarily unavailable\n\n"
+                "To diagnose:\n"
+                "  1. Check if you can still reach the cluster\n"
+                "  2. Try: cluster.backend.get_job_status('{job_id}') to see backend error\n"
+                "  3. Check SLURM directly: squeue -j {job_id} or sacct -j {job_id}".format(
+                    job_id=self.id
+                )
+            ) from e
 
     def is_running(self) -> bool:
         """Check if the job is currently executing.
@@ -415,7 +429,25 @@ class Job(Generic[T]):
                 from .errors import DownloadError
 
                 raise DownloadError(
-                    f"Remote result file not found: {result_file_path}"
+                    f"Failed to download job result: File not found on remote cluster.\n\n"
+                    f"Job ID: {self.id}\n"
+                    f"Expected result file: {result_file_path}\n\n"
+                    "This usually means:\n"
+                    "  1. Job hasn't finished writing its result yet (still running)\n"
+                    "  2. Job failed before writing result file\n"
+                    "  3. Result file was deleted or moved\n"
+                    "  4. Job directory path is incorrect\n\n"
+                    "To diagnose:\n"
+                    "  1. Check job status: job.get_status() or squeue/sacct -j {job_id}\n"
+                    "  2. Check job output/error logs in: {job_dir}\n"
+                    "  3. Verify job completed successfully: job.is_successful()\n"
+                    "  4. SSH to cluster and check: ls -la {result_file}".format(
+                        job_id=self.id,
+                        job_dir=self.target_job_dir
+                        if self.target_job_dir
+                        else "job directory",
+                        result_file=result_file_path,
+                    )
                 ) from e
             except Exception as e:
                 logger.error(
@@ -428,7 +460,27 @@ class Job(Generic[T]):
                 from .errors import DownloadError
 
                 raise DownloadError(
-                    f"Failed to download or deserialize result from {result_file_path}: {e}"
+                    f"Failed to download or load job result.\n\n"
+                    f"Job ID: {self.id}\n"
+                    f"Result file: {result_file_path}\n"
+                    f"Error: {e}\n\n"
+                    "Possible causes:\n"
+                    "  1. Network error during download (SSH connection lost)\n"
+                    "  2. Result file is corrupted\n"
+                    "  3. Pickle deserialization failed (incompatible Python versions)\n"
+                    "  4. Permission issues accessing the file\n\n"
+                    "To diagnose:\n"
+                    "  1. Check SSH connection: ssh {hostname} echo 'connected'\n"
+                    "  2. Verify file exists on cluster: ssh {hostname} ls -la {result_file}\n"
+                    "  3. Check file size: ssh {hostname} du -h {result_file}\n"
+                    "  4. Check Python versions match between local and cluster\n"
+                    "  5. Review job output logs for errors: {job_dir}/*.out".format(
+                        hostname=getattr(self.cluster.backend, "hostname", "cluster"),
+                        result_file=result_file_path,
+                        job_dir=self.target_job_dir
+                        if self.target_job_dir
+                        else "job directory",
+                    )
                 ) from e
         else:
             try:
@@ -446,7 +498,23 @@ class Job(Generic[T]):
                 from .errors import DownloadError
 
                 raise DownloadError(
-                    f"Local result file not found: {local_result_path}"
+                    f"Failed to load job result: File not found locally.\n\n"
+                    f"Job ID: {self.id}\n"
+                    f"Expected file: {local_result_path}\n\n"
+                    "This usually means:\n"
+                    "  1. Job hasn't finished yet (still running or pending)\n"
+                    "  2. Job failed before writing result\n"
+                    "  3. Result file was deleted\n"
+                    "  4. Job directory path is wrong\n\n"
+                    "To diagnose:\n"
+                    "  1. Check job status: job.get_status()\n"
+                    "  2. Verify job completed: job.is_successful()\n"
+                    "  3. Check files in job directory: ls -la {job_dir}\n"
+                    "  4. Review job logs: cat {job_dir}/*.out {job_dir}/*.err".format(
+                        job_dir=self.target_job_dir
+                        if self.target_job_dir
+                        else "job directory"
+                    )
                 ) from e
             except Exception as e:
                 logger.error(

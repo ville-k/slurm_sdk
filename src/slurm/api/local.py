@@ -243,10 +243,29 @@ class LocalBackend(BackendBase):
 
             if return_code != 0:
                 if "Invalid job id specified" in stderr:
-                    raise BackendCommandError(f"Job not found: {job_id}")
+                    raise BackendCommandError(
+                        f"Job {job_id} not found in SLURM queue.\n\n"
+                        f"This job may have:\n"
+                        f"  1. Already completed and been purged from the queue\n"
+                        f"  2. Never existed (wrong job ID)\n"
+                        f"  3. Been cancelled\n\n"
+                        f"To check job history:\n"
+                        f"  sacct -j {job_id}  # Show completed/failed jobs\n"
+                        f"  squeue -j {job_id}  # Show only running/pending jobs"
+                    )
                 # Non-zero exit indicates command failure
                 error_msg = stderr.strip() or "Unknown error"
-                raise BackendCommandError(f"Failed to get job status for {job_id}: {error_msg}")
+                raise BackendCommandError(
+                    f"Failed to get status for job {job_id}.\n\n"
+                    f"SLURM command failed with: {error_msg}\n\n"
+                    f"Possible causes:\n"
+                    f"  1. SLURM controller is down or unreachable\n"
+                    f"  2. Permission issues accessing job information\n"
+                    f"  3. Local SLURM installation issues\n\n"
+                    f"To diagnose:\n"
+                    f"  scontrol show job {job_id}  # Run this manually to see SLURM's response\n"
+                    f"  systemctl status slurmd  # Check if SLURM daemon is running"
+                )
 
             # Parse the output
             status = {}
@@ -267,7 +286,17 @@ class LocalBackend(BackendBase):
             raise
         except Exception as e:
             logger.error("Failed to get job status for %s: %s", job_id, e)
-            raise BackendError(f"Failed to get status for job {job_id}") from e
+            raise BackendError(
+                f"Unexpected error while getting status for job {job_id}.\n\n"
+                f"Error: {e}\n\n"
+                f"This may indicate:\n"
+                f"  1. Local SLURM commands failed\n"
+                f"  2. Parsing error in SLURM output format\n"
+                f"  3. Permission issues\n\n"
+                f"To diagnose:\n"
+                f"  1. Check SLURM is running: systemctl status slurmd\n"
+                f"  2. Try manual command: scontrol show job {job_id}"
+            ) from e
 
     def cancel_job(self, job_id: str) -> bool:
         """
@@ -371,7 +400,19 @@ class LocalBackend(BackendBase):
 
             if return_code != 0:
                 logger.error("Failed to get cluster info: %s", stderr)
-                raise BackendCommandError(f"Failed to get cluster info: {stderr.strip()}")
+                raise BackendCommandError(
+                    "Failed to get cluster information from local SLURM installation.\n\n"
+                    f"SLURM command (sinfo) failed with: {stderr.strip()}\n\n"
+                    "Possible causes:\n"
+                    "  1. SLURM is not installed on this machine\n"
+                    "  2. SLURMcontroller is not running\n"
+                    "  3. Permission issues running sinfo command\n\n"
+                    "To diagnose:\n"
+                    "  1. Check SLURM installation: which sinfo\n"
+                    "  2. Verify SLURM services: systemctl status slurmctld slurmd\n"
+                    "  3. Try manually: sinfo -h -o '%R|%a|%l|%D|%T'\n\n"
+                    "Note: This error won't affect job submission, but may limit partition information."
+                )
 
             # Parse the output
             partitions = []
@@ -403,7 +444,18 @@ class LocalBackend(BackendBase):
             raise
         except Exception as e:
             logger.error("Failed to get cluster info: %s", e)
-            raise BackendError("Failed to get cluster info") from e
+            raise BackendError(
+                "Unexpected error while getting cluster information.\n\n"
+                f"Error: {e}\n\n"
+                "This may indicate:\n"
+                "  1. Local SLURM installation issues\n"
+                "  2. Parsing error in sinfo output\n"
+                "  3. Unexpected SLURM response format\n\n"
+                "To diagnose:\n"
+                "  1. Check SLURM status: systemctl status slurmctld\n"
+                "  2. Try manual command: sinfo\n\n"
+                "Note: This error won't prevent job submission."
+            ) from e
 
     def execute_command(self, command: str) -> str:
         """

@@ -176,7 +176,7 @@ def test_get_job_status_not_found(mock_run, backend):
         returncode=1,
     )
 
-    with pytest.raises(BackendCommandError, match="Job not found: 99999"):
+    with pytest.raises(BackendCommandError, match="Job 99999 not found in SLURM queue"):
         backend.get_job_status("99999")
 
 

@@ -85,10 +85,22 @@ class WheelPackagingStrategy(PackagingStrategy):
         project_root = self._find_project_root()
         if not project_root:
             raise PackagingError(
-                "Could not find pyproject.toml in any parent directory.\n"
-                f"Searched from: {pathlib.Path.cwd()}\n"
-                "For wheel packaging, your project must have a pyproject.toml file.\n"
-                "See: https://packaging.python.org/tutorials/packaging-projects/"
+                "Failed to prepare wheel: No pyproject.toml found in current directory or any parent directory.\n\n"
+                f"Searched from: {pathlib.Path.cwd()}\n\n"
+                "The slurm-sdk uses wheel packaging to bundle your code for remote execution.\n"
+                "For this to work, your project must have a pyproject.toml file at its root.\n\n"
+                "To fix this:\n"
+                "  1. Create a pyproject.toml file in your project root\n"
+                "  2. Add minimal project configuration (see example below)\n"
+                "  3. Or disable packaging with: @task(packaging={'type': 'none'})\n\n"
+                "Example minimal pyproject.toml:\n"
+                "  [build-system]\n"
+                "  requires = ['setuptools>=45', 'wheel']\n"
+                "  build-backend = 'setuptools.build_meta'\n\n"
+                "  [project]\n"
+                "  name = 'your-project-name'\n"
+                "  version = '0.1.0'\n\n"
+                "Learn more: https://packaging.python.org/tutorials/packaging-projects/"
             )
 
         wheel_path = self._build_wheel(project_root, temp_dir)
@@ -109,7 +121,17 @@ class WheelPackagingStrategy(PackagingStrategy):
                 remote_base = cluster.backend.get_remote_upload_base_path()
             except Exception as e_path:
                 raise PackagingError(
-                    "Could not determine remote upload base path"
+                    "Failed to prepare wheel upload: Could not determine remote upload path on cluster.\n\n"
+                    f"Backend: {type(cluster.backend).__name__}\n"
+                    f"Error: {e_path}\n\n"
+                    "Possible causes:\n"
+                    "  1. SSH connection issues (check hostname, username, credentials)\n"
+                    "  2. Permission issues on remote filesystem\n"
+                    "  3. Remote directory doesn't exist or isn't writable\n\n"
+                    "To diagnose:\n"
+                    "  1. Verify you can SSH to the cluster manually\n"
+                    "  2. Check that job_base_dir is writable: ssh user@host ls -la /path/to/job_base_dir\n"
+                    "  3. Try running with LocalBackend first to isolate SSH issues"
                 ) from e_path
 
             upload_id = uuid.uuid4().hex[:8]
@@ -123,7 +145,25 @@ class WheelPackagingStrategy(PackagingStrategy):
                 cluster.backend.upload_file(wheel_path, remote_upload_path)
             except Exception as e_upload:
                 raise PackagingError(
-                    "Failed to upload wheel to remote cluster"
+                    "Failed to upload wheel to remote cluster.\n\n"
+                    f"Local wheel: {wheel_path}\n"
+                    f"Remote path: {remote_upload_path}\n"
+                    f"Error: {e_upload}\n\n"
+                    "Possible causes:\n"
+                    "  1. Network connectivity issues\n"
+                    "  2. SSH authentication failure (check credentials)\n"
+                    "  3. Remote directory doesn't exist or isn't writable\n"
+                    "  4. Disk space issues on remote cluster\n\n"
+                    "To diagnose:\n"
+                    "  1. Test SSH connection: ssh {hostname} ls -la\n"
+                    "  2. Check disk space on cluster: ssh {hostname} df -h\n"
+                    "  3. Verify permissions: ssh {hostname} ls -la {remote_base}\n"
+                    "  4. Try uploading manually: scp {wheel_path} {hostname}:{remote_upload_path}".format(
+                        hostname=getattr(cluster.backend, "hostname", "cluster"),
+                        remote_base=remote_base,
+                        wheel_path=wheel_path,
+                        remote_upload_path=remote_upload_path,
+                    )
                 ) from e_upload
 
             prepare_result = {
@@ -374,7 +414,14 @@ class WheelPackagingStrategy(PackagingStrategy):
         try:
             subprocess.run(["pip", "--version"], check=True, capture_output=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
-            raise PackagingError("Neither uv nor pip is available for building wheels")
+            raise PackagingError(
+                "Failed to build wheel: Neither 'uv' nor 'pip' is available.\n\n"
+                "The slurm-sdk requires a Python package build tool to package your code for remote execution.\n\n"
+                "To fix this, install one of the following:\n"
+                "  1. uv (recommended):    pip install uv\n"
+                "  2. pip (fallback):      Already included with most Python installations\n\n"
+                "If you don't want automatic packaging, use: packaging={'type': 'none'} in your @task decorator."
+            )
 
         # Build the wheel
         cmd = ["pip", "wheel", "--no-deps", "-w", output_dir, str(project_root)]
@@ -383,7 +430,22 @@ class WheelPackagingStrategy(PackagingStrategy):
         # Find the wheel file in the output directory
         wheels = list(pathlib.Path(output_dir).glob("*.whl"))
         if not wheels:
-            raise PackagingError(f"No wheel found in {output_dir} after build with pip")
+            raise PackagingError(
+                f"Failed to build wheel: No .whl file found in {output_dir} after running 'pip wheel'.\n\n"
+                f"This usually means there's an issue with your project's pyproject.toml configuration.\n\n"
+                f"To diagnose:\n"
+                f"  1. Check that pyproject.toml exists in your project root\n"
+                f"  2. Verify your pyproject.toml has [build-system] and [project] sections\n"
+                f"  3. Try building manually: cd {project_root} && pip wheel --no-deps -w /tmp .\n\n"
+                f"Example minimal pyproject.toml:\n"
+                f"  [build-system]\n"
+                f"  requires = ['setuptools>=45', 'wheel']\n"
+                f"  build-backend = 'setuptools.build_meta'\n\n"
+                f"  [project]\n"
+                f"  name = 'myproject'\n"
+                f"  version = '0.1.0'\n\n"
+                f"See: https://packaging.python.org/tutorials/packaging-projects/"
+            )
 
         # Return the path to the wheel
         return str(wheels[0])
