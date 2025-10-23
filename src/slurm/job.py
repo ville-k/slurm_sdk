@@ -99,7 +99,15 @@ class Job(Generic[T]):
             sbatch_options: The SBATCH options used for this job's submission.
             stdout_path: Scheduler stdout path for this job, if known.
             stderr_path: Scheduler stderr path for this job, if known.
+
+        Raises:
+            ValueError: If id is not a non-empty string or if cluster is None.
         """
+        if not id or not isinstance(id, str) or not id.strip():
+            raise ValueError(
+                f"job id must be a non-empty string, got {type(id).__name__}: {id!r}"
+            )
+
         self.id = id
         logger.debug("[%s] Initializing Job", self.id)
         if cluster is None:
@@ -215,8 +223,8 @@ class Job(Generic[T]):
 
             return status
         except Exception as e:
-            logger.error("Error getting job status: %s", e)
-            return {"JobState": "UNKNOWN", "Error": str(e)}
+            logger.error("Error getting job status for job %s: %s", self.id, e)
+            raise BackendError(f"Failed to get status for job {self.id}") from e
 
     def is_running(self) -> bool:
         """Check if the job is currently executing.

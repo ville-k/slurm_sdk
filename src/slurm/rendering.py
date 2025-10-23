@@ -5,7 +5,7 @@ This module provides functions for rendering Slurm job scripts from task definit
 import logging
 import pickle
 import base64
-from typing import Any, Dict, Tuple, Callable, List
+from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING
 import inspect
 import sys
 import traceback
@@ -17,6 +17,8 @@ import os
 import importlib
 from .callbacks.callbacks import BaseCallback
 
+if TYPE_CHECKING:
+    from .cluster import Cluster
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +100,7 @@ def render_job_script(
     target_job_dir: str,
     pre_submission_id: str,
     callbacks: List[BaseCallback],
-    cluster: Any = None,
+    cluster: Optional["Cluster"] = None,
 ) -> str:
     """
     Renders the SLURM sbatch script using an explicit target directory path.

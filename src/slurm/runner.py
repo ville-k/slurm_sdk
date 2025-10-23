@@ -393,8 +393,8 @@ def main():
                 job_context=job_context,
             )
             _run_callbacks(callbacks, "on_begin_run_job_ctx", ctx)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Callback on_begin_run_job_ctx failed: {e}")
 
         logger.debug("Importing module %s...", args.module)
         module = importlib.import_module(args.module)
@@ -718,8 +718,8 @@ def main():
                     job_context=job_context,
                 ),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Callback on_end_run_job_ctx (success) failed: {e}")
 
         status_payload = {
             "JobState": "COMPLETED",
@@ -753,8 +753,8 @@ def main():
                     job_context=job_context,
                 ),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Callback on_completed_ctx (success) failed: {e}")
         sys.exit(0)
     except Exception as e:
         logger.error("Error during task execution: %s", e)
@@ -785,8 +785,8 @@ def main():
                     job_context=job_context,
                 ),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"Callback on_end_run_job_ctx (failure) failed: {exc}")
 
         status_payload = {
             "JobState": "FAILED",
@@ -825,8 +825,8 @@ def main():
                     job_context=job_context,
                 ),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"Callback on_completed_ctx (failure) failed: {exc}")
 
         sys.exit(1)
 

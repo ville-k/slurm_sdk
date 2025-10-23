@@ -373,6 +373,4 @@ __all__ = [
     "JobContext",
     "build_job_context",
     "current_job_context",
-    "function_wants_job_context",
-    "bind_job_context",
 ]

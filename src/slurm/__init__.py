@@ -4,7 +4,7 @@
 This package provides a Python SDK for interacting with Slurm clusters.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 from .cluster import Cluster
 from .decorators import task, workflow
@@ -18,17 +18,46 @@ from .context import (
     set_active_context,
     reset_active_context,
 )
+from .callbacks import (
+    BaseCallback,
+    LoggerCallback,
+    BenchmarkCallback,
+)
+from .errors import (
+    SubmissionError,
+    DownloadError,
+    BackendError,
+    BackendTimeout,
+    BackendCommandError,
+    PackagingError,
+    SlurmfileError,
+)
 
 __all__ = [
+    # Decorators
     "task",
     "workflow",
+    # Core classes
     "Job",
     "ArrayJob",
     "Cluster",
     "SlurmTask",
     "JobContext",
     "WorkflowContext",
+    # Context management
     "get_active_context",
     "set_active_context",
     "reset_active_context",
+    # Callbacks
+    "BaseCallback",
+    "LoggerCallback",
+    "BenchmarkCallback",
+    # Errors
+    "SubmissionError",
+    "DownloadError",
+    "BackendError",
+    "BackendTimeout",
+    "BackendCommandError",
+    "PackagingError",
+    "SlurmfileError",
 ]

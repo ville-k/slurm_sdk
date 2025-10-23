@@ -18,7 +18,7 @@ import logging
 import shlex
 
 from .base import BackendBase
-from ..errors import BackendTimeout, BackendCommandError
+from ..errors import BackendTimeout, BackendCommandError, BackendError
 
 logger = logging.getLogger(__name__)
 
@@ -426,17 +426,10 @@ class SSHCommandBackend(BackendBase):
 
             if return_code != 0:
                 if "Invalid job id specified" in stderr:
-                    return {
-                        "JobState": "UNKNOWN",
-                        "ExitCode": "",
-                        "Error": "Job not found",
-                    }
-                # Normalize non-zero exits to UNKNOWN state with error message
-                return {
-                    "JobState": "UNKNOWN",
-                    "ExitCode": "",
-                    "Error": stderr.strip() or "Unknown error",
-                }
+                    raise BackendCommandError(f"Job not found: {job_id}")
+                # Non-zero exit indicates command failure
+                error_msg = stderr.strip() or "Unknown error"
+                raise BackendCommandError(f"Failed to get job status for {job_id}: {error_msg}")
 
             # Parse the output
             status = {}
@@ -449,12 +442,15 @@ class SSHCommandBackend(BackendBase):
             logger.debug("Job status: %s", status)
 
             return status
-        except BackendTimeout as e:
-            logger.warning("Warning: %s", e)
-            return {"JobState": "UNKNOWN", "ExitCode": "", "Error": "Timeout"}
+        except BackendTimeout:
+            # Re-raise timeout errors as-is
+            raise
+        except BackendCommandError:
+            # Re-raise command errors as-is
+            raise
         except Exception as e:
-            logger.warning("Warning: Failed to get job status: %s", e)
-            return {"JobState": "UNKNOWN", "ExitCode": "", "Error": str(e)}
+            logger.error("Failed to get job status for %s: %s", job_id, e)
+            raise BackendError(f"Failed to get status for job {job_id}") from e
 
     def cancel_job(self, job_id: str) -> bool:
         """
@@ -573,12 +569,12 @@ class SSHCommandBackend(BackendBase):
                     )
 
             return {"partitions": partitions}
-        except TimeoutError as e:
-            logger.warning("Warning: %s", e)
-            return {"partitions": []}  # Return empty list instead of failing
+        except BackendTimeout:
+            # Re-raise timeout errors as-is
+            raise
         except Exception as e:
-            logger.warning("Warning: Failed to get cluster info: %s", e)
-            return {"partitions": []}  # Return empty list instead of failing
+            logger.error("Failed to get cluster info: %s", e)
+            raise BackendError("Failed to get cluster info") from e
 
     def __del__(self):
         """
@@ -590,20 +586,20 @@ class SSHCommandBackend(BackendBase):
                 if hasattr(self, "remote_temp_dir"):
                     try:
                         self._run_command(f"rm -rf {self.remote_temp_dir}")
-                    except:
-                        pass
+                    except (IOError, OSError, paramiko.SSHException) as e:
+                        logger.debug(f"Error cleaning up remote temp dir: {e}")
 
                 # Close the SFTP connection
                 if hasattr(self, "sftp") and self.sftp:
                     try:
                         self.sftp.close()
-                    except:
-                        pass
+                    except (IOError, OSError, paramiko.SSHException) as e:
+                        logger.debug(f"Error closing SFTP connection: {e}")
 
                 # Close the SSH connection
                 self.client.close()
-            except:
-                pass
+            except (IOError, OSError, paramiko.SSHException) as e:
+                logger.debug(f"Error during cleanup: {e}")
 
     def _upload_file(self, local_path: str, remote_path: str) -> None:
         """

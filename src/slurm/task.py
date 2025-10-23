@@ -1,7 +1,7 @@
 """Task module for defining Slurm tasks."""
 
 import functools
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 # Add this block for type hinting Cluster without causing circular import at runtime
 if TYPE_CHECKING:
@@ -104,7 +104,15 @@ class SlurmTask:
                 `{"type": "wheel", "build_tool": "uv"}`.
             **slurm_options: Additional options (currently unused, reserved for
                 future extensions).
+
+        Raises:
+            TypeError: If func is not callable.
         """
+        if not callable(func):
+            raise TypeError(
+                f"func must be callable, got {type(func).__name__}: {func!r}"
+            )
+
         self.func = func
         self.sbatch_options = normalize_sbatch_options(sbatch_options)
         self.packaging = packaging or {"type": "wheel", "build_tool": "uv"}
@@ -221,7 +229,7 @@ class SlurmTask:
         """
         return self.func
 
-    def map(self, items: list, max_concurrent: Optional[int] = None):
+    def map(self, items: List[Any], max_concurrent: Optional[int] = None):
         """Map task over items, creating an array job.
 
         This method provides a fluent API for submitting array jobs. Each item
@@ -278,8 +286,8 @@ class SlurmTask:
         ctx = get_active_context()
         if ctx is None:
             raise RuntimeError(
-                f"Task.map() must be called within a Cluster context or @workflow.\n"
-                f"For local execution, use: [task.unwrapped(item) for item in items]"
+                "Task.map() must be called within a Cluster context or @workflow.\n"
+                "For local execution, use: [task.unwrapped(item) for item in items]"
             )
 
         # Get cluster from context

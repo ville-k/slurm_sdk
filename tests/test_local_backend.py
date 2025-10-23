@@ -176,10 +176,8 @@ def test_get_job_status_not_found(mock_run, backend):
         returncode=1,
     )
 
-    status = backend.get_job_status("99999")
-
-    assert status["JobState"] == "UNKNOWN"
-    assert status["Error"] == "Job not found"
+    with pytest.raises(BackendCommandError, match="Job not found: 99999"):
+        backend.get_job_status("99999")
 
 
 @patch("subprocess.run")
@@ -261,10 +259,9 @@ def test_get_cluster_info_failure(mock_run, backend):
         returncode=1,
     )
 
-    info = backend.get_cluster_info()
-
-    # Should return empty partitions instead of raising
-    assert info == {"partitions": []}
+    # Should raise BackendCommandError on failure
+    with pytest.raises(BackendCommandError, match="Failed to get cluster info"):
+        backend.get_cluster_info()
 
 
 @patch("subprocess.run")

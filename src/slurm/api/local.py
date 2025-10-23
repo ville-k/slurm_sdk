@@ -17,7 +17,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from .base import BackendBase
-from ..errors import BackendTimeout, BackendCommandError
+from ..errors import BackendTimeout, BackendCommandError, BackendError
 
 logger = logging.getLogger(__name__)
 
@@ -243,17 +243,10 @@ class LocalBackend(BackendBase):
 
             if return_code != 0:
                 if "Invalid job id specified" in stderr:
-                    return {
-                        "JobState": "UNKNOWN",
-                        "ExitCode": "",
-                        "Error": "Job not found",
-                    }
-                # Normalize non-zero exits to UNKNOWN state with error message
-                return {
-                    "JobState": "UNKNOWN",
-                    "ExitCode": "",
-                    "Error": stderr.strip() or "Unknown error",
-                }
+                    raise BackendCommandError(f"Job not found: {job_id}")
+                # Non-zero exit indicates command failure
+                error_msg = stderr.strip() or "Unknown error"
+                raise BackendCommandError(f"Failed to get job status for {job_id}: {error_msg}")
 
             # Parse the output
             status = {}
@@ -266,12 +259,15 @@ class LocalBackend(BackendBase):
             logger.debug("Job status: %s", status)
             return status
 
-        except BackendTimeout as e:
-            logger.warning("Warning: %s", e)
-            return {"JobState": "UNKNOWN", "ExitCode": "", "Error": "Timeout"}
+        except BackendTimeout:
+            # Re-raise timeout errors as-is
+            raise
+        except BackendCommandError:
+            # Re-raise command errors as-is
+            raise
         except Exception as e:
-            logger.warning("Warning: Failed to get job status: %s", e)
-            return {"JobState": "UNKNOWN", "ExitCode": "", "Error": str(e)}
+            logger.error("Failed to get job status for %s: %s", job_id, e)
+            raise BackendError(f"Failed to get status for job {job_id}") from e
 
     def cancel_job(self, job_id: str) -> bool:
         """
@@ -374,8 +370,8 @@ class LocalBackend(BackendBase):
             )
 
             if return_code != 0:
-                logger.warning("Failed to get cluster info: %s", stderr)
-                return {"partitions": []}
+                logger.error("Failed to get cluster info: %s", stderr)
+                raise BackendCommandError(f"Failed to get cluster info: {stderr.strip()}")
 
             # Parse the output
             partitions = []
@@ -399,12 +395,15 @@ class LocalBackend(BackendBase):
             logger.debug("Found %d partitions", len(partitions))
             return {"partitions": partitions}
 
-        except BackendTimeout as e:
-            logger.warning("Warning: %s", e)
-            return {"partitions": []}
+        except BackendTimeout:
+            # Re-raise timeout errors as-is
+            raise
+        except BackendCommandError:
+            # Re-raise command errors as-is
+            raise
         except Exception as e:
-            logger.warning("Warning: Failed to get cluster info: %s", e)
-            return {"partitions": []}
+            logger.error("Failed to get cluster info: %s", e)
+            raise BackendError("Failed to get cluster info") from e
 
     def execute_command(self, command: str) -> str:
         """

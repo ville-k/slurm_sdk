@@ -4,6 +4,8 @@ import time
 import subprocess
 from typing import Any, Dict, List
 
+from slurm.errors import BackendCommandError
+
 
 class LocalBackend:
     """A minimal local backend suitable for tests."""
@@ -58,7 +60,7 @@ class LocalBackend:
     def get_job_status(self, job_id: str) -> Dict[str, Any]:
         job = self._jobs.get(job_id)
         if not job:
-            return {"JobState": "UNKNOWN", "ExitCode": "", "Error": "Job not found"}
+            raise BackendCommandError(f"Job not found: {job_id}")
         return {k: job[k] for k in ("JobState", "ExitCode") if k in job}
 
     def cancel_job(self, job_id: str) -> bool:

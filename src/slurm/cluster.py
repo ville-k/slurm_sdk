@@ -239,6 +239,14 @@ class Cluster:
             from a Slurmfile, enabling environment-specific settings and keeping
             credentials out of code.
         """
+        # Validate backend type early for clearer error messages
+        valid_backends = ["ssh", "local"]
+        if backend_type not in valid_backends:
+            raise ValueError(
+                f"Invalid backend_type: {backend_type!r}. "
+                f"Must be one of: {', '.join(valid_backends)}"
+            )
+
         self.backend_type = backend_type
         self.callbacks = callbacks or []
 
@@ -633,15 +641,14 @@ class Cluster:
             resolved_job_base_dir = getattr(self.backend, "job_base_dir", None)
             if resolved_job_base_dir is None:
                 import tempfile
-                import os as _os
 
-                resolved_job_base_dir = _os.path.join(
+                resolved_job_base_dir = os.path.join(
                     tempfile.gettempdir(), "slurm_jobs"
                 )
                 try:
-                    _os.makedirs(resolved_job_base_dir, exist_ok=True)
-                except Exception:
-                    pass
+                    os.makedirs(resolved_job_base_dir, exist_ok=True)
+                except (OSError, IOError) as e:
+                    logger.debug(f"Failed to create job base directory: {e}")
 
             # Check if we're in a workflow context for nested structure
             from .context import get_active_context
@@ -873,9 +880,7 @@ class Cluster:
                     )
                 else:
                     # For local backends, write directly
-                    import os as _os
-
-                    _os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+                    os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
                     with open(metadata_path, "w") as f:
                         json.dump(metadata, f, indent=2)
             except Exception as exc:
@@ -1212,8 +1217,8 @@ class Cluster:
                 m = re.match(r"^slurm_([A-Za-z0-9]+)\.out$", base_name)
                 if m:
                     pre_submission_id = m.group(1)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to extract job metadata for {job_id}: {e}")
 
         return Job(
             job_id,
