@@ -1,10 +1,16 @@
-"""Example showcasing JobContext introspection for distributed workloads."""
+"""Example showcasing JobContext introspection for distributed workloads.
+
+This example demonstrates:
+- Using JobContext to access SLURM environment variables
+- Multi-task allocations (ntasks=4)
+- Inspecting distributed job information (rank, world_size, hostnames)
+- PyTorch distributed environment variables
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
-import pathlib
 from typing import Optional
 
 from rich.console import Console
@@ -14,8 +20,6 @@ from slurm.cluster import Cluster
 from slurm.decorators import task
 from slurm.logging import configure_logging
 from slurm.runtime import JobContext
-
-DEFAULT_SLURMFILE = pathlib.Path(__file__).with_name("Slurmfile.container_example.toml")
 
 
 @task(time="00:05:00", ntasks=4)
@@ -41,16 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Submit a task that inspects the SBATCH allocation context.",
     )
-    parser.add_argument(
-        "--slurmfile",
-        default=str(DEFAULT_SLURMFILE),
-        help="Path to the Slurmfile to load (defaults to the container example).",
-    )
-    parser.add_argument(
-        "--env",
-        default="default",
-        help="Environment key within the Slurmfile to load (defaults to 'default').",
-    )
+
+    # Add standard cluster configuration arguments
+    Cluster.add_argparse_args(parser)
+
     return parser
 
 
@@ -63,22 +61,14 @@ def main() -> None:
 
     console.print("[bold cyan]Submitting SBATCH context inspection job...[/bold cyan]")
 
-    callback = LoggerCallback(console=console)
-
-    cluster = Cluster.from_env(
-        args.slurmfile,
-        env=args.env,
-        callbacks=[callback],
+    # Create cluster from args
+    cluster = Cluster.from_args(
+        args,
+        callbacks=[LoggerCallback(console=console)],
     )
 
-    submit_config = cluster.environment_config.get("submit", {})
-
-    job = inspect_allocation.submit(
-        cluster=cluster,
-        packaging=cluster.packaging_defaults,
-        account=submit_config.get("account"),
-        partition=submit_config.get("partition"),
-    )()
+    # Submit job (uses cluster defaults)
+    job = inspect_allocation.submit(cluster)()
 
     job.wait()
     result = job.get_result()

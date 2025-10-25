@@ -286,12 +286,11 @@ def render_job_script(
     script_lines.append("export PY_EXEC_RESOLVED")
 
     # Construct the runner command that executes the user's task function.
-    # "${PY_EXEC[@]:-python}" uses bash array expansion preserving multi-word executables.
     def _escape_quotes(value: str) -> str:
         return value.replace('"', '\\"')
 
     runner_parts = [
-        '"${PY_EXEC[@]:-python}"',
+        '"$PY_EXEC_RESOLVED"',
         "-m slurm.runner",
         f'--module "{_escape_quotes(module_name)}"',
         f'--function "{_escape_quotes(func_name)}"',

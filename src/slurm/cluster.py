@@ -211,12 +211,15 @@ class Cluster:
         backend_type: str = "ssh",
         callbacks: Optional[List[BaseCallback]] = None,
         job_base_dir: Optional[str] = None,
+        default_packaging: Optional[str] = None,
+        default_account: Optional[str] = None,
+        default_partition: Optional[str] = None,
         **backend_kwargs,
     ):
         """Initialize a cluster connection.
 
         Args:
-            backend_type: Backend implementation to use. Currently supports "ssh".
+            backend_type: Backend implementation to use. Currently supports "ssh" and "local".
                 Defaults to "ssh".
             callbacks: List of callback instances to receive lifecycle events
                 (packaging, submission, execution). Callbacks enable observability
@@ -226,6 +229,13 @@ class Cluster:
             job_base_dir: Base directory on the target machine where job artifacts
                 (scripts, outputs, results) will be stored. Each job gets a unique
                 subdirectory. Defaults to "~/slurm_jobs" on the target.
+            default_packaging: Default packaging strategy for all tasks submitted through
+                this cluster. Tasks can override this. Options: "auto" (default), "wheel",
+                "none", "container:IMAGE:TAG". Defaults to None (no cluster-wide default).
+            default_account: Default SLURM account for all jobs submitted through this
+                cluster. Tasks/submissions can override this. Defaults to None.
+            default_partition: Default SLURM partition for all jobs submitted through this
+                cluster. Tasks/submissions can override this. Defaults to None.
             **backend_kwargs: Additional arguments passed to the backend constructor.
                 For SSH backend: hostname, username, password, key_filename, port,
                 and other SSH connection parameters.
@@ -234,10 +244,17 @@ class Cluster:
             ValueError: If an unsupported backend_type is specified.
             RuntimeError: If backend initialization fails (e.g., SSH connection issues).
 
-        Note:
-            For production use, prefer `Cluster.from_env()` which loads configuration
-            from a Slurmfile, enabling environment-specific settings and keeping
-            credentials out of code.
+        Example:
+            Create cluster with defaults:
+
+                >>> cluster = Cluster(
+                ...     backend_type="ssh",
+                ...     hostname="hpc.example.edu",
+                ...     username="myuser",
+                ...     default_packaging="auto",
+                ...     default_account="research",
+                ...     default_partition="cpu"
+                ... )
         """
         # Validate backend type early for clearer error messages
         valid_backends = ["ssh", "local"]
@@ -249,6 +266,9 @@ class Cluster:
 
         self.backend_type = backend_type
         self.callbacks = callbacks or []
+        self.default_packaging = default_packaging
+        self.default_account = default_account
+        self.default_partition = default_partition
 
         if job_base_dir is not None:
             backend_kwargs["job_base_dir"] = job_base_dir
@@ -432,6 +452,111 @@ class Cluster:
 
         return cluster_instance
 
+    @staticmethod
+    def add_argparse_args(parser) -> None:
+        """Add common cluster configuration arguments to an argparse parser.
+
+        This is a convenience method for building CLI tools that create Cluster instances.
+        It adds standard arguments for SSH connection and cluster defaults.
+
+        Args:
+            parser: An argparse.ArgumentParser instance to add arguments to.
+
+        Example:
+            >>> import argparse
+            >>> from slurm import Cluster
+            >>>
+            >>> parser = argparse.ArgumentParser()
+            >>> Cluster.add_argparse_args(parser)
+            >>> args = parser.parse_args()
+            >>> cluster = Cluster.from_args(args)
+        """
+        parser.add_argument(
+            "--hostname", help="Hostname of the SLURM cluster (for SSH backend)"
+        )
+        parser.add_argument(
+            "--username",
+            default=os.getenv("USER"),
+            help="Username for SSH connection (default: $USER)",
+        )
+        parser.add_argument(
+            "--backend",
+            default="ssh",
+            choices=["ssh", "local"],
+            help="Backend type (default: ssh)",
+        )
+        parser.add_argument(
+            "--job-base-dir",
+            help="Base directory for job artifacts on cluster (default: ~/slurm_jobs)",
+        )
+        parser.add_argument(
+            "--account", help="Default SLURM account for job submissions"
+        )
+        parser.add_argument(
+            "--partition", help="Default SLURM partition for job submissions"
+        )
+        parser.add_argument(
+            "--packaging",
+            default="auto",
+            help="Default packaging strategy: auto, wheel, none, or container:IMAGE:TAG (default: auto)",
+        )
+
+    @classmethod
+    def from_args(cls, args, **extra_kwargs) -> "Cluster":
+        """Create a Cluster instance from argparse arguments.
+
+        This method works with arguments added by `add_argparse_args()` to create
+        a cluster from command-line arguments.
+
+        Args:
+            args: Parsed arguments from argparse (argparse.Namespace).
+            **extra_kwargs: Additional keyword arguments to pass to Cluster.__init__(),
+                which override values from args. Useful for programmatically setting
+                callbacks, backend_kwargs, etc.
+
+        Returns:
+            Cluster instance configured from the arguments.
+
+        Example:
+            >>> import argparse
+            >>> from slurm import Cluster
+            >>> from slurm.callbacks import LoggerCallback
+            >>>
+            >>> parser = argparse.ArgumentParser()
+            >>> Cluster.add_argparse_args(parser)
+            >>> args = parser.parse_args()
+            >>>
+            >>> cluster = Cluster.from_args(
+            ...     args,
+            ...     callbacks=[LoggerCallback()]
+            ... )
+        """
+        # Extract cluster configuration from args
+        kwargs = {}
+
+        # Backend configuration
+        if hasattr(args, "backend") and args.backend:
+            kwargs["backend_type"] = args.backend
+        if hasattr(args, "hostname") and args.hostname:
+            kwargs["hostname"] = args.hostname
+        if hasattr(args, "username") and args.username:
+            kwargs["username"] = args.username
+        if hasattr(args, "job_base_dir") and args.job_base_dir:
+            kwargs["job_base_dir"] = args.job_base_dir
+
+        # Default parameters
+        if hasattr(args, "packaging") and args.packaging:
+            kwargs["default_packaging"] = args.packaging
+        if hasattr(args, "account") and args.account:
+            kwargs["default_account"] = args.account
+        if hasattr(args, "partition") and args.partition:
+            kwargs["default_partition"] = args.partition
+
+        # Merge in any extra_kwargs (these take precedence)
+        kwargs.update(extra_kwargs)
+
+        return cls(**kwargs)
+
     def submit(
         self,
         task_func: SlurmTask,
@@ -554,11 +679,35 @@ class Cluster:
             submit_overrides = dict(normalized_overrides)
 
             def _prepare_packaging() -> Any:
+                from .decorators import _parse_packaging_config
+
                 effective_packaging_config: Optional[Dict[str, Any]] = packaging_config
+
+                # Use provided packaging_config, else task's packaging, else cluster defaults
                 if effective_packaging_config is None:
-                    effective_packaging_config = getattr(
-                        self, "packaging_defaults", None
-                    )
+                    # Check if task has packaging configuration
+                    task_packaging = task_func.packaging
+                    # Skip task packaging if it's "auto" to allow cluster defaults to take precedence
+                    # This allows workflows to override child task packaging with "inherit"
+                    if task_packaging and task_packaging.get("type") not in (
+                        "auto",
+                        None,
+                    ):
+                        effective_packaging_config = task_packaging
+                    else:
+                        # Use cluster default_packaging (new string-based system)
+                        if self.default_packaging:
+                            effective_packaging_config = _parse_packaging_config(
+                                self.default_packaging, {}
+                            )
+                        else:
+                            # Fall back to old Slurmfile packaging_defaults for compatibility
+                            effective_packaging_config = getattr(
+                                self, "packaging_defaults", None
+                            )
+                            # If still using auto from task, resolve it now
+                            if effective_packaging_config is None and task_packaging:
+                                effective_packaging_config = task_packaging
 
                 logger.debug(
                     "Effective packaging config: %s", effective_packaging_config
@@ -675,12 +824,19 @@ class Cluster:
             )
 
             # Build effective SBATCH options with proper precedence:
-            # 1. Slurmfile [submit] defaults (lowest priority)
-            # 2. Task decorator defaults
-            # 3. Runtime overrides (highest priority)
+            # 1. Cluster defaults (default_account, default_partition) - lowest priority
+            # 2. Slurmfile [submit] defaults (for backward compatibility)
+            # 3. Task decorator defaults
+            # 4. Runtime overrides - highest priority
             effective_sbatch_options: Dict[str, Any] = {}
 
-            # Add Slurmfile submit defaults if available
+            # Add cluster-wide defaults (new string-based API)
+            if self.default_account:
+                effective_sbatch_options["account"] = self.default_account
+            if self.default_partition:
+                effective_sbatch_options["partition"] = self.default_partition
+
+            # Add Slurmfile submit defaults if available (for backward compatibility)
             slurmfile_submit_defaults = getattr(self, "submit_defaults", None)
             if slurmfile_submit_defaults and isinstance(
                 slurmfile_submit_defaults, dict

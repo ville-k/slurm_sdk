@@ -24,6 +24,10 @@ def create_mock_cluster(tmp_path: Path) -> Cluster:
     cluster.packaging_defaults = {"type": "none"}
     cluster.callbacks = []
     cluster.console = None
+    # Add new string-based API attributes
+    cluster.default_packaging = None
+    cluster.default_account = None
+    cluster.default_partition = None
     return cluster
 
 

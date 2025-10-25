@@ -269,21 +269,28 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run workflow graph visualization example."
     )
-    parser.add_argument(
-        "--slurmfile",
-        default=None,
-        help="Path to the Slurmfile to load",
-    )
-    parser.add_argument(
-        "--env",
-        default="default",
-        help="Environment key within the Slurmfile",
-    )
+
+    # Add standard cluster configuration arguments
+    Cluster.add_argparse_args(parser)
+
+    # Add example-specific arguments
     parser.add_argument(
         "--dataset",
         default="iris_dataset",
         help="Name of the dataset to process",
     )
+    # Add legacy Slurmfile support (optional)
+    parser.add_argument(
+        "--slurmfile",
+        default=None,
+        help="(Legacy) Path to Slurmfile for backward compatibility",
+    )
+    parser.add_argument(
+        "--env",
+        default="default",
+        help="(Legacy) Environment key within the Slurmfile",
+    )
+
     args = parser.parse_args()
 
     print("=" * 70)
@@ -295,18 +302,23 @@ def main():
     graph_callback = WorkflowGraphCallback()
     logger_callback = LoggerCallback()
 
-    # Create cluster from Slurmfile
+    # Create cluster from args or Slurmfile (backward compatibility)
     print("\nLoading cluster configuration...")
     if args.slurmfile:
-        print(f"  Slurmfile: {args.slurmfile}")
-    print(f"  Environment: {args.env}")
+        print(f"  Using legacy Slurmfile: {args.slurmfile}")
+        print(f"  Environment: {args.env}")
+        cluster = Cluster.from_env(
+            args.slurmfile,
+            env=args.env,
+            callbacks=[graph_callback, logger_callback],
+        )
+    else:
+        print("  Using command-line configuration")
+        cluster = Cluster.from_args(
+            args,
+            callbacks=[graph_callback, logger_callback],
+        )
     print()
-
-    cluster = Cluster.from_env(
-        args.slurmfile,
-        env=args.env,
-        callbacks=[graph_callback, logger_callback],
-    )
 
     print("Submitting ML pipeline workflow...")
     job = cluster.submit(ml_pipeline)(args.dataset)

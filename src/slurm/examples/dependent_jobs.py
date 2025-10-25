@@ -5,17 +5,16 @@ context manager. Tasks return Jobs (Futures) when called, and dependencies
 are automatically tracked when Jobs are passed as arguments.
 
 The pipeline demonstrates:
-- Context manager usage (with Cluster.from_env())
+- Context manager usage (with Cluster(...))
 - Automatic dependency detection (passing Job as argument)
 - Explicit dependencies (.after())
-- Container packaging
 - Result retrieval
+- Wheel packaging (default)
 """
 
 from __future__ import annotations
 
 import argparse
-import pathlib
 import time
 from typing import Optional
 
@@ -26,9 +25,6 @@ from slurm.cluster import Cluster
 from slurm.decorators import task
 from slurm.logging import configure_logging
 from slurm.runtime import JobContext
-
-
-DEFAULT_SLURMFILE = pathlib.Path(__file__).with_name("Slurmfile.container_example.toml")
 
 
 @task(time="00:05:00", mem="1G")
@@ -194,16 +190,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run dependent jobs pipeline demonstrating submitless execution."
     )
-    parser.add_argument(
-        "--slurmfile",
-        default=str(DEFAULT_SLURMFILE),
-        help="Path to the Slurmfile to load",
-    )
-    parser.add_argument(
-        "--env",
-        default="default",
-        help="Environment key within the Slurmfile",
-    )
+
+    # Add standard cluster configuration arguments
+    Cluster.add_argparse_args(parser)
+
+    # Add example-specific arguments
     parser.add_argument(
         "--dataset-size",
         type=int,
@@ -232,9 +223,8 @@ def main() -> None:
     console.print(f"Learning rate: {args.learning_rate}\n")
 
     # Use cluster context manager - enables submitless execution
-    with Cluster.from_env(
-        args.slurmfile,
-        env=args.env,
+    with Cluster.from_args(
+        args,
         callbacks=[RichLoggerCallback(console=console)],
     ) as cluster:
         console.print("[yellow]Stage 1: Generate Data[/yellow]")

@@ -1,6 +1,13 @@
+"""Simple hello world example demonstrating basic slurm-sdk usage.
+
+This example shows:
+- Creating a cluster with explicit configuration (no config file needed)
+- Using the new string-based packaging syntax with cluster defaults
+- Using argparse helpers for common cluster configuration
+"""
+
 import logging
 import argparse
-import os
 import socket
 import time
 
@@ -11,8 +18,6 @@ from slurm.logging import configure_logging
 
 
 @task(
-    name="hello_world",
-    partition="cpu",
     time="00:05:00",
     mem="1G",
     cpus_per_task=1,
@@ -36,15 +41,12 @@ def main():
     """
     Main entry point for the example script.
     """
-    parser = argparse.ArgumentParser(description="Submit jobs to a SLURM cluster")
-    parser.add_argument("--hostname", required=True, help="Hostname for SSH backend")
-    parser.add_argument(
-        "--username",
-        default=os.environ.get("USER"),
-        help="Username for SSH backend. Defaults to current user's username.",
-    )
-    parser.add_argument("--account", help="SLURM account")
-    parser.add_argument("--partition", help="SLURM partition")
+    parser = argparse.ArgumentParser(description="Submit a simple hello world job")
+
+    # Add standard cluster configuration arguments
+    Cluster.add_argparse_args(parser)
+
+    # Add example-specific arguments
     parser.add_argument(
         "--banner-timeout",
         type=int,
@@ -52,32 +54,23 @@ def main():
         help="Timeout for waiting for SSH banner (seconds)",
     )
     parser.add_argument("--loglevel", type=str, default="INFO", help="Logging level")
+
     args = parser.parse_args()
 
     configure_logging(level=getattr(logging, args.loglevel.upper(), logging.INFO))
-    backend_kwargs = {}
-    backend_kwargs["hostname"] = args.hostname
-    backend_kwargs["username"] = args.username
-    backend_kwargs["banner_timeout"] = args.banner_timeout
 
-    cluster = Cluster(
-        backend_type="ssh",
+    # Create cluster from args with additional callbacks
+    cluster = Cluster.from_args(
+        args,
+        banner_timeout=args.banner_timeout,
         callbacks=[
             LoggerCallback(),
             BenchmarkCallback(),
         ],
-        **backend_kwargs,
     )
 
-    job = hello_world.submit(
-        cluster=cluster,
-        account=args.account,
-        partition=args.partition,
-        packaging={
-            "type": "wheel",
-            "python_version": "3.9",
-        },
-    )()
+    # Submit job (uses cluster defaults for packaging, account, partition)
+    job = hello_world.submit(cluster)()
 
     job.wait()
     result = job.get_result()

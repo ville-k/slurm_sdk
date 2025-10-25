@@ -36,6 +36,10 @@ def test_cluster_submit_with_local_backend(monkeypatch, tmp_path):
     cluster.backend_type = "LocalBackend"
     cluster.console = None
     cluster.backend = LocalBackend(job_base_dir=str(tmp_path))
+    # Add new string-based API attributes
+    cluster.default_packaging = None
+    cluster.default_account = None
+    cluster.default_partition = None
 
     captured: dict[str, object] = {}
 

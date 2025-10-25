@@ -26,14 +26,18 @@ def test_task_as_function_creates_slurm_task():
 
 
 def test_dynamic_task_with_container_file():
-    """Test dynamic task creation with container_file parameter."""
+    """Test dynamic task creation with packaging_dockerfile parameter (new API)."""
 
     def process_data(data: str) -> str:
         return data.upper()
 
-    # Create task with container_file
+    # Create task with packaging string and packaging_dockerfile kwarg
     container_task = task(
-        process_data, time="00:30:00", mem="4G", container_file="path/to/Dockerfile"
+        process_data,
+        time="00:30:00",
+        mem="4G",
+        packaging="container",
+        packaging_dockerfile="path/to/Dockerfile",
     )
 
     # Verify packaging config
@@ -120,19 +124,21 @@ def test_dynamic_task_with_custom_job_name():
 
 
 def test_dynamic_task_packaging_precedence():
-    """Test that explicit packaging takes precedence over container_file."""
+    """Test that explicit packaging dict (old API) still works and takes precedence."""
 
     def my_func(x: int) -> int:
         return x
 
-    # Both packaging and container_file specified
+    # Dict packaging (old API) with packaging_* kwargs (new API)
     my_task = task(
         my_func,
         time="00:10:00",
-        packaging={"type": "wheel"},
-        container_file="ignored.Dockerfile",
+        packaging={"type": "wheel"},  # Old dict API
+        packaging_dockerfile="ignored.Dockerfile",  # New kwarg API
     )
 
-    # packaging should take precedence
+    # Dict packaging should take precedence over packaging_* kwargs
     assert my_task.packaging["type"] == "wheel"
+    # The dict update in _parse_packaging_config means dockerfile gets added from kwargs first,
+    # then overridden by the dict, so it won't be present
     assert "dockerfile" not in my_task.packaging

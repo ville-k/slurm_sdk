@@ -1,3 +1,13 @@
+"""Example demonstrating rich preflight callback with legacy Slurmfile configuration.
+
+NOTE: This example uses Cluster.from_env() with Slurmfile configuration for backward
+compatibility. The focus of this example is the PreflightCallback implementation,
+which demonstrates how to build rich interactive UIs during job submission.
+
+For new projects without complex callbacks, see hello_world.py for the recommended
+simplified API approach.
+"""
+
 import argparse
 import logging
 import os

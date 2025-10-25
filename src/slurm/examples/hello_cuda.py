@@ -1,9 +1,14 @@
-"""GPU-enabled container example that executes ``nvidia-smi`` inside PyTorch."""
+"""GPU-enabled container example that executes ``nvidia-smi`` inside PyTorch.
+
+This example shows:
+- Using GPU resources with SLURM
+- Using a GPU-enabled container image (PyTorch with CUDA)
+- Running nvidia-smi inside the container
+"""
 
 from __future__ import annotations
 
 import argparse
-import pathlib
 import subprocess
 
 from rich.console import Console
@@ -14,16 +19,13 @@ from slurm.decorators import task
 from slurm.logging import configure_logging
 
 
-DEFAULT_SLURMFILE = pathlib.Path(__file__).with_name("Slurmfile.cuda_example.toml")
-
-
 @task(
-    name="hello_cuda",
     time="01:00:00",
     nodes=1,
     gpus_per_node=8,
     ntasks_per_node=8,
     exclusive=None,
+    packaging="container:pytorch/pytorch:2.0.0-cuda11.7-cudnn8-runtime",
 )
 def hello_cuda_task() -> str:
     """Run ``nvidia-smi`` inside the container and return its output."""
@@ -39,52 +41,30 @@ def hello_cuda_task() -> str:
     return output
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Create the CLI parser for the CUDA example."""
-
-    parser = argparse.ArgumentParser(
-        description=(
-            "Submit the hello_cuda task using a Slurmfile configured for a "
-            "GPU-capable container image."
-        )
-    )
-    parser.add_argument(
-        "--slurmfile",
-        default=str(DEFAULT_SLURMFILE),
-        help="Path to the Slurmfile to load (defaults to the bundled example).",
-    )
-    parser.add_argument(
-        "--env",
-        default="default",
-        help="Environment key within the Slurmfile to load (defaults to 'default').",
-    )
-    return parser
-
-
 def main() -> None:
     """Entry point for the CUDA container packaging example."""
 
     console = Console()
-    parser = build_parser()
+    parser = argparse.ArgumentParser(
+        description="Submit a GPU task using a CUDA-enabled container"
+    )
+
+    # Add standard cluster configuration arguments
+    Cluster.add_argparse_args(parser)
+
     args = parser.parse_args()
 
     configure_logging()
 
     try:
-        cluster = Cluster.from_env(
-            args.slurmfile,
-            env=args.env,
+        # Create cluster from args
+        cluster = Cluster.from_args(
+            args,
             callbacks=[LoggerCallback(console=console), BenchmarkCallback()],
         )
 
-        env_submit = cluster.environment_config["submit"]
-
-        job = hello_cuda_task.submit(
-            cluster=cluster,
-            packaging=cluster.packaging_defaults,
-            account=env_submit.get("account"),
-            partition=env_submit.get("partition"),
-        )()
+        # Submit job (uses PyTorch container from task decorator)
+        job = hello_cuda_task.submit(cluster)()
 
         job.wait()
         result = job.get_result()

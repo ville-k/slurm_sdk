@@ -6,7 +6,7 @@ This example showcases the full workflow capabilities including:
 - Array jobs via .map()
 - Automatic dependency tracking
 - Conditional logic based on results
-- Container packaging
+- Wheel packaging (default)
 - Shared directory usage
 
 The workflow implements a hyperparameter search pipeline:
@@ -20,7 +20,6 @@ The workflow implements a hyperparameter search pipeline:
 from __future__ import annotations
 
 import argparse
-import pathlib
 import time
 from typing import Optional
 
@@ -33,9 +32,6 @@ from slurm.decorators import task, workflow
 from slurm.logging import configure_logging
 from slurm.runtime import JobContext
 from slurm.workflow import WorkflowContext
-
-
-DEFAULT_SLURMFILE = pathlib.Path(__file__).with_name("Slurmfile.container_example.toml")
 
 
 @task(time="00:05:00", mem="2G")
@@ -317,16 +313,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run ML workflow demonstrating arrays, map, and conditional logic."
     )
-    parser.add_argument(
-        "--slurmfile",
-        default=str(DEFAULT_SLURMFILE),
-        help="Path to the Slurmfile to load",
-    )
-    parser.add_argument(
-        "--env",
-        default="default",
-        help="Environment key within the Slurmfile",
-    )
+
+    # Add standard cluster configuration arguments
+    Cluster.add_argparse_args(parser)
+
+    # Add example-specific arguments
     parser.add_argument(
         "--dataset",
         default="mnist",
@@ -385,9 +376,8 @@ def main() -> None:
     console.print()
 
     # Execute workflow with cluster context
-    with Cluster.from_env(
-        args.slurmfile,
-        env=args.env,
+    with Cluster.from_args(
+        args,
         callbacks=[RichLoggerCallback(console=console)],
     ) as cluster:
         # Call workflow - returns a Job (Future)

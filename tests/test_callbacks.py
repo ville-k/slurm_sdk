@@ -82,6 +82,10 @@ def test_callbacks_invoked_local_backend(tmp_path):
     cluster.console = None
     cluster.callbacks = [callback]
     cluster.backend = LocalBackend(job_base_dir=str(tmp_path))
+    # Add new string-based API attributes
+    cluster.default_packaging = None
+    cluster.default_account = None
+    cluster.default_partition = None
 
     job = echo_val.submit(cluster=cluster, packaging={"type": "none"})(7)
     job.wait()

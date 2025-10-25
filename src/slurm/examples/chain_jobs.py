@@ -1,6 +1,13 @@
+"""Example showing how to chain jobs together by passing results.
+
+This example shows:
+- Submitting multiple jobs sequentially
+- Passing the result of one job as input to the next
+- Using cluster defaults for consistent configuration
+"""
+
 import logging
 import argparse
-import os
 import socket
 import time
 
@@ -10,8 +17,6 @@ from slurm.logging import configure_logging
 
 
 @task(
-    name="hello_world",
-    partition="cpu",
     time="00:05:00",
     mem="1G",
     cpus_per_task=1,
@@ -32,8 +37,6 @@ def hello_world():
 
 
 @task(
-    name="process_results",
-    partition="cpu",
     time="00:05:00",
     mem="1G",
     cpus_per_task=1,
@@ -61,15 +64,14 @@ def main():
     """
     Main entry point for the example script.
     """
-    parser = argparse.ArgumentParser(description="Submit jobs to a SLURM cluster")
-    parser.add_argument("--hostname", required=True, help="Hostname for SSH backend")
-    parser.add_argument(
-        "--username",
-        default=os.environ.get("USER"),
-        help="Username for SSH backend. Defaults to current user's username.",
+    parser = argparse.ArgumentParser(
+        description="Chain jobs together on a SLURM cluster"
     )
-    parser.add_argument("--account", help="SLURM account")
-    parser.add_argument("--partition", help="SLURM partition")
+
+    # Add standard cluster configuration arguments
+    Cluster.add_argparse_args(parser)
+
+    # Add example-specific arguments
     parser.add_argument(
         "--banner-timeout",
         type=int,
@@ -77,30 +79,19 @@ def main():
         help="Timeout for waiting for SSH banner (seconds)",
     )
     parser.add_argument("--loglevel", type=str, default="INFO", help="Logging level")
+
     args = parser.parse_args()
 
     configure_logging(level=getattr(logging, args.loglevel.upper(), logging.INFO))
-    backend_kwargs = {}
-    backend_kwargs["hostname"] = args.hostname
-    backend_kwargs["username"] = args.username
-    backend_kwargs["banner_timeout"] = args.banner_timeout
-    account = args.account
-    partition = args.partition
 
-    _ = Cluster(
-        backend_type="ssh",
-        **backend_kwargs,
+    # Create cluster from args
+    cluster = Cluster.from_args(
+        args,
+        banner_timeout=args.banner_timeout,
     )
 
     # Submit the first job
-    hello_job = hello_world.submit(
-        account=account,
-        partition=partition,
-        packaging={
-            "type": "wheel",
-            "python_version": "3.9",
-        },
-    )()
+    hello_job = hello_world.submit(cluster)()
 
     # Wait for the job to complete
     hello_job.wait()
@@ -112,14 +103,7 @@ def main():
 
     # Submit the second job with the result data
     print("Submitting process_results job with result content...")
-    process_job = process_results.submit(
-        account=account,
-        partition=partition,
-        packaging={
-            "type": "wheel",
-            "python_version": "3.9",
-        },
-    )(hello_result_content)
+    process_job = process_results.submit(cluster)(hello_result_content)
 
     # Wait for the second job to complete
     process_job.wait()

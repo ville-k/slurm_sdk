@@ -1,3 +1,16 @@
+"""Example demonstrating legacy Slurmfile configuration (DEPRECATED).
+
+NOTE: This example uses Cluster.from_env() with Slurmfile configuration for backward
+compatibility. For new projects, use the new simplified API with Cluster.from_args():
+- See hello_world.py for the recommended approach
+- Cluster defaults (default_packaging, default_account, default_partition)
+- String-based packaging syntax ("auto", "wheel", "none", "container:IMAGE:TAG")
+- Argparse helpers (Cluster.add_argparse_args(), Cluster.from_args())
+
+Slurmfile support is maintained for backward compatibility but not recommended
+for new projects.
+"""
+
 import argparse
 import socket
 import time

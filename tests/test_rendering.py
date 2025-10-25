@@ -60,7 +60,7 @@ def test_render_job_script_basic_includes_sbatch_and_runner(tmp_path):
     assert "#SBATCH --account=acc" in script
     assert "#SBATCH --partition=part" in script
     assert "#SBATCH --exclusive" in script.splitlines()
-    assert '"${PY_EXEC[@]:-python}" -m slurm.runner' in script
+    assert '"$PY_EXEC_RESOLVED" -m slurm.runner' in script
     assert f'--job-dir "{str(tmp_path)}"' in script
     assert f'--stdout-path "{str(tmp_path)}/slurm_abc123.out"' in script
     assert f'--stderr-path "{str(tmp_path)}/slurm_abc123.err"' in script
@@ -160,4 +160,4 @@ def test_render_container_job_with_uv_run_python(tmp_path):
     # Verify srun uses the array variable reference directly
     assert "srun" in script
     assert "--container-image=my-uv-image:latest" in script
-    assert '"${PY_EXEC[@]:-python}" -m slurm.runner' in script
+    assert '"$PY_EXEC_RESOLVED" -m slurm.runner' in script
