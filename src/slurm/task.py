@@ -1,5 +1,7 @@
 """Task module for defining Slurm tasks."""
 
+from __future__ import annotations
+
 import functools
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 

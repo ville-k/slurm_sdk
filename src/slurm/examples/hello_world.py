@@ -14,6 +14,7 @@ import time
 from slurm.callbacks.callbacks import BenchmarkCallback, LoggerCallback
 from slurm.cluster import Cluster
 from slurm.decorators import task
+from slurm.job import Job
 from slurm.logging import configure_logging
 
 
@@ -21,8 +22,10 @@ from slurm.logging import configure_logging
     time="00:05:00",
     mem="1G",
     cpus_per_task=1,
+    packaging="wheel",
+    packaging_python_version="3.9",
 )
-def hello_world():
+def hello_world() -> str:
     """
     A simple hello world task.
 
@@ -41,7 +44,10 @@ def main():
     """
     Main entry point for the example script.
     """
-    parser = argparse.ArgumentParser(description="Submit a simple hello world job")
+    parser = argparse.ArgumentParser(
+        description="Submit a simple hello world job",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
 
     # Add standard cluster configuration arguments
     Cluster.add_argparse_args(parser)
@@ -70,11 +76,18 @@ def main():
     )
 
     # Submit job (uses cluster defaults for packaging, account, partition)
-    job = cluster.submit(hello_world)()
+    job: Job[str] = cluster.submit(hello_world)()
 
-    job.wait()
-    result = job.get_result()
-    print(f"Result: {result}")
+    success = job.wait()
+    if success:
+        result: str = job.get_result()
+        print(f"Result: {result}")
+    else:
+        print("Job failed!")
+        print("Job std out:")
+        print(job.get_stdout())
+        print("Job std err:")
+        print(job.get_stderr())
 
 
 if __name__ == "__main__":

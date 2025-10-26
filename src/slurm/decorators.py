@@ -6,8 +6,13 @@ from typing import (
     TypeVar,
     TYPE_CHECKING,
     overload,
-    ParamSpec,
 )
+
+# ParamSpec was added in Python 3.10, use typing_extensions for 3.9
+try:
+    from typing import ParamSpec
+except ImportError:
+    from typing_extensions import ParamSpec
 
 from .task import SlurmTask, normalize_sbatch_options
 

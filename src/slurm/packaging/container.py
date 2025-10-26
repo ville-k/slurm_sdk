@@ -478,7 +478,15 @@ class ContainerPackagingStrategy(PackagingStrategy):
                 logger.debug("Detected container runtime: %s", candidate)
                 return candidate
         raise PackagingError(
-            "Unable to find a container runtime. Set 'runtime' to the docker/podman binary."
+            "Container runtime not found.\n\n"
+            "The slurm-sdk needs Docker or Podman to build and run container images.\n"
+            "Neither 'docker' nor 'podman' was found in your PATH.\n\n"
+            "To fix this:\n"
+            "  1. Install Docker Desktop: https://www.docker.com/products/docker-desktop\n"
+            "  2. Or install Podman: https://podman.io/getting-started/installation\n"
+            "  3. Ensure the command is in your PATH (try: which docker)\n"
+            "  4. Or specify explicitly: packaging='container', packaging_runtime='/path/to/docker'\n\n"
+            "If you don't need container packaging, use: packaging='wheel' or packaging='none'"
         )
 
     def _resolve_project_root(self) -> pathlib.Path:
@@ -497,17 +505,49 @@ class ContainerPackagingStrategy(PackagingStrategy):
             if not dockerfile_path.is_absolute():
                 dockerfile_path = (project_root / dockerfile_path).resolve()
             if not dockerfile_path.exists():
-                raise PackagingError(f"Dockerfile not found at {dockerfile_path}")
+                raise PackagingError(
+                    f"Dockerfile not found.\n\n"
+                    f"Expected location: {dockerfile_path}\n"
+                    f"Specified path: {self.dockerfile}\n"
+                    f"Project root: {project_root}\n\n"
+                    "Common causes:\n"
+                    "  1. Dockerfile path is incorrect or misspelled\n"
+                    "  2. Dockerfile is in a different directory\n"
+                    "  3. Relative path is relative to wrong directory\n\n"
+                    "To fix:\n"
+                    "  1. Verify Dockerfile exists at the specified path\n"
+                    "  2. Use absolute path: packaging_dockerfile='/absolute/path/to/Dockerfile'\n"
+                    "  3. Or use path relative to project root\n"
+                    f"  4. Check working directory: {pathlib.Path.cwd()}"
+                )
 
         if self.context:
             context_path = pathlib.Path(self.context).expanduser()
             if not context_path.is_absolute():
                 context_path = (project_root / context_path).resolve()
             if not context_path.exists():
-                raise PackagingError(f"Context directory not found: {context_path}")
+                raise PackagingError(
+                    f"Build context directory not found.\n\n"
+                    f"Expected location: {context_path}\n"
+                    f"Specified path: {self.context}\n"
+                    f"Project root: {project_root}\n\n"
+                    "The build context is the directory containing files needed for the Docker build.\n\n"
+                    "To fix:\n"
+                    "  1. Verify the context directory exists\n"
+                    "  2. Use absolute path: packaging_context='/absolute/path/to/context'\n"
+                    "  3. Or use path relative to project root\n"
+                    f"  4. Check working directory: {pathlib.Path.cwd()}"
+                )
             if not context_path.is_dir():
                 raise PackagingError(
-                    f"Context path must be a directory: {context_path}"
+                    f"Build context must be a directory.\n\n"
+                    f"Path: {context_path}\n"
+                    f"Type: {('file' if context_path.is_file() else 'unknown')}\n\n"
+                    "The build context directory contains your Dockerfile and application files.\n\n"
+                    "To fix:\n"
+                    "  1. Ensure the path points to a directory, not a file\n"
+                    "  2. Create the directory if it doesn't exist\n"
+                    "  3. Verify permissions allow reading the directory"
                 )
 
         if dockerfile_path and not context_path:
@@ -663,7 +703,44 @@ class ContainerPackagingStrategy(PackagingStrategy):
                 return_code,
                 combined_output,
             )
-            raise PackagingError(f"Failed to {description} container image")
+
+            # Build helpful error message
+            error_msg = f"Container {description} failed.\n\n"
+            error_msg += f"Command: {' '.join(cmd)}\n"
+            error_msg += f"Exit code: {return_code}\n\n"
+            error_msg += f"Output (last 50 lines):\n{combined_output}\n\n"
+
+            if description == "build":
+                error_msg += (
+                    "Common causes:\n"
+                    "  1. Syntax error in Dockerfile\n"
+                    "  2. Base image not found or network issues\n"
+                    "  3. Build command failed (RUN, COPY, etc.)\n"
+                    "  4. Insufficient disk space or permissions\n\n"
+                    "To fix:\n"
+                    "  1. Check Dockerfile syntax and fix any errors\n"
+                    "  2. Verify base image exists: docker pull <base-image>\n"
+                    "  3. Try building manually to see full output:\n"
+                    f"     {' '.join(cmd)}\n"
+                    "  4. Check Docker daemon logs: docker system df\n"
+                    "  5. Ensure you have sufficient disk space"
+                )
+            elif description == "push":
+                error_msg += (
+                    "Common causes:\n"
+                    "  1. Not authenticated to registry (docker login required)\n"
+                    "  2. No permission to push to this repository\n"
+                    "  3. Network connectivity issues\n"
+                    "  4. Registry is unavailable or rate-limited\n\n"
+                    "To fix:\n"
+                    "  1. Login to registry: docker login <registry>\n"
+                    "  2. Verify you have push access to the repository\n"
+                    "  3. Check network connectivity\n"
+                    "  4. Try pushing manually to see full output:\n"
+                    f"     {' '.join(cmd)}"
+                )
+
+            raise PackagingError(error_msg)
 
     @staticmethod
     def _handle_build_progress(progress, task_id: int, line: str) -> bool:

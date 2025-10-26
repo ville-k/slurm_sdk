@@ -372,15 +372,20 @@ class WheelPackagingStrategy(PackagingStrategy):
         cmd = ["uv", "build", "--wheel", "-o", output_dir, str(project_root)]
         logger.debug("Building wheel with command: %s", " ".join(cmd))
 
+        uv_error = None
         try:
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)
             logger.debug("uv build output: %s", result.stdout)
         except subprocess.CalledProcessError as e:
-            logger.error("Error running uv build: %s", e)
-            logger.error("stdout: %s", e.stdout)
-            logger.error("stderr: %s", e.stderr)
-            logger.warning("Falling back to pip...")
-            return self._build_with_pip(project_root, output_dir)
+            # Store uv error details for potential use later
+            uv_error = e
+            logger.error(
+                "Error running uv build (exit code %d), falling back to pip",
+                e.returncode,
+            )
+            logger.debug("uv stdout: %s", e.stdout)
+            logger.debug("uv stderr: %s", e.stderr)
+            return self._build_with_pip(project_root, output_dir, uv_error=uv_error)
         except Exception as e:  # Broader safety net for mocked or unexpected failures
             logger.error("uv build failed unexpectedly: %s", e)
             logger.warning("Falling back to pip...")
@@ -399,13 +404,19 @@ class WheelPackagingStrategy(PackagingStrategy):
         logger.debug("Successfully built wheel: %s", wheels[0])
         return str(wheels[0])
 
-    def _build_with_pip(self, project_root: pathlib.Path, output_dir: str) -> str:
+    def _build_with_pip(
+        self,
+        project_root: pathlib.Path,
+        output_dir: str,
+        uv_error: Optional[subprocess.CalledProcessError] = None,
+    ) -> str:
         """
         Build a wheel using pip.
 
         Args:
             project_root: Path to the project root
             output_dir: Directory to output the wheel to
+            uv_error: Optional error from previous uv build attempt
 
         Returns:
             Path to the built wheel
@@ -414,37 +425,101 @@ class WheelPackagingStrategy(PackagingStrategy):
         try:
             subprocess.run(["pip", "--version"], check=True, capture_output=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
-            raise PackagingError(
+            error_msg = (
                 "Failed to build wheel: Neither 'uv' nor 'pip' is available.\n\n"
+            )
+
+            if uv_error:
+                error_msg += (
+                    f"uv build failed with exit code {uv_error.returncode}:\n"
+                    f"{uv_error.stderr}\n\n"
+                    "And pip is not installed.\n\n"
+                )
+
+            error_msg += (
                 "The slurm-sdk requires a Python package build tool to package your code for remote execution.\n\n"
                 "To fix this, install one of the following:\n"
                 "  1. uv (recommended):    pip install uv\n"
                 "  2. pip (fallback):      Already included with most Python installations\n\n"
-                "If you don't want automatic packaging, use: packaging={'type': 'none'} in your @task decorator."
+                "If you don't want automatic packaging, use: packaging='none' in your @task decorator."
             )
+            raise PackagingError(error_msg)
 
         # Build the wheel
         cmd = ["pip", "wheel", "--no-deps", "-w", output_dir, str(project_root)]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            logger.debug("pip wheel output: %s", result.stdout)
+        except subprocess.CalledProcessError as e:
+            error_msg = "Failed to build wheel.\n\n"
+
+            if uv_error:
+                error_msg += (
+                    "Both uv and pip builds failed:\n\n"
+                    f"1. uv build failed (exit code {uv_error.returncode}):\n"
+                    f"   {uv_error.stderr}\n\n"
+                    f"2. pip build failed (exit code {e.returncode}):\n"
+                    f"   Command: {' '.join(cmd)}\n"
+                    f"   Stdout: {e.stdout}\n"
+                    f"   Stderr: {e.stderr}\n\n"
+                )
+            else:
+                error_msg += (
+                    f"pip build failed:\n\n"
+                    f"Command: {' '.join(cmd)}\n"
+                    f"Project root: {project_root}\n"
+                    f"Exit code: {e.returncode}\n\n"
+                    f"Build output (stdout):\n{e.stdout}\n\n"
+                    f"Build errors (stderr):\n{e.stderr}\n\n"
+                )
+
+            error_msg += (
+                "Common causes:\n"
+                "  1. Missing or invalid pyproject.toml file\n"
+                "  2. Missing build dependencies (setuptools, wheel)\n"
+                "  3. Syntax errors in your project configuration\n"
+                "  4. Missing required dependencies in your project\n\n"
+                "To fix:\n"
+                "  1. Ensure pyproject.toml exists in your project root\n"
+                "  2. Install build dependencies: pip install setuptools wheel\n"
+                f"  3. Try building manually to see full output:\n"
+                f"     cd {project_root} && pip wheel --no-deps -w /tmp .\n"
+                "  4. Verify your pyproject.toml structure (see example below)\n\n"
+                "Example minimal pyproject.toml:\n"
+                "  [build-system]\n"
+                "  requires = ['setuptools>=45', 'wheel']\n"
+                "  build-backend = 'setuptools.build_meta'\n\n"
+                "  [project]\n"
+                "  name = 'myproject'\n"
+                "  version = '0.1.0'\n\n"
+                "Learn more: https://packaging.python.org/tutorials/packaging-projects/"
+            )
+            raise PackagingError(error_msg) from e
 
         # Find the wheel file in the output directory
         wheels = list(pathlib.Path(output_dir).glob("*.whl"))
         if not wheels:
             raise PackagingError(
-                f"Failed to build wheel: No .whl file found in {output_dir} after running 'pip wheel'.\n\n"
-                f"This usually means there's an issue with your project's pyproject.toml configuration.\n\n"
-                f"To diagnose:\n"
-                f"  1. Check that pyproject.toml exists in your project root\n"
-                f"  2. Verify your pyproject.toml has [build-system] and [project] sections\n"
-                f"  3. Try building manually: cd {project_root} && pip wheel --no-deps -w /tmp .\n\n"
-                f"Example minimal pyproject.toml:\n"
-                f"  [build-system]\n"
-                f"  requires = ['setuptools>=45', 'wheel']\n"
-                f"  build-backend = 'setuptools.build_meta'\n\n"
-                f"  [project]\n"
-                f"  name = 'myproject'\n"
-                f"  version = '0.1.0'\n\n"
-                f"See: https://packaging.python.org/tutorials/packaging-projects/"
+                f"Wheel build completed but no .whl file was created.\n\n"
+                f"Output directory: {output_dir}\n"
+                f"Project root: {project_root}\n\n"
+                "This usually means:\n"
+                "  1. Your pyproject.toml is missing [project] metadata\n"
+                "  2. The build succeeded but produced no distributable package\n"
+                "  3. The wheel was created in a different location\n\n"
+                "To diagnose:\n"
+                f"  1. Check pyproject.toml has [build-system] and [project] sections\n"
+                f"  2. Verify project name and version are set\n"
+                f"  3. Try building manually: cd {project_root} && pip wheel --no-deps -w /tmp .\n"
+                f"  4. Check the manual build output directory\n\n"
+                "Example minimal pyproject.toml:\n"
+                "  [build-system]\n"
+                "  requires = ['setuptools>=45', 'wheel']\n"
+                "  build-backend = 'setuptools.build_meta'\n\n"
+                "  [project]\n"
+                "  name = 'myproject'\n"
+                "  version = '0.1.0'\n\n"
+                "Learn more: https://packaging.python.org/tutorials/packaging-projects/"
             )
 
         # Return the path to the wheel

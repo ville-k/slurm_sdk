@@ -778,8 +778,16 @@ class Cluster:
                     else:
                         # Use cluster default_packaging (new string-based system)
                         if self.default_packaging:
+                            # Preserve any packaging_* kwargs from the task's config
+                            task_packaging_kwargs = {}
+                            if task_packaging:
+                                task_packaging_kwargs = {
+                                    k: v
+                                    for k, v in task_packaging.items()
+                                    if k != "type"
+                                }
                             effective_packaging_config = _parse_packaging_config(
-                                self.default_packaging, {}
+                                self.default_packaging, task_packaging_kwargs
                             )
                         else:
                             # Fall back to old Slurmfile packaging_defaults for compatibility
