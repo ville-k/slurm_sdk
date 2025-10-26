@@ -70,7 +70,7 @@ def main():
     )
 
     # Submit job (uses cluster defaults for packaging, account, partition)
-    job = hello_world.submit(cluster)()
+    job = cluster.submit(hello_world)()
 
     job.wait()
     result = job.get_result()

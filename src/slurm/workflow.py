@@ -129,7 +129,13 @@ class WorkflowContext:
         runs = self.list_task_runs(task_name)
         if not runs:
             raise FileNotFoundError(
-                f"No runs found for task '{task_name}' in {self.get_task_output_dir(task_name)}"
+                f"No runs found for task '{task_name}'.\n\n"
+                f"Expected output directory: {self.get_task_output_dir(task_name)}\n\n"
+                "This usually means:\n"
+                "  1. The task hasn't been executed yet in this workflow\n"
+                "  2. The task name is misspelled\n"
+                "  3. The workflow output directory was cleaned up\n\n"
+                "Ensure the task has completed successfully before trying to load its result."
             )
 
         latest_run = runs[0]
@@ -137,7 +143,11 @@ class WorkflowContext:
 
         if not result_file.exists():
             raise FileNotFoundError(
-                f"Result file not found for task '{task_name}' run {latest_run.name}: {result_file}"
+                f"Result file not found for task '{task_name}'.\n\n"
+                f"Run directory: {latest_run}\n"
+                f"Expected file: {result_file}\n\n"
+                "The task may have failed before writing its result.\n"
+                "Check the task's stdout/stderr logs in the run directory for errors."
             )
 
         with open(result_file, "rb") as f:
@@ -160,7 +170,14 @@ class WorkflowContext:
 
         if not result_file.exists():
             raise FileNotFoundError(
-                f"Result file not found for workflow {workflow_dir.name}: {result_file}"
+                f"Result file not found for workflow.\n\n"
+                f"Workflow directory: {workflow_dir}\n"
+                f"Expected file: {result_file}\n\n"
+                "This usually means:\n"
+                "  1. The workflow hasn't completed yet\n"
+                "  2. The workflow failed before writing its result\n"
+                "  3. The workflow directory path is incorrect\n\n"
+                "Verify the workflow completed successfully and the path is correct."
             )
 
         with open(result_file, "rb") as f:

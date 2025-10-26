@@ -53,7 +53,7 @@ def test_cluster_submit_with_local_backend(monkeypatch, tmp_path):
     cluster.callbacks = [CaptureCallback()]
 
     # Submit and run locally
-    job = add_one.submit(cluster=cluster, packaging={"type": "none"})(41)
+    job = cluster.submit(add_one, packaging="none")(41)
 
     # Job should be immediately completed in local backend
     assert job.is_completed()

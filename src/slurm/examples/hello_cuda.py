@@ -64,7 +64,7 @@ def main() -> None:
         )
 
         # Submit job (uses PyTorch container from task decorator)
-        job = hello_cuda_task.submit(cluster)()
+        job = cluster.submit(hello_cuda_task)()
 
         job.wait()
         result = job.get_result()

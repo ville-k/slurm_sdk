@@ -613,3 +613,178 @@ class Job(Generic[T]):
         except Exception as e:
             logger.error("Error cancelling job: %s", e)
             return False
+
+    def get_stdout(self) -> str:
+        """Retrieve the standard output from the job.
+
+        This is a debug helper that reads the scheduler's stdout file for this job.
+        Useful for debugging job failures or inspecting output without waiting for
+        completion.
+
+        Returns:
+            The contents of the job's stdout file as a string.
+
+        Raises:
+            FileNotFoundError: If the stdout file doesn't exist yet (job may not have started).
+            RuntimeError: If stdout_path metadata is missing.
+
+        Examples:
+            >>> try:
+            ...     output = job.get_stdout()
+            ...     print(output)
+            ... except FileNotFoundError:
+            ...     print("Job hasn't produced output yet")
+
+        Note:
+            For jobs that are still running, this returns the output written so far.
+            The file may be incomplete until the job completes.
+        """
+        if not self.stdout_path:
+            raise RuntimeError(
+                f"Cannot retrieve stdout for job {self.id}: stdout_path is not set.\n"
+                f"This typically occurs when reconstructing jobs via get_job(). "
+                f"For full debugging access, use the Job object returned from submit()."
+            )
+
+        return self._read_remote_file(self.stdout_path, "stdout")
+
+    def get_stderr(self) -> str:
+        """Retrieve the standard error output from the job.
+
+        This is a debug helper that reads the scheduler's stderr file for this job.
+        Useful for debugging job failures or inspecting error messages without waiting
+        for completion.
+
+        Returns:
+            The contents of the job's stderr file as a string.
+
+        Raises:
+            FileNotFoundError: If the stderr file doesn't exist yet (job may not have started).
+            RuntimeError: If stderr_path metadata is missing.
+
+        Examples:
+            >>> try:
+            ...     errors = job.get_stderr()
+            ...     if errors:
+            ...         print(f"Job errors: {errors}")
+            ... except FileNotFoundError:
+            ...     print("Job hasn't produced errors yet")
+
+        Note:
+            For jobs that are still running, this returns the errors written so far.
+            The file may be incomplete until the job completes.
+        """
+        if not self.stderr_path:
+            raise RuntimeError(
+                f"Cannot retrieve stderr for job {self.id}: stderr_path is not set.\n"
+                f"This typically occurs when reconstructing jobs via get_job(). "
+                f"For full debugging access, use the Job object returned from submit()."
+            )
+
+        return self._read_remote_file(self.stderr_path, "stderr")
+
+    def get_script(self) -> str:
+        """Retrieve the generated SLURM batch script for this job.
+
+        This is a debug helper that reads the actual sbatch script that was submitted.
+        Useful for understanding exactly what commands are being executed and debugging
+        environment or packaging issues.
+
+        Returns:
+            The contents of the job's batch script as a string.
+
+        Raises:
+            FileNotFoundError: If the script file doesn't exist.
+            RuntimeError: If job metadata is missing.
+
+        Examples:
+            >>> script = job.get_script()
+            >>> print(script)
+            #!/bin/bash
+            #SBATCH --job-name=my_task
+            ...
+
+        Note:
+            The script includes all SBATCH directives, setup commands, the task execution,
+            and cleanup commands.
+        """
+        if not self.target_job_dir or not self.pre_submission_id:
+            raise RuntimeError(
+                f"Cannot retrieve script for job {self.id}: job metadata is incomplete.\n"
+                f"This typically occurs when reconstructing jobs via get_job(). "
+                f"For full debugging access, use the Job object returned from submit()."
+            )
+
+        script_filename = f"slurm_job_{self.pre_submission_id}_script.sh"
+        script_path = os.path.join(self.target_job_dir, script_filename)
+
+        return self._read_remote_file(script_path, "script")
+
+    def _read_remote_file(self, remote_path: str, file_type: str) -> str:
+        """Read a file from the cluster (SSH or local).
+
+        Args:
+            remote_path: Absolute path to the file on the cluster.
+            file_type: Description of file type for error messages (e.g., "stdout", "stderr", "script").
+
+        Returns:
+            File contents as a string.
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist.
+        """
+        if isinstance(self.cluster.backend, SSHCommandBackend):
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                mode="w+", delete=False, suffix=f"_{file_type}"
+            ) as temp_file:
+                local_temp_path = temp_file.name
+
+            try:
+                logger.debug(
+                    "[%s] Downloading %s from %s to %s",
+                    self.id,
+                    file_type,
+                    remote_path,
+                    local_temp_path,
+                )
+                self.cluster.backend.download_file(remote_path, local_temp_path)
+
+                with open(local_temp_path, "r") as f:
+                    return f.read()
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"File not found on remote cluster: {remote_path}\n"
+                    f"Job ID: {self.id}\n\n"
+                    "This usually means:\n"
+                    "  1. Job hasn't started yet (file not created)\n"
+                    "  2. Job directory was cleaned up\n"
+                    "  3. Path is incorrect\n\n"
+                    f"Job directory: {self.target_job_dir}"
+                ) from e
+            finally:
+                if os.path.exists(local_temp_path):
+                    os.unlink(local_temp_path)
+        else:
+            # Local backend - read file directly
+            try:
+                local_path = remote_path
+                if not os.path.isabs(local_path):
+                    local_path = os.path.abspath(local_path)
+
+                logger.debug(
+                    "[%s] Reading local %s from %s", self.id, file_type, local_path
+                )
+                with open(local_path, "r") as f:
+                    return f.read()
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"File not found locally: {local_path}\n"
+                    f"Job ID: {self.id}\n\n"
+                    "This usually means:\n"
+                    "  1. Job hasn't started yet (file not created)\n"
+                    "  2. Job directory was cleaned up\n"
+                    "  3. Path is incorrect\n\n"
+                    f"Job directory: {self.target_job_dir}"
+                ) from e

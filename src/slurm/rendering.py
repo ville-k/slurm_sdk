@@ -246,7 +246,18 @@ def render_job_script(
 
     except Exception as e:
         raise RuntimeError(
-            f"Failed to pickle task arguments/kwargs/sys.path/callbacks: {e}"
+            f"Failed to serialize task arguments for cluster execution.\n\n"
+            f"Error: {e}\n\n"
+            "This usually means one or more of your task arguments cannot be pickled.\n"
+            "Common non-picklable objects include:\n"
+            "  - Open file handles or database connections\n"
+            "  - Lambda functions or local functions\n"
+            "  - Objects with __getstate__ that raises errors\n"
+            "  - Thread locks or multiprocessing primitives\n\n"
+            "To fix:\n"
+            "  1. Pass file paths instead of open file objects\n"
+            "  2. Use module-level functions instead of lambdas\n"
+            "  3. Ensure all arguments are standard Python types or pickle-compatible objects"
         ) from e
 
     script_lines.append(f'base64 -d > "{args_file_path_str}" << "BASE64_ARGS"')

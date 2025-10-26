@@ -183,7 +183,12 @@ class ArrayJob(Generic[T]):
             Path to results directory.
         """
         if self.array_dir is None:
-            raise RuntimeError("Array job not yet submitted")
+            raise RuntimeError(
+                "Cannot get results directory: array job has not been submitted yet.\n\n"
+                "Array jobs are submitted lazily when you first access their results.\n"
+                "To explicitly submit, call: array_job.submit()\n"
+                "Or access results which will trigger submission: array_job.get_results()"
+            )
 
         return self.array_dir / "results"
 

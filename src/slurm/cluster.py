@@ -452,6 +452,87 @@ class Cluster:
 
         return cluster_instance
 
+    @classmethod
+    def from_file(cls, config_path: str, **extra_kwargs) -> "Cluster":
+        """Create a Cluster instance from a flat TOML configuration file.
+
+        This method provides explicit, simple configuration loading without auto-discovery.
+        The config file should use a flat structure with direct key-value pairs.
+
+        Args:
+            config_path: Explicit path to the TOML configuration file.
+            **extra_kwargs: Additional parameters to override or supplement the config file.
+                These are passed directly to the Cluster constructor.
+
+        Returns:
+            Cluster instance configured from the file.
+
+        Raises:
+            FileNotFoundError: If config_path does not exist.
+            ValueError: If the TOML file is invalid or missing required fields.
+
+        Example config file (flat structure):
+            ```toml
+            backend = "ssh"
+            hostname = "slurm.example.com"
+            username = "myuser"
+            job_base_dir = "/scratch/jobs"
+            default_packaging = "auto"
+            default_account = "my-account"
+            default_partition = "compute"
+            ```
+
+        Example usage:
+            >>> cluster = Cluster.from_file("config.toml")
+            >>> cluster = Cluster.from_file("prod.toml", default_partition="gpu")
+        """
+        import tomllib
+        from pathlib import Path
+
+        config_file = Path(config_path)
+        if not config_file.exists():
+            raise FileNotFoundError(
+                f"Configuration file not found: {config_path}\n"
+                f"Please provide an explicit path to your config file."
+            )
+
+        try:
+            with open(config_file, "rb") as f:
+                config = tomllib.load(f)
+        except Exception as e:
+            raise ValueError(
+                f"Failed to parse TOML configuration file '{config_path}': {e}\n"
+                f"Please ensure the file contains valid TOML syntax."
+            ) from e
+
+        # Extract backend configuration
+        backend_type = config.get("backend", "ssh")
+
+        # Build kwargs for Cluster.__init__
+        cluster_kwargs = {}
+
+        # Direct passthrough for simple fields
+        passthrough_fields = [
+            "hostname",
+            "username",
+            "password",
+            "ssh_key_path",
+            "job_base_dir",
+            "default_packaging",
+            "default_account",
+            "default_partition",
+        ]
+        for field in passthrough_fields:
+            if field in config:
+                cluster_kwargs[field] = config[field]
+
+        cluster_kwargs["backend_type"] = backend_type
+
+        # Merge with extra_kwargs (extra_kwargs take precedence)
+        cluster_kwargs.update(extra_kwargs)
+
+        return cls(**cluster_kwargs)
+
     @staticmethod
     def add_argparse_args(parser) -> None:
         """Add common cluster configuration arguments to an argparse parser.
@@ -1466,3 +1547,133 @@ class Cluster:
             reset_active_context(self._context_token)
             delattr(self, "_context_token")
         return False
+
+    def diagnose(self) -> Dict[str, Any]:
+        """Run cluster diagnostics and return a summary of the cluster state.
+
+        This is a debug helper that tests connectivity, retrieves cluster information,
+        and provides a comprehensive summary of the cluster configuration and status.
+        Useful for troubleshooting connection issues or understanding cluster availability.
+
+        Returns:
+            Dictionary containing diagnostic information:
+            - "backend_type": Type of backend (e.g., "ssh", "local")
+            - "backend_config": Backend configuration details
+            - "connectivity": Connectivity test result
+            - "cluster_info": Cluster configuration (partitions, nodes)
+            - "queue": Current job queue
+            - "errors": List of any errors encountered during diagnostics
+
+        Examples:
+            >>> diag = cluster.diagnose()
+            >>> print(f"Backend: {diag['backend_type']}")
+            >>> print(f"Connected: {diag['connectivity']['success']}")
+            >>> if diag['errors']:
+            ...     print(f"Errors: {diag['errors']}")
+
+            Pretty-print full diagnostics:
+
+            >>> import json
+            >>> diag = cluster.diagnose()
+            >>> print(json.dumps(diag, indent=2))
+
+        Note:
+            This method attempts to gather as much information as possible, even if
+            some operations fail. Check the "errors" field for any issues encountered.
+        """
+        diag: Dict[str, Any] = {
+            "backend_type": self.backend_type,
+            "backend_config": {},
+            "connectivity": {"success": False, "message": ""},
+            "cluster_info": {},
+            "queue": [],
+            "errors": [],
+        }
+
+        # Gather backend configuration
+        try:
+            if hasattr(self.backend, "hostname"):
+                diag["backend_config"]["hostname"] = self.backend.hostname
+            if hasattr(self.backend, "username"):
+                diag["backend_config"]["username"] = self.backend.username
+            if hasattr(self.backend, "job_base_dir"):
+                diag["backend_config"]["job_base_dir"] = self.backend.job_base_dir
+
+            diag["backend_config"]["default_packaging"] = self.default_packaging
+            diag["backend_config"]["default_account"] = self.default_account
+            diag["backend_config"]["default_partition"] = self.default_partition
+        except Exception as e:
+            diag["errors"].append(f"Error gathering backend config: {e}")
+
+        # Test connectivity
+        try:
+            from .api.ssh import SSHCommandBackend
+
+            if isinstance(self.backend, SSHCommandBackend):
+                # Test SSH connection by running a simple command
+                test_output = self.backend.execute_command("echo 'slurm-sdk-test'")
+                if "slurm-sdk-test" in test_output:
+                    diag["connectivity"]["success"] = True
+                    diag["connectivity"]["message"] = "SSH connection successful"
+                else:
+                    diag["connectivity"]["success"] = False
+                    diag["connectivity"]["message"] = (
+                        "SSH connection failed: unexpected output"
+                    )
+            else:
+                # For local backends, just check if backend is available
+                diag["connectivity"]["success"] = True
+                diag["connectivity"]["message"] = "Local backend available"
+        except Exception as e:
+            diag["connectivity"]["success"] = False
+            diag["connectivity"]["message"] = f"Connectivity test failed: {e}"
+            diag["errors"].append(f"Connectivity error: {e}")
+
+        # Get cluster information
+        try:
+            cluster_info = self.backend.get_cluster_info()
+            diag["cluster_info"] = cluster_info
+        except Exception as e:
+            diag["errors"].append(f"Error getting cluster info: {e}")
+
+        # Get queue information
+        try:
+            queue = self.backend.get_queue()
+            diag["queue"] = queue
+            diag["queue_summary"] = {
+                "total_jobs": len(queue),
+                "by_state": {},
+            }
+            # Count jobs by state
+            for job in queue:
+                state = job.get("STATE", "UNKNOWN")
+                diag["queue_summary"]["by_state"][state] = (
+                    diag["queue_summary"]["by_state"].get(state, 0) + 1
+                )
+        except Exception as e:
+            diag["errors"].append(f"Error getting queue: {e}")
+
+        # Test SLURM command availability
+        try:
+            from .api.ssh import SSHCommandBackend
+
+            if isinstance(self.backend, SSHCommandBackend):
+                # Test if sinfo is available
+                self.backend.execute_command("which sbatch")
+                diag["slurm_commands"] = {"sbatch": "available"}
+            else:
+                import subprocess
+
+                result = subprocess.run(
+                    ["which", "sbatch"],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    diag["slurm_commands"] = {"sbatch": "available"}
+                else:
+                    diag["slurm_commands"] = {"sbatch": "not found"}
+        except Exception as e:
+            diag["errors"].append(f"Error checking SLURM commands: {e}")
+
+        return diag

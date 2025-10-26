@@ -214,7 +214,7 @@ def test_array_job_get_results_dir(tmp_path):
         array_job = process_item.map(items)
 
         # Array job not yet submitted, so get_results_dir() will raise
-        with pytest.raises(RuntimeError, match="Array job not yet submitted"):
+        with pytest.raises(RuntimeError, match="array job has not been submitted yet"):
             array_job.get_results_dir()
 
         # Verify array job was created

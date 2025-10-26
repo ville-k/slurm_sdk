@@ -5,7 +5,6 @@ from typing import (
     Optional,
     TypeVar,
     TYPE_CHECKING,
-    Union,
     overload,
     ParamSpec,
 )
@@ -115,7 +114,7 @@ if TYPE_CHECKING:
 def task(
     func: Optional[Callable[..., Any]] = None,
     *,
-    packaging: Union[str, Dict[str, Any]] = "auto",
+    packaging: str = "auto",
     **sbatch_kwargs: Any,
 ):
     """Decorator for defining a Python function as a Slurm task.
@@ -276,13 +275,18 @@ def task(
 
 
 def _parse_packaging_config(
-    packaging: Union[str, Dict[str, Any]], kwargs: Dict[str, Any]
+    packaging: str, kwargs: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
     """Parse packaging string and kwargs into a configuration dict.
 
     Args:
-        packaging: Packaging strategy string ("auto", "wheel", "none", "container:image:tag")
-                  or dict for backward compatibility
+        packaging: Packaging strategy string. Options:
+            - "auto": Auto-detect (wheel if pyproject.toml exists, else none)
+            - "wheel": Build and install Python wheel
+            - "none": No packaging (code assumed available on cluster)
+            - "inherit": Inherit packaging from parent workflow
+            - "container:IMAGE:TAG": Use existing container image
+            - "IMAGE:TAG": Use existing container (shorthand without "container:" prefix)
         kwargs: Additional packaging options from packaging_* parameters
 
     Returns:
@@ -291,14 +295,7 @@ def _parse_packaging_config(
     if not packaging:
         return None
 
-    # Handle dict for backward compatibility (old API)
-    if isinstance(packaging, dict):
-        # Dict packaging completely overrides packaging_* kwargs
-        # (for backward compatibility - old API didn't have packaging_* kwargs)
-        return dict(packaging)
-
-    # Handle string-based packaging (new API)
-    config = dict(kwargs)  # Start with additional options
+    config = dict(kwargs)  # Start with additional options from packaging_* kwargs
 
     if packaging == "auto":
         config["type"] = "auto"

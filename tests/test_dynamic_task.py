@@ -123,22 +123,22 @@ def test_dynamic_task_with_custom_job_name():
     assert custom_task.sbatch_options["job_name"] == "custom_process_job"
 
 
-def test_dynamic_task_packaging_precedence():
-    """Test that explicit packaging dict (old API) still works and takes precedence."""
+def test_dynamic_task_packaging_with_kwargs():
+    """Test that packaging string works correctly with packaging_* kwargs."""
 
     def my_func(x: int) -> int:
         return x
 
-    # Dict packaging (old API) with packaging_* kwargs (new API)
+    # String packaging with packaging_* kwargs
     my_task = task(
         my_func,
         time="00:10:00",
-        packaging={"type": "wheel"},  # Old dict API
-        packaging_dockerfile="ignored.Dockerfile",  # New kwarg API
+        packaging="container",  # String packaging
+        packaging_dockerfile="path/to/Dockerfile",  # Packaging kwargs
+        packaging_push=True,
     )
 
-    # Dict packaging should take precedence over packaging_* kwargs
-    assert my_task.packaging["type"] == "wheel"
-    # The dict update in _parse_packaging_config means dockerfile gets added from kwargs first,
-    # then overridden by the dict, so it won't be present
-    assert "dockerfile" not in my_task.packaging
+    # Packaging should combine string and kwargs
+    assert my_task.packaging["type"] == "container"
+    assert my_task.packaging["dockerfile"] == "path/to/Dockerfile"
+    assert my_task.packaging["push"] is True

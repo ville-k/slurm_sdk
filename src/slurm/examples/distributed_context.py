@@ -68,7 +68,7 @@ def main() -> None:
     )
 
     # Submit job (uses cluster defaults)
-    job = inspect_allocation.submit(cluster)()
+    job = cluster.submit(inspect_allocation)()
 
     job.wait()
     result = job.get_result()

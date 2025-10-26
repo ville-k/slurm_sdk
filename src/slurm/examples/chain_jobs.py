@@ -91,7 +91,7 @@ def main():
     )
 
     # Submit the first job
-    hello_job = hello_world.submit(cluster)()
+    hello_job = cluster.submit(hello_world)()
 
     # Wait for the job to complete
     hello_job.wait()
@@ -103,7 +103,7 @@ def main():
 
     # Submit the second job with the result data
     print("Submitting process_results job with result content...")
-    process_job = process_results.submit(cluster)(hello_result_content)
+    process_job = cluster.submit(process_results)(hello_result_content)
 
     # Wait for the second job to complete
     process_job.wait()

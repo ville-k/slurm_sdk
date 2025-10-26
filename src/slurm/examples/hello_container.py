@@ -61,7 +61,7 @@ def main() -> None:
     )
 
     # Submit job (uses container packaging from task decorator)
-    job = hello_container_task.submit(cluster)()
+    job = cluster.submit(hello_container_task)()
 
     job.wait()
     result = job.get_result()

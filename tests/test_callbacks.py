@@ -87,7 +87,7 @@ def test_callbacks_invoked_local_backend(tmp_path):
     cluster.default_account = None
     cluster.default_partition = None
 
-    job = echo_val.submit(cluster=cluster, packaging={"type": "none"})(7)
+    job = cluster.submit(echo_val, packaging="none")(7)
     job.wait()
 
     # Verify packaging and submit callbacks (executed in submission process)
