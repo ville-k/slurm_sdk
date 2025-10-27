@@ -1,7 +1,7 @@
 """Hello-world style example that demonstrates container packaging.
 
 This example shows:
-- Using container packaging with string-based syntax
+- Using container packaging
 - Specifying a container image directly in the decorator
 - Using argparse helpers for cluster configuration
 """
@@ -9,63 +9,70 @@ This example shows:
 from __future__ import annotations
 
 import argparse
-import socket
-import time
-
-from rich.console import Console
+import getpass
+import logging
 
 from slurm.callbacks.callbacks import (
-    BenchmarkCallback,
     RichLoggerCallback,
 )
 from slurm.cluster import Cluster
 from slurm.decorators import task
-from slurm.logging import configure_logging
+from slurm.job import Job
 
 
 @task(
     time="00:05:00",
     mem="10G",
     cpus_per_task=1,
-    packaging="container:ubuntu:22.04",
+    packaging="container",
+    packaging_platform="linux/amd64",
+    packaging_push=True,
+    packaging_registry="nvcr.io/nv-maglev/",
+    packaging_dockerfile="src/slurm/examples/hello_container.Dockerfile",
+    packaging_context=".",
 )
-def hello_container_task() -> str:
+def hello_container_task(greeted: str) -> str:
     """Report basic runtime information from inside the container."""
+    import socket
+    import time
 
     hostname = socket.gethostname()
     current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-    message = f"Hello from {hostname} at {current_time}!"
-    print(message)
+    message = f"Hello {greeted} from {hostname} at {current_time}!"
     return message
 
 
 def main() -> None:
     """Entry point for the container packaging example."""
 
-    console = Console()
     parser = argparse.ArgumentParser(
         description="Submit a task using container packaging"
     )
 
     # Add standard cluster configuration arguments
     Cluster.add_argparse_args(parser)
-
     args = parser.parse_args()
-
-    configure_logging()
+    logging.basicConfig(level=logging.INFO)
 
     # Create cluster from args
     cluster = Cluster.from_args(
         args,
-        callbacks=[RichLoggerCallback(console=console), BenchmarkCallback()],
+        callbacks=[RichLoggerCallback()],
     )
+    with cluster:
+        greeted = getpass.getuser()
+        job: Job[str] = hello_container_task(greeted)
 
-    # Submit job (uses container packaging from task decorator)
-    job = cluster.submit(hello_container_task)()
-
-    job.wait()
-    result = job.get_result()
-    console.print(f"Result: {result}")
+        success = job.wait()
+        if success:
+            result: str = job.get_result()
+            print(f"Result: {result}")
+        else:
+            print("Job failed!")
+            print("Job std out:")
+            print(job.get_stdout())
+            print("Job std err:")
+            print(job.get_stderr())
 
 
 if __name__ == "__main__":

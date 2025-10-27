@@ -556,6 +556,12 @@ class Cluster:
             "--hostname", help="Hostname of the SLURM cluster (for SSH backend)"
         )
         parser.add_argument(
+            "--banner-timeout",
+            type=int,
+            default=30,
+            help="Timeout for waiting for SSH banner (seconds)",
+        )
+        parser.add_argument(
             "--username",
             default=os.getenv("USER"),
             help="Username for SSH connection (default: $USER)",

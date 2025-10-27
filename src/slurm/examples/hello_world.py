@@ -1,21 +1,18 @@
 """Simple hello world example demonstrating basic slurm-sdk usage.
 
 This example shows:
-- Creating a cluster with explicit configuration (no config file needed)
-- Using the new string-based packaging syntax with cluster defaults
+- Creating a cluster with explicit configuration
+- Using string-based packaging syntax with cluster defaults
 - Using argparse helpers for common cluster configuration
 """
 
 import logging
 import argparse
-import socket
-import time
 
-from slurm.callbacks.callbacks import BenchmarkCallback, LoggerCallback
+from slurm.callbacks.callbacks import LoggerCallback
 from slurm.cluster import Cluster
 from slurm.decorators import task
 from slurm.job import Job
-from slurm.logging import configure_logging
 
 
 @task(
@@ -32,11 +29,12 @@ def hello_world() -> str:
     Returns:
         A greeting message
     """
+    import socket
+    import time
+
     hostname = socket.gethostname()
     current_time = time.strftime("%Y-%m-%d %H:%M:%S")
     message = f"Hello from {hostname} at {current_time}!"
-    print(message)
-
     return message
 
 
@@ -51,19 +49,8 @@ def main():
 
     # Add standard cluster configuration arguments
     Cluster.add_argparse_args(parser)
-
-    # Add example-specific arguments
-    parser.add_argument(
-        "--banner-timeout",
-        type=int,
-        default=30,
-        help="Timeout for waiting for SSH banner (seconds)",
-    )
-    parser.add_argument("--loglevel", type=str, default="INFO", help="Logging level")
-
     args = parser.parse_args()
-
-    configure_logging(level=getattr(logging, args.loglevel.upper(), logging.INFO))
+    logging.basicConfig(level=logging.INFO)
 
     # Create cluster from args with additional callbacks
     cluster = Cluster.from_args(
@@ -71,7 +58,6 @@ def main():
         banner_timeout=args.banner_timeout,
         callbacks=[
             LoggerCallback(),
-            BenchmarkCallback(),
         ],
     )
 
