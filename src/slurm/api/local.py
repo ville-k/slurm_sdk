@@ -507,3 +507,7 @@ class LocalBackend(BackendBase):
         except Exception as e:
             logger.error(f"Error reading file {file_path}: {e}")
             raise RuntimeError(f"Failed to read file {file_path}: {e}") from e
+
+    def is_remote(self) -> bool:
+        """Return False since local backend uses direct file access."""
+        return False

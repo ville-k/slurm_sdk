@@ -125,6 +125,21 @@ class ArrayJob(Generic[T]):
                 self.dependencies.append(job)
         return self
 
+    def submit(self) -> None:
+        """Explicitly submit the array job to the cluster.
+
+        By default, array jobs are submitted lazily when you first access results
+        or iterate over the jobs. Call this method to submit immediately.
+
+        Examples:
+            Explicit submission:
+
+                >>> array_job = process.map(items)
+                >>> array_job.submit()  # Submit now instead of waiting
+                >>> # Jobs are now running on the cluster
+        """
+        self._submit()
+
     def _submit(self) -> None:
         """Submit the array job (internal)."""
         if self._submitted:

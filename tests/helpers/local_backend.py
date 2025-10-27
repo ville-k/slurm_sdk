@@ -102,3 +102,7 @@ class LocalBackend:
                 }
             ]
         }
+
+    def is_remote(self) -> bool:
+        """Return False since this is a local backend."""
+        return False

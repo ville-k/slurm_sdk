@@ -402,8 +402,15 @@ class Job(Generic[T]):
             logger.debug("[%s] Expecting result file at: %s", self.id, result_file_path)
 
         except Exception as e:
-            logger.error("[%s] Error determining result file path: %s", self.id, e)
-            return None
+            raise RuntimeError(
+                f"Failed to determine result file path for job {self.id}.\n"
+                f"Error: {e}\n\n"
+                "This usually means:\n"
+                "  1. The job metadata is incomplete or corrupted\n"
+                "  2. The job directory structure is unexpected\n"
+                "  3. The result file naming convention has changed\n\n"
+                "Ensure the job completed successfully before calling get_result()."
+            ) from e
 
         if isinstance(self.cluster.backend, SSHCommandBackend):
             import tempfile

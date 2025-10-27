@@ -101,3 +101,18 @@ class BackendBase(abc.ABC):
             Exception: If the cluster info query fails.
         """
         pass
+
+    @abc.abstractmethod
+    def is_remote(self) -> bool:
+        """
+        Return True if this backend requires remote file operations.
+
+        This is used to determine whether files need to be transferred
+        between local and remote systems (SSH backend) or can be accessed
+        directly (local backend).
+
+        Returns:
+            bool: True if backend is remote (requires file transfer),
+                  False if backend is local (direct file access).
+        """
+        pass

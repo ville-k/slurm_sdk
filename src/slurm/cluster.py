@@ -644,6 +644,723 @@ class Cluster:
 
         return cls(**kwargs)
 
+    def _prepare_packaging_strategy(
+        self,
+        task_func: SlurmTask,
+        packaging_config: Optional[Dict[str, Any]],
+    ) -> Any:
+        """Prepare the packaging strategy for a task submission.
+
+        Determines the effective packaging configuration by checking:
+        1. Provided packaging_config parameter
+        2. Task's packaging configuration
+        3. Cluster's default packaging
+        4. Legacy Slurmfile packaging defaults
+
+        Args:
+            task_func: The task to package
+            packaging_config: Override packaging configuration
+
+        Returns:
+            The prepared packaging strategy
+        """
+        from .decorators import _parse_packaging_config
+
+        effective_packaging_config: Optional[Dict[str, Any]] = packaging_config
+
+        # Use provided packaging_config, else task's packaging, else cluster defaults
+        if effective_packaging_config is None:
+            # Check if task has packaging configuration
+            task_packaging = task_func.packaging
+            # Skip task packaging if it's "auto" to allow cluster defaults to take precedence
+            # This allows workflows to override child task packaging with "inherit"
+            if task_packaging and task_packaging.get("type") not in (
+                "auto",
+                None,
+            ):
+                effective_packaging_config = task_packaging
+            else:
+                # Use cluster default_packaging (new string-based system)
+                if self.default_packaging:
+                    # Preserve any packaging_* kwargs from the task's config
+                    task_packaging_kwargs = {}
+                    if task_packaging:
+                        task_packaging_kwargs = {
+                            k: v for k, v in task_packaging.items() if k != "type"
+                        }
+                    effective_packaging_config = _parse_packaging_config(
+                        self.default_packaging, task_packaging_kwargs
+                    )
+                else:
+                    # Fall back to old Slurmfile packaging_defaults for compatibility
+                    effective_packaging_config = getattr(
+                        self, "packaging_defaults", None
+                    )
+                    # If still using auto from task, resolve it now
+                    if effective_packaging_config is None and task_packaging:
+                        effective_packaging_config = task_packaging
+
+        logger.debug("Effective packaging config: %s", effective_packaging_config)
+
+        packaging_start = time.time()
+        begin_ctx = PackagingBeginContext(
+            task=task_func,
+            packaging_config=effective_packaging_config,
+            cluster=self,
+            timestamp=packaging_start,
+        )
+
+        for callback in self.callbacks:
+            if not callback.should_run_on_client("on_begin_package_ctx"):
+                continue
+            try:
+                callback.on_begin_package_ctx(begin_ctx)
+            except Exception as exc:
+                logger.debug(
+                    "Callback %s failed in on_begin_package_ctx: %s",
+                    type(callback).__name__,
+                    exc,
+                )
+
+        strategy = get_packaging_strategy(effective_packaging_config)
+        logger.debug(
+            "[%s] Using packaging strategy: %s", "n/a", type(strategy).__name__
+        )
+        try:
+            result = strategy.prepare(task=task_func, cluster=self)
+            logger.debug("[%s] Packaging prepared: %s", "n/a", result)
+        except Exception as exc:
+            logger.error("[%s] Packaging preparation failed: %s", "n/a", exc)
+            traceback.print_exc(file=sys.stderr)
+            pkg_type = (
+                effective_packaging_config.get("type")
+                if effective_packaging_config
+                else "none"
+            )
+            raise PackagingError(
+                f"Packaging preparation failed for task '{getattr(task_func, '__name__', 'unknown')}'\n"
+                f"Packaging type: {pkg_type}\n"
+                f"Original error: {exc}"
+            ) from exc
+
+        packaging_end = time.time()
+        end_ctx = PackagingEndContext(
+            task=task_func,
+            packaging_result=strategy,
+            cluster=self,
+            timestamp=packaging_end,
+            duration=packaging_end - packaging_start,
+        )
+
+        for callback in self.callbacks:
+            if not callback.should_run_on_client("on_end_package_ctx"):
+                continue
+            try:
+                callback.on_end_package_ctx(end_ctx)
+            except Exception as exc:
+                logger.debug(
+                    "Callback %s failed in on_end_package_ctx: %s",
+                    type(callback).__name__,
+                    exc,
+                )
+
+        return strategy
+
+    def _setup_job_directory(
+        self, task_func: SlurmTask, task_defaults: Dict[str, Any]
+    ) -> tuple[str, str, str, str]:
+        """Setup job directory structure and return identifiers.
+
+        Args:
+            task_func: The task being submitted
+            task_defaults: Task default options
+
+        Returns:
+            Tuple of (pre_submission_id, sanitized_task_name, target_job_dir, timestamp)
+        """
+        # Generate timestamp and unique ID for hierarchical structure
+        timestamp, unique_id = _generate_timestamp_id()
+        pre_submission_id = f"{timestamp}_{unique_id}"
+
+        # Get task name and sanitize it
+        task_name = task_defaults.get("job_name", task_func.func.__name__)
+        sanitized_task_name = _sanitize_task_name(task_name)
+
+        resolved_job_base_dir = getattr(self.backend, "job_base_dir", None)
+        if resolved_job_base_dir is None:
+            import tempfile
+
+            resolved_job_base_dir = os.path.join(tempfile.gettempdir(), "slurm_jobs")
+            try:
+                os.makedirs(resolved_job_base_dir, exist_ok=True)
+            except (OSError, IOError) as e:
+                logger.debug(f"Failed to create job base directory: {e}")
+
+        # Check if we're in a workflow context for nested structure
+        from .context import get_active_context
+        from .workflow import WorkflowContext
+
+        ctx = get_active_context()
+        if isinstance(ctx, WorkflowContext):
+            # Nested in workflow: {workflow_dir}/tasks/{task_name}/{timestamp}_{unique_id}/
+            target_job_dir = os.path.join(
+                str(ctx.workflow_job_dir),
+                "tasks",
+                sanitized_task_name,
+                f"{timestamp}_{unique_id}",
+            )
+        else:
+            # Regular task: {job_base_dir}/{task_name}/{timestamp}_{unique_id}/
+            target_job_dir = os.path.join(
+                resolved_job_base_dir,
+                sanitized_task_name,
+                f"{timestamp}_{unique_id}",
+            )
+        logger.debug(
+            "[%s] Target job directory path: %s", pre_submission_id, target_job_dir
+        )
+
+        return pre_submission_id, sanitized_task_name, target_job_dir, timestamp
+
+    def _merge_sbatch_options(
+        self,
+        task_defaults: Dict[str, Any],
+        submit_overrides: Dict[str, Any],
+        pre_submission_id: str,
+        target_job_dir: str,
+    ) -> tuple[Dict[str, Any], str, str]:
+        """Merge SBATCH options with proper precedence.
+
+        Precedence order (lowest to highest):
+        1. Cluster defaults (default_account, default_partition)
+        2. Slurmfile [submit] defaults (for backward compatibility)
+        3. Task decorator defaults
+        4. Runtime overrides
+
+        Args:
+            task_defaults: Options from task decorator
+            submit_overrides: Options from submit() call
+            pre_submission_id: Job submission ID
+            target_job_dir: Job directory path
+
+        Returns:
+            Tuple of (effective_sbatch_options, stdout_path, stderr_path)
+        """
+        effective_sbatch_options: Dict[str, Any] = {}
+
+        # Add cluster-wide defaults (new string-based API)
+        if self.default_account:
+            effective_sbatch_options["account"] = self.default_account
+        if self.default_partition:
+            effective_sbatch_options["partition"] = self.default_partition
+
+        # Add Slurmfile submit defaults if available (for backward compatibility)
+        slurmfile_submit_defaults = getattr(self, "submit_defaults", None)
+        if slurmfile_submit_defaults and isinstance(slurmfile_submit_defaults, dict):
+            # Normalize the Slurmfile submit defaults
+            effective_sbatch_options.update(
+                normalize_sbatch_options(slurmfile_submit_defaults)
+            )
+
+        # Add task defaults
+        effective_sbatch_options.update(task_defaults)
+
+        # Add runtime overrides
+        effective_sbatch_options.update(submit_overrides)
+
+        stdout_path = effective_sbatch_options.get("output")
+        if not stdout_path:
+            stdout_path = f"{target_job_dir}/slurm_{pre_submission_id}.out"
+
+        stderr_path = effective_sbatch_options.get("error")
+        if not stderr_path:
+            stderr_path = f"{target_job_dir}/slurm_{pre_submission_id}.err"
+
+        return effective_sbatch_options, stdout_path, stderr_path
+
+    def _render_and_submit_to_backend(
+        self,
+        task_func: SlurmTask,
+        func_to_render: Callable,
+        args: tuple,
+        kwargs: dict,
+        task_defaults: Dict[str, Any],
+        submit_overrides: Dict[str, Any],
+        packaging_strategy: Any,
+        pre_submission_id: str,
+        target_job_dir: str,
+        effective_sbatch_options: Dict[str, Any],
+    ) -> str:
+        """Render job script and submit to backend.
+
+        Args:
+            task_func: The SlurmTask being submitted
+            func_to_render: The actual function to render in the script
+            args: Task arguments
+            kwargs: Task keyword arguments
+            task_defaults: Task default options
+            submit_overrides: Submit-time option overrides
+            packaging_strategy: The packaging strategy to use
+            pre_submission_id: Job submission ID
+            target_job_dir: Job directory path
+            effective_sbatch_options: Merged SBATCH options
+
+        Returns:
+            The job ID as a string
+        """
+        from .rendering import render_job_script
+
+        submit_begin_ctx = SubmitBeginContext(
+            task=task_func,
+            sbatch_options=dict(effective_sbatch_options),
+            pre_submission_id=pre_submission_id,
+            target_job_dir=target_job_dir,
+            cluster=self,
+            packaging_strategy=packaging_strategy,
+            backend_type=self.backend_type,
+        )
+
+        for callback in self.callbacks:
+            if not callback.should_run_on_client("on_begin_submit_job_ctx"):
+                continue
+            try:
+                callback.on_begin_submit_job_ctx(submit_begin_ctx)
+            except Exception as exc:
+                logger.debug(
+                    "Callback %s failed in on_begin_submit_job_ctx: %s",
+                    type(callback).__name__,
+                    exc,
+                )
+
+        script = render_job_script(
+            task_func=func_to_render,
+            task_args=args,
+            task_kwargs=kwargs,
+            task_definition=task_defaults,
+            sbatch_overrides=dict(submit_overrides),
+            packaging_strategy=packaging_strategy,
+            target_job_dir=target_job_dir,
+            pre_submission_id=pre_submission_id,
+            callbacks=self.callbacks,
+            cluster=self,  # Pass cluster for workflow support
+        )
+        logger.debug(
+            "[%s] --- RENDERED SBATCH SCRIPT ---\n%s\n[%s] --- END RENDERED SCRIPT ---",
+            pre_submission_id,
+            script,
+            pre_submission_id,
+        )
+
+        # Get account and partition from effective options (which includes Slurmfile defaults)
+        submit_account = effective_sbatch_options.get("account")
+        submit_partition = effective_sbatch_options.get("partition")
+        logger.debug("[%s] submit_account: %s", pre_submission_id, submit_account)
+        logger.debug("[%s] submit_partition: %s", pre_submission_id, submit_partition)
+        submission_message = (
+            f"[{pre_submission_id}] Submitting job via {self.backend_type} backend"
+        )
+        try:
+            logger.info(submission_message)
+            job_submission_result = self.backend.submit_job(
+                script,
+                target_job_dir=target_job_dir,
+                pre_submission_id=pre_submission_id,
+                account=submit_account,
+                partition=submit_partition,
+            )
+        except Exception as e:
+            raise SubmissionError(
+                f"Failed to submit job via backend '{self.backend_type}': {e}",
+                script=script,
+                metadata={
+                    "backend": self.backend_type,
+                    "account": submit_account,
+                    "partition": submit_partition,
+                    "pre_submission_id": pre_submission_id,
+                    "target_job_dir": target_job_dir,
+                },
+            ) from e
+
+        if isinstance(job_submission_result, str):
+            job_id = job_submission_result
+        elif (
+            isinstance(job_submission_result, tuple) and len(job_submission_result) == 2
+        ):
+            job_id, _ = job_submission_result
+        else:
+            raise TypeError(
+                f"Unexpected return type from backend.submit_job: {type(job_submission_result)}"
+            )
+
+        return job_id
+
+    def _create_job_object(
+        self,
+        job_id: str,
+        task_func: SlurmTask,
+        args: tuple,
+        kwargs: dict,
+        target_job_dir: str,
+        pre_submission_id: str,
+        effective_sbatch_options: Dict[str, Any],
+        stdout_path: str,
+        stderr_path: str,
+    ) -> Job:
+        """Create a Job object from submission results.
+
+        Args:
+            job_id: The SLURM job ID
+            task_func: The task being submitted
+            args: Task arguments
+            kwargs: Task keyword arguments
+            target_job_dir: Job directory path
+            pre_submission_id: Job submission ID
+            effective_sbatch_options: Merged SBATCH options
+            stdout_path: Path to stdout file
+            stderr_path: Path to stderr file
+
+        Returns:
+            The created Job object
+        """
+        return Job(
+            id=job_id,
+            cluster=self,
+            task_func=task_func,
+            args=args,
+            kwargs=kwargs,
+            target_job_dir=target_job_dir,
+            pre_submission_id=pre_submission_id,
+            sbatch_options=dict(effective_sbatch_options),
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+
+    def _write_job_metadata(
+        self,
+        job_id: str,
+        pre_submission_id: str,
+        sanitized_task_name: str,
+        timestamp: str,
+        target_job_dir: str,
+        task_func: SlurmTask,
+    ) -> None:
+        """Write job metadata file and emit workflow callbacks.
+
+        Args:
+            job_id: The SLURM job ID
+            pre_submission_id: Job submission ID
+            sanitized_task_name: Sanitized task name
+            timestamp: Job timestamp
+            target_job_dir: Job directory path
+            task_func: The task being submitted
+        """
+        # Generate metadata.json
+        is_workflow = getattr(task_func, "_is_workflow", False)
+        logger.debug(
+            "[%s] is_workflow=%s (from task_func attribute)",
+            pre_submission_id,
+            is_workflow,
+        )
+        metadata = {
+            "job_id": job_id,
+            "pre_submission_id": pre_submission_id,
+            "task_name": sanitized_task_name,
+            "timestamp": timestamp,
+            "submitted_at": time.time(),
+            "status": "PENDING",
+            "is_workflow": is_workflow,
+        }
+
+        # Check if we're in a workflow context (for parent_workflow tracking)
+        from .context import get_active_context
+        from .workflow import WorkflowContext
+
+        ctx = get_active_context()
+        if isinstance(ctx, WorkflowContext):
+            metadata["parent_workflow"] = ctx.workflow_job_id
+
+            # Emit workflow task submission event
+            logger.debug("Calling on_workflow_task_submitted callbacks...")
+            try:
+                from pathlib import Path as PathType
+
+                submit_ctx = WorkflowTaskSubmitContext(
+                    parent_workflow_id=ctx.workflow_job_id,
+                    parent_workflow_dir=ctx.workflow_job_dir,
+                    parent_workflow_name=task_func.func.__name__
+                    if hasattr(task_func, "func")
+                    else str(ctx.workflow_job_id).split("_")[0],
+                    child_job_id=job_id,
+                    child_job_dir=PathType(target_job_dir),
+                    child_task_name=sanitized_task_name,
+                    child_is_workflow=is_workflow,
+                    timestamp=time.time(),
+                    cluster=self,
+                )
+                for callback in self.callbacks:
+                    if not callback.should_run_on_client(
+                        "on_workflow_task_submitted_ctx"
+                    ):
+                        continue
+                    try:
+                        callback.on_workflow_task_submitted_ctx(submit_ctx)
+                    except Exception as exc:
+                        logger.debug(
+                            "Callback %s failed in on_workflow_task_submitted_ctx: %s",
+                            type(callback).__name__,
+                            exc,
+                        )
+            except Exception as e:
+                logger.warning(f"Error calling workflow task submitted callbacks: {e}")
+        else:
+            metadata["parent_workflow"] = None
+
+        # Write metadata file via backend
+        metadata_path = os.path.join(target_job_dir, "metadata.json")
+        try:
+            # For SSH backend, use _upload_string_to_file
+            if hasattr(self.backend, "_upload_string_to_file"):
+                self.backend._upload_string_to_file(
+                    json.dumps(metadata, indent=2), metadata_path
+                )
+            elif hasattr(self.backend, "write_file"):
+                # Future: if we add a write_file() method to backends
+                self.backend.write_file(metadata_path, json.dumps(metadata, indent=2))
+            else:
+                # For local backends, write directly
+                os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+                with open(metadata_path, "w") as f:
+                    json.dump(metadata, f, indent=2)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Failed to write metadata.json: %s", pre_submission_id, exc
+            )
+
+    def _handle_workflow_slurmfile(
+        self,
+        task_func: SlurmTask,
+        pre_submission_id: str,
+        target_job_dir: str,
+    ) -> None:
+        """Handle workflow Slurmfile upload for nested workflow execution.
+
+        Args:
+            task_func: The task being submitted
+            pre_submission_id: Job submission ID
+            target_job_dir: Job directory path
+        """
+        # Upload Slurmfile for workflow support
+        is_workflow = getattr(task_func, "_is_workflow", False)
+        logger.debug(
+            "[%s] Checking workflow Slurmfile upload: is_workflow=%s",
+            pre_submission_id,
+            is_workflow,
+        )
+        if is_workflow:
+            slurmfile_path = getattr(self, "slurmfile_path", None)
+            logger.debug(
+                "[%s] slurmfile_path=%s, exists=%s",
+                pre_submission_id,
+                slurmfile_path,
+                os.path.exists(slurmfile_path) if slurmfile_path else False,
+            )
+            if slurmfile_path and os.path.exists(slurmfile_path):
+                try:
+                    with open(slurmfile_path, "r") as f:
+                        slurmfile_content = f.read()
+
+                    # Modify Slurmfile for workflow execution inside cluster
+                    # Replace external hostname/port with internal cluster hostname and standard SSH port
+                    import re
+
+                    # Get environment name to modify the correct section
+                    env_name = getattr(self, "env_name", "default")
+
+                    # Determine the hostname to use inside the cluster
+                    # Query the actual cluster to get its hostname
+                    try:
+                        result = self.backend.execute_command("hostname")
+                        internal_hostname = result.strip()
+                        if not internal_hostname:
+                            internal_hostname = "localhost"
+                    except:
+                        internal_hostname = "localhost"
+
+                    # Create a workflow-specific Slurmfile with internal SSH config
+                    modified_content = slurmfile_content
+
+                    # Replace hostname value for SSH backend
+                    modified_content = re.sub(
+                        r'(hostname\s*=\s*)"[^"]*"',
+                        f'\\1"{internal_hostname}"',
+                        modified_content,
+                    )
+
+                    # Replace port with standard SSH port 22
+                    modified_content = re.sub(
+                        r"(\bport\s*=\s*)\d+", r"\g<1>22", modified_content
+                    )
+
+                    # Remove password authentication, use key-based
+                    modified_content = re.sub(
+                        r'password\s*=\s*"[^"]*"\s*\n', "", modified_content
+                    )
+
+                    # Enable key-based authentication
+                    modified_content = re.sub(
+                        r"look_for_keys\s*=\s*false",
+                        "look_for_keys = true",
+                        modified_content,
+                    )
+
+                    # Stage SSH keys inside the workflow job directory for nested submissions
+                    ssh_dir = os.path.join(target_job_dir, ".ssh")
+                    private_key_path = os.path.join(ssh_dir, "id_rsa")
+                    public_key_path = os.path.join(ssh_dir, "id_rsa.pub")
+                    try:
+                        copy_commands = [
+                            f"mkdir -p {shlex.quote(ssh_dir)}",
+                            f"cp ~/.ssh/id_rsa {shlex.quote(private_key_path)}",
+                            f"cp ~/.ssh/id_rsa.pub {shlex.quote(public_key_path)}",
+                            f"chmod 600 {shlex.quote(private_key_path)}",
+                            f"chmod 644 {shlex.quote(public_key_path)}",
+                        ]
+                        self.backend.execute_command(" && ".join(copy_commands))
+                        logger.debug(
+                            "[%s] Staged SSH keys for workflow job in %s",
+                            pre_submission_id,
+                            ssh_dir,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[%s] Failed to stage SSH keys for workflow job: %s",
+                            pre_submission_id,
+                            exc,
+                        )
+
+                    # Ensure backend config references the staged private key
+                    section_header = f"[{env_name}.cluster.backend_config]"
+                    key_field_name = "key_filename"
+                    lines = modified_content.splitlines()
+                    new_lines: List[str] = []
+                    in_section = False
+                    key_filename_set = False
+
+                    for line in lines:
+                        stripped = line.strip()
+                        if stripped.startswith("[") and stripped.endswith("]"):
+                            if in_section and not key_filename_set:
+                                new_lines.append(
+                                    f'{key_field_name} = "{private_key_path}"'
+                                )
+                            in_section = stripped == section_header
+                            key_filename_set = False
+                            new_lines.append(line)
+                            continue
+
+                        if in_section:
+                            if stripped.startswith("private_key"):
+                                # Drop legacy private_key entries in favor of key_filename
+                                continue
+                            if stripped.startswith(key_field_name):
+                                new_lines.append(
+                                    f'{key_field_name} = "{private_key_path}"'
+                                )
+                                key_filename_set = True
+                                continue
+
+                        new_lines.append(line)
+
+                    if in_section and not key_filename_set:
+                        new_lines.append(f'{key_field_name} = "{private_key_path}"')
+
+                    if lines:
+                        newline_suffix = "\n" if modified_content.endswith("\n") else ""
+                        modified_content = "\n".join(new_lines) + newline_suffix
+                    else:
+                        modified_content = "\n".join(new_lines)
+
+                    logger.debug(
+                        "[%s] Modified Slurmfile for workflow: hostname=%s, port=22, key-based auth",
+                        pre_submission_id,
+                        internal_hostname,
+                    )
+
+                    remote_slurmfile_path = os.path.join(
+                        target_job_dir, "Slurmfile.toml"
+                    )
+                    if hasattr(self.backend, "_upload_string_to_file"):
+                        self.backend._upload_string_to_file(
+                            modified_content, remote_slurmfile_path
+                        )
+                        logger.debug(
+                            "[%s] Uploaded modified Slurmfile to %s",
+                            pre_submission_id,
+                            remote_slurmfile_path,
+                        )
+                    else:
+                        logger.warning(
+                            "[%s] Backend does not have _upload_string_to_file method",
+                            pre_submission_id,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[%s] Failed to upload Slurmfile: %s",
+                        pre_submission_id,
+                        exc,
+                    )
+            else:
+                logger.debug(
+                    "[%s] Skipping Slurmfile upload: path missing or doesn't exist",
+                    pre_submission_id,
+                )
+
+    def _finalize_job_submission(
+        self,
+        job: Job,
+        job_id: str,
+        pre_submission_id: str,
+        target_job_dir: str,
+        effective_sbatch_options: Dict[str, Any],
+    ) -> Job:
+        """Finalize job submission with callbacks and polling.
+
+        Args:
+            job: The Job object
+            job_id: The SLURM job ID
+            pre_submission_id: Job submission ID
+            target_job_dir: Job directory path
+            effective_sbatch_options: Merged SBATCH options
+
+        Returns:
+            The Job object
+        """
+        submit_end_ctx = SubmitEndContext(
+            job=job,
+            job_id=str(job_id),
+            pre_submission_id=pre_submission_id,
+            target_job_dir=target_job_dir,
+            sbatch_options=dict(effective_sbatch_options),
+            cluster=self,
+            backend_type=self.backend_type,
+        )
+
+        for callback in self.callbacks:
+            if not callback.should_run_on_client("on_end_submit_job_ctx"):
+                continue
+            try:
+                callback.on_end_submit_job_ctx(submit_end_ctx)
+            except Exception as exc:
+                logger.debug(
+                    "Callback %s failed in on_end_submit_job_ctx: %s",
+                    type(callback).__name__,
+                    exc,
+                )
+
+        self._maybe_start_job_poller(job)
+
+        return job
+
     def submit(
         self,
         task_func: SlurmTask,
@@ -765,572 +1482,75 @@ class Cluster:
 
             submit_overrides = dict(normalized_overrides)
 
-            def _prepare_packaging() -> Any:
-                from .decorators import _parse_packaging_config
-
-                effective_packaging_config: Optional[Dict[str, Any]] = packaging_config
-
-                # Use provided packaging_config, else task's packaging, else cluster defaults
-                if effective_packaging_config is None:
-                    # Check if task has packaging configuration
-                    task_packaging = task_func.packaging
-                    # Skip task packaging if it's "auto" to allow cluster defaults to take precedence
-                    # This allows workflows to override child task packaging with "inherit"
-                    if task_packaging and task_packaging.get("type") not in (
-                        "auto",
-                        None,
-                    ):
-                        effective_packaging_config = task_packaging
-                    else:
-                        # Use cluster default_packaging (new string-based system)
-                        if self.default_packaging:
-                            # Preserve any packaging_* kwargs from the task's config
-                            task_packaging_kwargs = {}
-                            if task_packaging:
-                                task_packaging_kwargs = {
-                                    k: v
-                                    for k, v in task_packaging.items()
-                                    if k != "type"
-                                }
-                            effective_packaging_config = _parse_packaging_config(
-                                self.default_packaging, task_packaging_kwargs
-                            )
-                        else:
-                            # Fall back to old Slurmfile packaging_defaults for compatibility
-                            effective_packaging_config = getattr(
-                                self, "packaging_defaults", None
-                            )
-                            # If still using auto from task, resolve it now
-                            if effective_packaging_config is None and task_packaging:
-                                effective_packaging_config = task_packaging
-
-                logger.debug(
-                    "Effective packaging config: %s", effective_packaging_config
-                )
-
-                packaging_start = time.time()
-                begin_ctx = PackagingBeginContext(
-                    task=task_func,
-                    packaging_config=effective_packaging_config,
-                    cluster=self,
-                    timestamp=packaging_start,
-                )
-
-                for callback in self.callbacks:
-                    if not callback.should_run_on_client("on_begin_package_ctx"):
-                        continue
-                    try:
-                        callback.on_begin_package_ctx(begin_ctx)
-                    except Exception as exc:
-                        logger.debug(
-                            "Callback %s failed in on_begin_package_ctx: %s",
-                            type(callback).__name__,
-                            exc,
-                        )
-
-                strategy = get_packaging_strategy(effective_packaging_config)
-                logger.debug(
-                    "[%s] Using packaging strategy: %s", "n/a", type(strategy).__name__
-                )
-                try:
-                    result = strategy.prepare(task=task_func, cluster=self)
-                    logger.debug("[%s] Packaging prepared: %s", "n/a", result)
-                except Exception as exc:
-                    logger.error("[%s] Packaging preparation failed: %s", "n/a", exc)
-                    traceback.print_exc(file=sys.stderr)
-                    pkg_type = (
-                        effective_packaging_config.get("type")
-                        if effective_packaging_config
-                        else "none"
-                    )
-                    raise PackagingError(
-                        f"Packaging preparation failed for task '{getattr(task_func, '__name__', 'unknown')}'\n"
-                        f"Packaging type: {pkg_type}\n"
-                        f"Original error: {exc}"
-                    ) from exc
-
-                packaging_end = time.time()
-                end_ctx = PackagingEndContext(
-                    task=task_func,
-                    packaging_result=strategy,
-                    cluster=self,
-                    timestamp=packaging_end,
-                    duration=packaging_end - packaging_start,
-                )
-
-                for callback in self.callbacks:
-                    if not callback.should_run_on_client("on_end_package_ctx"):
-                        continue
-                    try:
-                        callback.on_end_package_ctx(end_ctx)
-                    except Exception as exc:
-                        logger.debug(
-                            "Callback %s failed in on_end_package_ctx: %s",
-                            type(callback).__name__,
-                            exc,
-                        )
-
-                return strategy
-
-            packaging_strategy = _prepare_packaging()
-
-            # Generate timestamp and unique ID for hierarchical structure
-            timestamp, unique_id = _generate_timestamp_id()
-            pre_submission_id = f"{timestamp}_{unique_id}"
-
-            # Get task name and sanitize it
-            task_name = task_defaults.get("job_name", task_func.func.__name__)
-            sanitized_task_name = _sanitize_task_name(task_name)
-
-            resolved_job_base_dir = getattr(self.backend, "job_base_dir", None)
-            if resolved_job_base_dir is None:
-                import tempfile
-
-                resolved_job_base_dir = os.path.join(
-                    tempfile.gettempdir(), "slurm_jobs"
-                )
-                try:
-                    os.makedirs(resolved_job_base_dir, exist_ok=True)
-                except (OSError, IOError) as e:
-                    logger.debug(f"Failed to create job base directory: {e}")
-
-            # Check if we're in a workflow context for nested structure
-            from .context import get_active_context
-            from .workflow import WorkflowContext
-
-            ctx = get_active_context()
-            if isinstance(ctx, WorkflowContext):
-                # Nested in workflow: {workflow_dir}/tasks/{task_name}/{timestamp}_{unique_id}/
-                target_job_dir = os.path.join(
-                    str(ctx.workflow_job_dir),
-                    "tasks",
-                    sanitized_task_name,
-                    f"{timestamp}_{unique_id}",
-                )
-            else:
-                # Regular task: {job_base_dir}/{task_name}/{timestamp}_{unique_id}/
-                target_job_dir = os.path.join(
-                    resolved_job_base_dir,
-                    sanitized_task_name,
-                    f"{timestamp}_{unique_id}",
-                )
-            logger.debug(
-                "[%s] Target job directory path: %s", pre_submission_id, target_job_dir
+            # Prepare packaging strategy
+            packaging_strategy = self._prepare_packaging_strategy(
+                task_func, packaging_config
             )
 
-            # Build effective SBATCH options with proper precedence:
-            # 1. Cluster defaults (default_account, default_partition) - lowest priority
-            # 2. Slurmfile [submit] defaults (for backward compatibility)
-            # 3. Task decorator defaults
-            # 4. Runtime overrides - highest priority
-            effective_sbatch_options: Dict[str, Any] = {}
+            # Setup job directory and get identifiers
+            pre_submission_id, sanitized_task_name, target_job_dir, timestamp = (
+                self._setup_job_directory(task_func, task_defaults)
+            )
 
-            # Add cluster-wide defaults (new string-based API)
-            if self.default_account:
-                effective_sbatch_options["account"] = self.default_account
-            if self.default_partition:
-                effective_sbatch_options["partition"] = self.default_partition
-
-            # Add Slurmfile submit defaults if available (for backward compatibility)
-            slurmfile_submit_defaults = getattr(self, "submit_defaults", None)
-            if slurmfile_submit_defaults and isinstance(
-                slurmfile_submit_defaults, dict
-            ):
-                # Normalize the Slurmfile submit defaults
-                effective_sbatch_options.update(
-                    normalize_sbatch_options(slurmfile_submit_defaults)
+            # Merge SBATCH options with proper precedence
+            effective_sbatch_options, stdout_path, stderr_path = (
+                self._merge_sbatch_options(
+                    task_defaults, submit_overrides, pre_submission_id, target_job_dir
                 )
-
-            # Add task defaults
-            effective_sbatch_options.update(task_defaults)
-
-            # Add runtime overrides
-            effective_sbatch_options.update(submit_overrides)
-
-            stdout_path = effective_sbatch_options.get("output")
-            if not stdout_path:
-                stdout_path = f"{target_job_dir}/slurm_{pre_submission_id}.out"
-
-            stderr_path = effective_sbatch_options.get("error")
-            if not stderr_path:
-                stderr_path = f"{target_job_dir}/slurm_{pre_submission_id}.err"
-
-            submit_begin_ctx = SubmitBeginContext(
-                task=task_func,
-                sbatch_options=dict(effective_sbatch_options),
-                pre_submission_id=pre_submission_id,
-                target_job_dir=target_job_dir,
-                cluster=self,
-                packaging_strategy=packaging_strategy,
-                backend_type=self.backend_type,
             )
 
-            for callback in self.callbacks:
-                if not callback.should_run_on_client("on_begin_submit_job_ctx"):
-                    continue
-                try:
-                    callback.on_begin_submit_job_ctx(submit_begin_ctx)
-                except Exception as exc:
-                    logger.debug(
-                        "Callback %s failed in on_begin_submit_job_ctx: %s",
-                        type(callback).__name__,
-                        exc,
-                    )
-
-            script = render_job_script(
-                task_func=func_to_render,
-                task_args=args,
-                task_kwargs=kwargs,
-                task_definition=task_defaults,
-                sbatch_overrides=dict(submit_overrides),
-                packaging_strategy=packaging_strategy,
-                target_job_dir=target_job_dir,
-                pre_submission_id=pre_submission_id,
-                callbacks=self.callbacks,
-                cluster=self,  # Pass cluster for workflow support
-            )
-            logger.debug(
-                "[%s] --- RENDERED SBATCH SCRIPT ---\n%s\n[%s] --- END RENDERED SCRIPT ---",
+            # Render script and submit to backend
+            job_id = self._render_and_submit_to_backend(
+                task_func,
+                func_to_render,
+                args,
+                kwargs,
+                task_defaults,
+                submit_overrides,
+                packaging_strategy,
                 pre_submission_id,
-                script,
+                target_job_dir,
+                effective_sbatch_options,
+            )
+
+            # Create Job object
+            job = self._create_job_object(
+                job_id,
+                task_func,
+                args,
+                kwargs,
+                target_job_dir,
                 pre_submission_id,
+                effective_sbatch_options,
+                stdout_path,
+                stderr_path,
             )
 
-            # Get account and partition from effective options (which includes Slurmfile defaults)
-            submit_account = effective_sbatch_options.get("account")
-            submit_partition = effective_sbatch_options.get("partition")
-            logger.debug("[%s] submit_account: %s", pre_submission_id, submit_account)
-            logger.debug(
-                "[%s] submit_partition: %s", pre_submission_id, submit_partition
-            )
-            submission_message = (
-                f"[{pre_submission_id}] Submitting job via {self.backend_type} backend"
-            )
-            try:
-                logger.info(submission_message)
-                job_submission_result = self.backend.submit_job(
-                    script,
-                    target_job_dir=target_job_dir,
-                    pre_submission_id=pre_submission_id,
-                    account=submit_account,
-                    partition=submit_partition,
-                )
-            except Exception as e:
-                raise SubmissionError(
-                    f"Failed to submit job via backend '{self.backend_type}': {e}",
-                    script=script,
-                    metadata={
-                        "backend": self.backend_type,
-                        "account": submit_account,
-                        "partition": submit_partition,
-                        "pre_submission_id": pre_submission_id,
-                        "target_job_dir": target_job_dir,
-                    },
-                ) from e
-
-            if isinstance(job_submission_result, str):
-                job_id = job_submission_result
-            elif (
-                isinstance(job_submission_result, tuple)
-                and len(job_submission_result) == 2
-            ):
-                job_id, _ = job_submission_result
-            else:
-                raise TypeError(
-                    f"Unexpected return type from backend.submit_job: {type(job_submission_result)}"
-                )
-
-            job = Job(
-                id=job_id,
-                cluster=self,
-                task_func=task_func,
-                args=args,
-                kwargs=kwargs,
-                target_job_dir=target_job_dir,
-                pre_submission_id=pre_submission_id,
-                sbatch_options=dict(effective_sbatch_options),
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-            )
-
-            # Generate metadata.json
-            is_workflow = getattr(task_func, "_is_workflow", False)
-            logger.debug(
-                "[%s] is_workflow=%s (from task_func attribute)",
+            # Write job metadata and emit workflow callbacks
+            self._write_job_metadata(
+                job_id,
                 pre_submission_id,
-                is_workflow,
+                sanitized_task_name,
+                timestamp,
+                target_job_dir,
+                task_func,
             )
-            metadata = {
-                "job_id": job_id,
-                "pre_submission_id": pre_submission_id,
-                "task_name": sanitized_task_name,
-                "timestamp": timestamp,
-                "submitted_at": time.time(),
-                "status": "PENDING",
-                "is_workflow": is_workflow,
-            }
 
-            # Check if we're in a workflow context (for parent_workflow tracking)
-            from .context import get_active_context
-            from .workflow import WorkflowContext
-
-            ctx = get_active_context()
-            if isinstance(ctx, WorkflowContext):
-                metadata["parent_workflow"] = ctx.workflow_job_id
-
-                # Emit workflow task submission event
-                logger.debug("Calling on_workflow_task_submitted callbacks...")
-                try:
-                    from pathlib import Path as PathType
-
-                    submit_ctx = WorkflowTaskSubmitContext(
-                        parent_workflow_id=ctx.workflow_job_id,
-                        parent_workflow_dir=ctx.workflow_job_dir,
-                        parent_workflow_name=task_func.func.__name__
-                        if hasattr(task_func, "func")
-                        else str(ctx.workflow_job_id).split("_")[0],
-                        child_job_id=job_id,
-                        child_job_dir=PathType(target_job_dir),
-                        child_task_name=sanitized_task_name,
-                        child_is_workflow=is_workflow,
-                        timestamp=time.time(),
-                        cluster=self,
-                    )
-                    for callback in self.callbacks:
-                        if not callback.should_run_on_client(
-                            "on_workflow_task_submitted_ctx"
-                        ):
-                            continue
-                        try:
-                            callback.on_workflow_task_submitted_ctx(submit_ctx)
-                        except Exception as exc:
-                            logger.debug(
-                                "Callback %s failed in on_workflow_task_submitted_ctx: %s",
-                                type(callback).__name__,
-                                exc,
-                            )
-                except Exception as e:
-                    logger.warning(
-                        f"Error calling workflow task submitted callbacks: {e}"
-                    )
-            else:
-                metadata["parent_workflow"] = None
-
-            # Write metadata file via backend
-            metadata_path = os.path.join(target_job_dir, "metadata.json")
-            try:
-                # For SSH backend, use _upload_string_to_file
-                if hasattr(self.backend, "_upload_string_to_file"):
-                    self.backend._upload_string_to_file(
-                        json.dumps(metadata, indent=2), metadata_path
-                    )
-                elif hasattr(self.backend, "write_file"):
-                    # Future: if we add a write_file() method to backends
-                    self.backend.write_file(
-                        metadata_path, json.dumps(metadata, indent=2)
-                    )
-                else:
-                    # For local backends, write directly
-                    os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
-                    with open(metadata_path, "w") as f:
-                        json.dump(metadata, f, indent=2)
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Failed to write metadata.json: %s", pre_submission_id, exc
-                )
-
-            # Upload Slurmfile for workflow support
-            logger.debug(
-                "[%s] Checking workflow Slurmfile upload: is_workflow=%s",
+            # Handle workflow Slurmfile upload
+            self._handle_workflow_slurmfile(
+                task_func,
                 pre_submission_id,
-                is_workflow,
-            )
-            if is_workflow:
-                slurmfile_path = getattr(self, "slurmfile_path", None)
-                logger.debug(
-                    "[%s] slurmfile_path=%s, exists=%s",
-                    pre_submission_id,
-                    slurmfile_path,
-                    os.path.exists(slurmfile_path) if slurmfile_path else False,
-                )
-                if slurmfile_path and os.path.exists(slurmfile_path):
-                    try:
-                        with open(slurmfile_path, "r") as f:
-                            slurmfile_content = f.read()
-
-                        # Modify Slurmfile for workflow execution inside cluster
-                        # Replace external hostname/port with internal cluster hostname and standard SSH port
-                        import re
-
-                        # Get environment name to modify the correct section
-                        env_name = getattr(self, "env_name", "default")
-
-                        # Determine the hostname to use inside the cluster
-                        # Query the actual cluster to get its hostname
-                        try:
-                            result = self.backend.execute_command("hostname")
-                            internal_hostname = result.strip()
-                            if not internal_hostname:
-                                internal_hostname = "localhost"
-                        except:
-                            internal_hostname = "localhost"
-
-                        # Create a workflow-specific Slurmfile with internal SSH config
-                        modified_content = slurmfile_content
-
-                        # Replace hostname value for SSH backend
-                        modified_content = re.sub(
-                            r'(hostname\s*=\s*)"[^"]*"',
-                            f'\\1"{internal_hostname}"',
-                            modified_content,
-                        )
-
-                        # Replace port with standard SSH port 22
-                        modified_content = re.sub(
-                            r"(\bport\s*=\s*)\d+", r"\g<1>22", modified_content
-                        )
-
-                        # Remove password authentication, use key-based
-                        modified_content = re.sub(
-                            r'password\s*=\s*"[^"]*"\s*\n', "", modified_content
-                        )
-
-                        # Enable key-based authentication
-                        modified_content = re.sub(
-                            r"look_for_keys\s*=\s*false",
-                            "look_for_keys = true",
-                            modified_content,
-                        )
-
-                        # Stage SSH keys inside the workflow job directory for nested submissions
-                        ssh_dir = os.path.join(target_job_dir, ".ssh")
-                        private_key_path = os.path.join(ssh_dir, "id_rsa")
-                        public_key_path = os.path.join(ssh_dir, "id_rsa.pub")
-                        try:
-                            copy_commands = [
-                                f"mkdir -p {shlex.quote(ssh_dir)}",
-                                f"cp ~/.ssh/id_rsa {shlex.quote(private_key_path)}",
-                                f"cp ~/.ssh/id_rsa.pub {shlex.quote(public_key_path)}",
-                                f"chmod 600 {shlex.quote(private_key_path)}",
-                                f"chmod 644 {shlex.quote(public_key_path)}",
-                            ]
-                            self.backend.execute_command(" && ".join(copy_commands))
-                            logger.debug(
-                                "[%s] Staged SSH keys for workflow job in %s",
-                                pre_submission_id,
-                                ssh_dir,
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "[%s] Failed to stage SSH keys for workflow job: %s",
-                                pre_submission_id,
-                                exc,
-                            )
-
-                        # Ensure backend config references the staged private key
-                        section_header = f"[{env_name}.cluster.backend_config]"
-                        key_field_name = "key_filename"
-                        lines = modified_content.splitlines()
-                        new_lines: List[str] = []
-                        in_section = False
-                        key_filename_set = False
-
-                        for line in lines:
-                            stripped = line.strip()
-                            if stripped.startswith("[") and stripped.endswith("]"):
-                                if in_section and not key_filename_set:
-                                    new_lines.append(
-                                        f'{key_field_name} = "{private_key_path}"'
-                                    )
-                                in_section = stripped == section_header
-                                key_filename_set = False
-                                new_lines.append(line)
-                                continue
-
-                            if in_section:
-                                if stripped.startswith("private_key"):
-                                    # Drop legacy private_key entries in favor of key_filename
-                                    continue
-                                if stripped.startswith(key_field_name):
-                                    new_lines.append(
-                                        f'{key_field_name} = "{private_key_path}"'
-                                    )
-                                    key_filename_set = True
-                                    continue
-
-                            new_lines.append(line)
-
-                        if in_section and not key_filename_set:
-                            new_lines.append(f'{key_field_name} = "{private_key_path}"')
-
-                        if lines:
-                            newline_suffix = (
-                                "\n" if modified_content.endswith("\n") else ""
-                            )
-                            modified_content = "\n".join(new_lines) + newline_suffix
-                        else:
-                            modified_content = "\n".join(new_lines)
-
-                        logger.debug(
-                            "[%s] Modified Slurmfile for workflow: hostname=%s, port=22, key-based auth",
-                            pre_submission_id,
-                            internal_hostname,
-                        )
-
-                        remote_slurmfile_path = os.path.join(
-                            target_job_dir, "Slurmfile.toml"
-                        )
-                        if hasattr(self.backend, "_upload_string_to_file"):
-                            self.backend._upload_string_to_file(
-                                modified_content, remote_slurmfile_path
-                            )
-                            logger.debug(
-                                "[%s] Uploaded modified Slurmfile to %s",
-                                pre_submission_id,
-                                remote_slurmfile_path,
-                            )
-                        else:
-                            logger.warning(
-                                "[%s] Backend does not have _upload_string_to_file method",
-                                pre_submission_id,
-                            )
-                    except Exception as exc:
-                        logger.warning(
-                            "[%s] Failed to upload Slurmfile: %s",
-                            pre_submission_id,
-                            exc,
-                        )
-                else:
-                    logger.debug(
-                        "[%s] Skipping Slurmfile upload: path missing or doesn't exist",
-                        pre_submission_id,
-                    )
-
-            submit_end_ctx = SubmitEndContext(
-                job=job,
-                job_id=str(job_id),
-                pre_submission_id=pre_submission_id,
-                target_job_dir=target_job_dir,
-                sbatch_options=dict(effective_sbatch_options),
-                cluster=self,
-                backend_type=self.backend_type,
+                target_job_dir,
             )
 
-            for callback in self.callbacks:
-                if not callback.should_run_on_client("on_end_submit_job_ctx"):
-                    continue
-                try:
-                    callback.on_end_submit_job_ctx(submit_end_ctx)
-                except Exception as exc:
-                    logger.debug(
-                        "Callback %s failed in on_end_submit_job_ctx: %s",
-                        type(callback).__name__,
-                        exc,
-                    )
-
-            self._maybe_start_job_poller(job)
-
-            return job
+            # Finalize submission and return job
+            return self._finalize_job_submission(
+                job,
+                job_id,
+                pre_submission_id,
+                target_job_dir,
+                effective_sbatch_options,
+            )
 
         return submitter
 

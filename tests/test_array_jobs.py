@@ -201,8 +201,8 @@ def test_array_job_with_max_concurrent(tmp_path):
 def test_array_job_get_results_dir(tmp_path):
     """Test ArrayJob.get_results_dir() method.
 
-    NOTE: ArrayJobs are not immediately submitted in current implementation,
-    so get_results_dir() raises until the array job is submitted.
+    NOTE: ArrayJobs are submitted lazily, so get_results_dir() raises
+    until the array job is submitted.
     """
     clear_active_context()
 
@@ -226,7 +226,7 @@ def test_array_job_get_results_dir(tmp_path):
 def test_array_job_directory_structure(tmp_path):
     """Test that ArrayJob creates correct directory structure.
 
-    NOTE: ArrayJobs are not immediately submitted, so array_dir is None
+    NOTE: ArrayJobs are submitted lazily, so array_dir is None
     until submission.
     """
     clear_active_context()

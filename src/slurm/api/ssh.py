@@ -882,3 +882,7 @@ class SSHCommandBackend(BackendBase):
                 path,
             )
             return path.replace("\\", "/")
+
+    def is_remote(self) -> bool:
+        """Return True since SSH backend requires remote file operations."""
+        return True
