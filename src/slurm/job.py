@@ -13,6 +13,8 @@ from .api.ssh import SSHCommandBackend
 if TYPE_CHECKING:
     from .cluster import Cluster
 
+from .errors import BackendError
+
 from .rendering import RESULT_FILENAME
 
 

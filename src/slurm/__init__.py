@@ -4,7 +4,12 @@
 This package provides a Python SDK for interacting with Slurm clusters.
 """
 
-__version__ = "0.3.0"
+try:
+    from importlib.metadata import version
+
+    __version__ = version("slurm-sdk")
+except Exception:
+    __version__ = "unknown"
 
 from .cluster import Cluster
 from .decorators import task, workflow

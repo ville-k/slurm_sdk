@@ -16,10 +16,6 @@ from slurm.examples.integration_test_task import (
 )
 
 
-# Skip if not in integration test environment
-pytestmark = pytest.mark.integration
-
-
 def test_native_array_submission_with_simple_items(slurm_cluster):
     """Test native array submission with simple string items."""
 
@@ -214,3 +210,147 @@ def test_native_array_with_max_concurrent(slurm_cluster):
         results = array_job.get_results()
         expected = [x * 2 for x in items]
         assert results == expected
+
+
+def test_native_array_with_job_items(slurm_cluster):
+    """Test native array where items are Job objects from previous tasks.
+
+    This tests the Job -> JobResultPlaceholder conversion in array items.
+    """
+
+    with slurm_cluster:
+        # Create preparation jobs that return strings
+        prep_jobs = [prepare_data() for _ in range(3)]
+
+        # Wait for all prep jobs to complete
+        for job in prep_jobs:
+            assert job.wait(timeout=60), f"Prep job {job.id} failed"
+
+        # Map over the Job objects themselves
+        # prepare_data() returns "prepared", process_string_item converts to uppercase
+        # Jobs should be converted to placeholders and resolved at runtime
+        array_job = process_string_item.map(prep_jobs)
+
+        assert len(array_job) == 3
+        assert array_job._array_job_id is not None
+
+        # Verify all prep jobs are dependencies
+        for prep_job in prep_jobs:
+            assert prep_job in array_job.dependencies
+
+        success = array_job.wait(timeout=120)
+        assert success, "Array job did not complete within timeout"
+
+        # Get results - should be uppercase versions of prep results
+        results = array_job.get_results()
+        assert len(results) == 3
+
+        # Each prep job returns "prepared", so after uppercase: "PREPARED"
+        for result in results:
+            assert result == "PREPARED"
+
+
+def test_native_array_pipeline_pattern(slurm_cluster):
+    """Test pipeline pattern: stage1 → stage2 (using .after()).
+
+    This tests a simplified pipeline pattern where stage2 depends on stage1
+    using the .after() API rather than passing Jobs as items.
+    """
+
+    with slurm_cluster:
+        # Stage 1: Process initial data
+        stage1_items = ["input_a", "input_b"]  # Reduced to 2 items for faster test
+        stage1_jobs = process_string_item.map(stage1_items)
+
+        assert len(stage1_jobs) == 2
+        success = stage1_jobs.wait(timeout=180)
+        assert success, "Stage 1 did not complete within timeout"
+
+        stage1_results = stage1_jobs.get_results()
+        assert stage1_results == ["INPUT_A", "INPUT_B"]
+
+        # Stage 2: Process new data with dependency on stage 1
+        # Use .after() to establish dependency (simpler than Jobs as items)
+        stage2_items = ["output_x", "output_y"]
+        stage2_jobs = process_string_item.after(stage1_jobs).map(stage2_items)
+
+        success = stage2_jobs.wait(timeout=180)
+        assert success, "Stage 2 did not complete within timeout"
+
+        stage2_results = stage2_jobs.get_results()
+        assert len(stage2_results) == 2
+        assert stage2_results == ["OUTPUT_X", "OUTPUT_Y"]
+
+
+def test_metadata_json_created(slurm_cluster):
+    """Test that metadata.json is created when jobs save results.
+
+    This verifies the fix for missing metadata.json files.
+    """
+
+    with slurm_cluster:
+        # Submit a simple array job
+        items = ["test1", "test2", "test3"]
+        array_job = process_string_item.map(items)
+
+        assert array_job.wait(timeout=120)
+
+        # Check that metadata.json exists in the job directory
+        job_dir = array_job.array_dir
+        assert job_dir is not None
+
+        # Use the backend to check if file exists
+        try:
+            import json
+
+            stdout, stderr, rc = slurm_cluster.backend._run_command(
+                f"cat '{job_dir}/metadata.json'", timeout=5
+            )
+            assert rc == 0, f"metadata.json not found: {stderr}"
+
+            # Parse and verify metadata structure
+            metadata = json.loads(stdout)
+            assert isinstance(metadata, dict)
+
+            # Should have entries for all 3 array jobs
+            # Job IDs will be like "12345_0", "12345_1", "12345_2"
+            # We can't predict the exact IDs, but should have 3 entries
+            assert len(metadata) >= 3
+
+            # Each entry should have result_file and timestamp
+            for _, meta in metadata.items():
+                assert "result_file" in meta
+                assert "timestamp" in meta
+                assert meta["result_file"].endswith("_result.pkl")
+
+        except Exception as e:
+            pytest.fail(f"Failed to verify metadata.json: {e}")
+
+
+def test_array_job_as_dependency_integration(slurm_cluster):
+    """Test using ArrayJob in .after() dependency (integration test).
+
+    This tests the ArrayJob expansion feature that prevents pickle errors.
+    """
+
+    with slurm_cluster:
+        # Create an array job
+        prep_items = ["chunk_1", "chunk_2", "chunk_3"]
+        prep_array = process_string_item.map(prep_items)
+
+        assert prep_array.wait(timeout=120)
+
+        # Use the entire ArrayJob as a dependency for another task
+        # This should expand to depend on all constituent jobs
+        final_job = multiply_with_default.after(prep_array)(x=10, y=20)
+
+        # Verify the job was created successfully (no pickle error)
+        assert final_job is not None
+        assert final_job.id is not None
+
+        # Wait for completion
+        assert final_job.wait(timeout=120)
+
+        # Verify result
+        result = final_job.get_result()
+        assert result == 200  # 10 * 20

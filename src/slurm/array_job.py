@@ -118,18 +118,25 @@ class ArrayJob(Generic[T]):
         if not self.items:
             self._submitted = True
             return
-        from .array_items import serialize_array_items, generate_array_spec
+        from .array_items import (
+            serialize_array_items,
+            generate_array_spec,
+            convert_job_items_to_placeholders,
+        )
         from .rendering import render_job_script
         import uuid
         from datetime import datetime
         import re
         import tempfile
 
-        # Generate array specification
+        # Convert Job objects in items to placeholders for serialization
+        converted_items, job_deps = convert_job_items_to_placeholders(self.items)
+        all_dependencies = (self.dependencies or []) + job_deps
+        self.dependencies = all_dependencies
+
         array_spec = generate_array_spec(len(self.items), self.max_concurrent)
 
-        # Create a base job directory for the array
-        # This will be similar to individual job dirs but shared
+        # Create shared job directory for array (avoids N individual directories)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         unique_id = uuid.uuid4().hex[:8]
         pre_submission_id = f"{timestamp}_{unique_id}"
@@ -137,23 +144,17 @@ class ArrayJob(Generic[T]):
         task_name = getattr(self.task, "__name__", "array_job")
         job_base_dir = getattr(self.cluster.backend, "job_base_dir", "/tmp/slurm_jobs")
         array_dir = Path(job_base_dir) / task_name / pre_submission_id
-
-        # Determine target directory based on backend type
         target_job_dir = str(array_dir)
 
-        # Check if backend is remote (SSH) or local
         is_remote = (
             hasattr(self.cluster.backend, "is_remote")
             and self.cluster.backend.is_remote()
         )
 
-        # Get packaging strategy (use cluster's default or auto)
-        from .packaging import get_packaging_strategy
-
-        packaging_config = self.task.packaging or getattr(
-            self.cluster, "packaging_defaults", None
+        # Use cluster's packaging strategy preparation to respect default_packaging
+        packaging_strategy = self.cluster._prepare_packaging_strategy(
+            self.task, packaging_config=None
         )
-        packaging_strategy = get_packaging_strategy(packaging_config)
 
         # Prepare packaging
         try:
@@ -169,21 +170,26 @@ class ArrayJob(Generic[T]):
         task_defaults = dict(getattr(self.task, "sbatch_options", {}) or {})
         sbatch_overrides = {}
 
-        # Add dependency if specified
         if self.dependencies:
-            job_ids = [job.id for job in self.dependencies]
+            # Expand ArrayJob objects to avoid pickling them in dependency metadata
+            expanded_deps = []
+            for dep in self.dependencies:
+                if hasattr(dep, "_jobs"):
+                    expanded_deps.extend(dep._jobs)
+                else:
+                    expanded_deps.append(dep)
+
+            job_ids = [job.id for job in expanded_deps]
             if job_ids:
                 dependency_str = "afterok:" + ":".join(job_ids)
                 sbatch_overrides["dependency"] = dependency_str
 
-        # Serialize array items to target location
-        # For local backends, write directly to target dir
-        # For remote backends, write to temp dir then upload
+        # Serialize to temp dir for remote backends to enable upload
         if is_remote:
             # Remote backend: use temp dir and upload
             with tempfile.TemporaryDirectory() as tmp_dir:
                 array_items_filename = serialize_array_items(
-                    self.items,
+                    converted_items,
                     tmp_dir,
                     self.max_concurrent,
                 )
@@ -234,7 +240,7 @@ class ArrayJob(Generic[T]):
 
             os.makedirs(target_job_dir, exist_ok=True)
             array_items_filename = serialize_array_items(
-                self.items,
+                converted_items,
                 target_job_dir,
                 self.max_concurrent,
             )

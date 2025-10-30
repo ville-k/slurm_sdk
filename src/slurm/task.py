@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 # Add this block for type hinting Cluster without causing circular import at runtime
 if TYPE_CHECKING:
-    from .cluster import Cluster
+    pass
 
 
 class JobResultPlaceholder:
@@ -183,11 +183,15 @@ class SlurmTaskWithDependencies:
             else:
                 resolved_kwargs[key] = value
 
-        # Merge explicit dependencies (from .after()) with automatic dependencies
-        all_dependencies = self.dependencies + automatic_dependencies
+        # Expand ArrayJob objects to avoid pickling them in dependency metadata
+        expanded_deps = []
+        for dep in self.dependencies + automatic_dependencies:
+            if hasattr(dep, "_jobs"):
+                expanded_deps.extend(dep._jobs)
+            else:
+                expanded_deps.append(dep)
 
-        # Submit with dependencies
-        submitter = cluster.submit(self.task, after=all_dependencies)
+        submitter = cluster.submit(self.task, after=expanded_deps)
         job = submitter(*resolved_args, **resolved_kwargs)
 
         return job
@@ -448,14 +452,19 @@ class SlurmTask:
         # Merge explicit dependencies (from .after()) with automatic dependencies
         all_dependencies = self._pending_dependencies + automatic_dependencies
 
-        # Submit the task using the cluster's submit method
-        # Pass dependencies if any were found
+        # Expand ArrayJob objects to avoid pickling them in dependency metadata
+        expanded_deps = []
+        for dep in all_dependencies:
+            if hasattr(dep, "_jobs"):
+                expanded_deps.extend(dep._jobs)
+            else:
+                expanded_deps.append(dep)
+
         submit_kwargs = {}
-        if all_dependencies:
-            submit_kwargs["after"] = all_dependencies
+        if expanded_deps:
+            submit_kwargs["after"] = expanded_deps
 
         submitter = cluster.submit(self, **submit_kwargs)
-        # Use resolved args/kwargs (with placeholders instead of Job objects)
         job = submitter(*resolved_args, **resolved_kwargs)
 
         return job
@@ -531,6 +540,20 @@ class SlurmTask:
                 >>> prep_job = preprocess("data.csv")
                 >>> train_jobs = train.map(configs).after(prep_job)
                 >>> results = train_jobs.get_results()
+
+            Map over Job objects (automatic dependency tracking):
+
+                >>> # Jobs are converted to placeholders and resolved at runtime
+                >>> prep_jobs = [prepare_chunk(i) for i in range(10)]
+                >>> process_jobs = process.map(prep_jobs)  # Depends on all prep_jobs
+                >>> results = process_jobs.get_results()
+
+            Jobs in tuples or dicts:
+
+                >>> # Jobs can appear anywhere in items
+                >>> data_jobs = [load_data(f) for f in files]
+                >>> items = [(job, config) for job, config in zip(data_jobs, configs)]
+                >>> results = train.map(items).get_results()
         """
         from .context import get_active_context
         from .array_job import ArrayJob

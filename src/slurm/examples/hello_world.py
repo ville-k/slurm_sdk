@@ -19,8 +19,6 @@ from slurm.job import Job
     time="00:05:00",
     mem="1G",
     cpus_per_task=1,
-    packaging="wheel",
-    packaging_python_version="3.9",
 )
 def hello_world() -> str:
     """
@@ -52,13 +50,16 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    # Create cluster from args with additional callbacks
+    # Create cluster from args with default packaging configuration
     cluster = Cluster.from_args(
         args,
         banner_timeout=args.banner_timeout,
         callbacks=[
             LoggerCallback(),
         ],
+        # Set default packaging to wheel with Python 3.9
+        default_packaging="wheel",
+        default_packaging_python_version="3.12",
     )
 
     # Submit job (uses cluster defaults for packaging, account, partition)

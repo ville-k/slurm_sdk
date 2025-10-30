@@ -273,7 +273,16 @@ def main():
 
     job_context: JobContext = current_job_context()
 
-    job_id_env = os.environ.get("SLURM_JOB_ID")
+    # Get job ID, constructing full ID for native array jobs
+    # For array jobs: SLURM_ARRAY_JOB_ID=base_id, SLURM_ARRAY_TASK_ID=index
+    # We need to construct "base_id_index" to match what Job.id contains
+    array_job_id = os.environ.get("SLURM_ARRAY_JOB_ID")
+    array_task_id = os.environ.get("SLURM_ARRAY_TASK_ID")
+    if array_job_id and array_task_id:
+        job_id_env = f"{array_job_id}_{array_task_id}"
+    else:
+        job_id_env = os.environ.get("SLURM_JOB_ID")
+
     job_dir_env = os.environ.get("JOB_DIR")
     job_dir = args.job_dir or job_dir_env
     stdout_path = args.stdout_path or os.environ.get("SLURM_STDOUT")
@@ -401,26 +410,28 @@ def main():
                 # Pattern: {job_base_dir}/**/*_{job_id}/slurm_job_*_result.pkl
                 import glob
 
-                search_pattern = f"{job_base_dir}/**/slurm_job_*_result.pkl"
-                for result_path in glob.glob(search_pattern, recursive=True):
-                    # Check if this result file is from the correct job_id
-                    # We'll need to check the metadata.json file
-                    result_dir = os.path.dirname(result_path)
-                    metadata_path = os.path.join(result_dir, "metadata.json")
-                    if os.path.exists(metadata_path):
-                        try:
-                            import json
+                # Search for metadata.json files first (more efficient)
+                search_pattern = f"{job_base_dir}/**/metadata.json"
+                for metadata_path in glob.glob(search_pattern, recursive=True):
+                    try:
+                        import json
 
-                            with open(metadata_path, "r") as f:
-                                metadata = json.load(f)
-                            if metadata.get("job_id") == value.job_id:
-                                logger.debug("Found result file: %s", result_path)
-                                with open(result_path, "rb") as f:
-                                    return pickle.load(f)
-                        except Exception as e:
-                            logger.warning(
-                                "Error reading metadata from %s: %s", metadata_path, e
-                            )
+                        with open(metadata_path, "r") as f:
+                            metadata_map = json.load(f)
+
+                        # Check if this metadata contains our job_id
+                        if value.job_id in metadata_map:
+                            result_dir = os.path.dirname(metadata_path)
+                            result_filename = metadata_map[value.job_id]["result_file"]
+                            result_path = os.path.join(result_dir, result_filename)
+
+                            logger.debug("Found result file: %s", result_path)
+                            with open(result_path, "rb") as f:
+                                return pickle.load(f)
+                    except Exception as e:
+                        logger.warning(
+                            "Error reading metadata from %s: %s", metadata_path, e
+                        )
 
                 raise FileNotFoundError(
                     f"Could not find result file for job_id={value.job_id}"
@@ -764,6 +775,69 @@ def main():
             pickle.dump(result, f)
 
         logger.debug("Result saved successfully.")
+
+        # Create metadata.json for JobResultPlaceholder resolution
+        # Array jobs share a directory, so use file locking to prevent concurrent write conflicts
+        metadata_path = os.path.join(output_dir or ".", "metadata.json")
+        try:
+            import fcntl
+
+            lock_file = metadata_path + ".lock"
+            max_retries = 10
+            retry_delay = 0.1
+
+            for attempt in range(max_retries):
+                try:
+                    lock_fd = os.open(lock_file, os.O_CREAT | os.O_WRONLY, 0o644)
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                    try:
+                        metadata_map = {}
+                        if os.path.exists(metadata_path):
+                            try:
+                                with open(metadata_path, "r") as f:
+                                    metadata_map = json.load(f)
+                            except Exception as read_err:
+                                logger.warning(
+                                    "Could not read metadata, starting fresh: %s",
+                                    read_err,
+                                )
+
+                        metadata_map[job_id_env] = {
+                            "result_file": os.path.basename(args.output_file),
+                            "timestamp": end_time,
+                        }
+
+                        # Atomic write: temp file + rename prevents partial reads
+                        temp_path = metadata_path + ".tmp"
+                        with open(temp_path, "w") as f:
+                            json.dump(metadata_map, f, indent=2)
+                        os.rename(temp_path, metadata_path)
+
+                        logger.debug(
+                            "Metadata saved to %s (job_id=%s)",
+                            metadata_path,
+                            job_id_env,
+                        )
+                    finally:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                        os.close(lock_fd)
+                    break
+
+                except (IOError, OSError) as lock_err:
+                    if attempt < max_retries - 1:
+                        logger.debug(
+                            "Metadata lock busy, retrying in %s seconds...", retry_delay
+                        )
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        raise Exception(
+                            f"Could not acquire metadata lock after {max_retries} attempts"
+                        ) from lock_err
+
+        except Exception as e:
+            logger.warning("Failed to save metadata: %s", e)
 
         logger.debug("Calling on_end_run_job callbacks (success)...")
         try:

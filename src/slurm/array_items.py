@@ -2,10 +2,63 @@
 
 import pickle
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .job import Job
 
 
 ARRAY_ITEMS_FILENAME = "array_items.pkl"
+
+
+def convert_job_items_to_placeholders(
+    items: List[Any],
+) -> Tuple[List[Any], List["Job"]]:
+    """Convert Job objects in array items to JobResultPlaceholder instances.
+
+    Recursively processes items to find and replace Job objects with placeholders
+    that can be pickled. Also collects all found Jobs for dependency tracking.
+
+    Args:
+        items: List of array items (may contain Jobs, tuples with Jobs, dicts with Jobs)
+
+    Returns:
+        Tuple of (converted_items, found_jobs) where:
+        - converted_items: Items with Jobs replaced by placeholders
+        - found_jobs: List of all Job objects found (for dependency tracking)
+
+    Examples:
+        >>> job1 = Job(id="123", ...)
+        >>> items = [job1, (job2, "arg"), {"data": job3, "x": 1}]
+        >>> converted, deps = convert_job_items_to_placeholders(items)
+        >>> # converted = [JobResultPlaceholder("123"),
+        >>>              (JobResultPlaceholder("456"), "arg"),
+        >>>              {"data": JobResultPlaceholder("789"), "x": 1}]
+        >>> # deps = [job1, job2, job3]
+    """
+    from .job import Job
+    from .task import JobResultPlaceholder
+
+    found_jobs: List[Job] = []
+    converted_items: List[Any] = []
+
+    def convert_value(value: Any) -> Any:
+        if isinstance(value, Job):
+            found_jobs.append(value)
+            return JobResultPlaceholder(value.id)
+        elif isinstance(value, tuple):
+            return tuple(convert_value(v) for v in value)
+        elif isinstance(value, dict):
+            return {k: convert_value(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [convert_value(v) for v in value]
+        else:
+            return value
+
+    for item in items:
+        converted_items.append(convert_value(item))
+
+    return converted_items, found_jobs
 
 
 def serialize_array_items(
@@ -98,6 +151,7 @@ def generate_array_spec(
 
 
 __all__ = [
+    "convert_job_items_to_placeholders",
     "serialize_array_items",
     "load_array_item",
     "generate_array_spec",

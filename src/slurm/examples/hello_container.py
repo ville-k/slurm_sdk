@@ -24,12 +24,6 @@ from slurm.job import Job
     time="00:05:00",
     mem="10G",
     cpus_per_task=1,
-    packaging="container",
-    packaging_platform="linux/amd64",
-    packaging_push=True,
-    packaging_registry="nvcr.io/nv-maglev/",
-    packaging_dockerfile="src/slurm/examples/hello_container.Dockerfile",
-    packaging_context=".",
 )
 def hello_container_task(greeted: str) -> str:
     """Report basic runtime information from inside the container."""
@@ -54,10 +48,13 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    # Create cluster from args
+    # Create cluster from args with default container packaging
     cluster = Cluster.from_args(
         args,
         callbacks=[RichLoggerCallback()],
+        # Set default container packaging configuration
+        default_packaging="container",
+        default_packaging_dockerfile="src/slurm/examples/hello_container.Dockerfile",
     )
     with cluster:
         greeted = getpass.getuser()

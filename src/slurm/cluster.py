@@ -240,6 +240,18 @@ class Cluster:
                 For SSH backend: hostname, username, password, key_filename, port,
                 and other SSH connection parameters.
 
+                For packaging defaults (all optional, prefixed with `default_packaging_`):
+                - `default_packaging_python_version`: Python version for wheel packaging (e.g., "3.11")
+                - `default_packaging_build_tool`: Build tool to use (e.g., "uv", "pip")
+                - `default_packaging_dockerfile`: Path to Dockerfile for building container
+                - `default_packaging_context`: Docker build context directory (default: ".")
+                - `default_packaging_registry`: Container registry URL
+                - `default_packaging_push`: Whether to push container to registry (bool)
+                - `default_packaging_runtime`: Container runtime (e.g., "docker", "podman")
+                - `default_packaging_platform`: Target platform (e.g., "linux/amd64")
+                - `default_packaging_mounts`: List of volume mounts for container
+                - `default_packaging_srun_args`: Additional srun arguments for container
+
         Raises:
             ValueError: If an unsupported backend_type is specified.
             RuntimeError: If backend initialization fails (e.g., SSH connection issues).
@@ -251,7 +263,10 @@ class Cluster:
                 ...     backend_type="ssh",
                 ...     hostname="hpc.example.edu",
                 ...     username="myuser",
-                ...     default_packaging="auto",
+                ...     default_packaging="container",
+                ...     default_packaging_platform="linux/amd64",
+                ...     default_packaging_registry="myregistry.io/myproject/",
+                ...     default_packaging_push=True,
                 ...     default_account="research",
                 ...     default_partition="cpu"
                 ... )
@@ -270,10 +285,20 @@ class Cluster:
         self.default_account = default_account
         self.default_partition = default_partition
 
-        if job_base_dir is not None:
-            backend_kwargs["job_base_dir"] = job_base_dir
+        # Extract default_packaging_* kwargs and store them separately
+        self.default_packaging_kwargs: Dict[str, Any] = {}
+        backend_only_kwargs = {}
+        for key, value in backend_kwargs.items():
+            if key.startswith("default_packaging_"):
+                # Remove the "default_packaging_" prefix for storage
+                self.default_packaging_kwargs[key[18:]] = value
+            else:
+                backend_only_kwargs[key] = value
 
-        self.backend = create_backend(backend_type, **backend_kwargs)
+        if job_base_dir is not None:
+            backend_only_kwargs["job_base_dir"] = job_base_dir
+
+        self.backend = create_backend(backend_type, **backend_only_kwargs)
         self._job_pollers: Dict[str, _JobStatusPoller] = {}
 
     @classmethod
@@ -587,6 +612,15 @@ class Cluster:
             default="auto",
             help="Default packaging strategy: auto, wheel, none, or container:IMAGE:TAG (default: auto)",
         )
+        parser.add_argument(
+            "--packaging-registry",
+            help="Container registry for pushing images.",
+        )
+        parser.add_argument(
+            "--packaging-platform",
+            default="linux/amd64",
+            help="Container platform for building images (default: linux/amd64)",
+        )
 
     @classmethod
     def from_args(cls, args, **extra_kwargs) -> "Cluster":
@@ -634,6 +668,10 @@ class Cluster:
         # Default parameters
         if hasattr(args, "packaging") and args.packaging:
             kwargs["default_packaging"] = args.packaging
+        if hasattr(args, "packaging_registry") and args.packaging_registry:
+            kwargs["default_packaging_registry"] = args.packaging_registry
+        if hasattr(args, "packaging_platform") and args.packaging_platform:
+            kwargs["default_packaging_platform"] = args.packaging_platform
         if hasattr(args, "account") and args.account:
             kwargs["default_account"] = args.account
         if hasattr(args, "partition") and args.partition:
@@ -682,14 +720,16 @@ class Cluster:
             else:
                 # Use cluster default_packaging (new string-based system)
                 if self.default_packaging:
-                    # Preserve any packaging_* kwargs from the task's config
-                    task_packaging_kwargs = {}
+                    # Start with cluster-level packaging defaults
+                    merged_kwargs = dict(self.default_packaging_kwargs)
+                    # Overlay task-specific packaging_* kwargs
                     if task_packaging:
                         task_packaging_kwargs = {
                             k: v for k, v in task_packaging.items() if k != "type"
                         }
+                        merged_kwargs.update(task_packaging_kwargs)
                     effective_packaging_config = _parse_packaging_config(
-                        self.default_packaging, task_packaging_kwargs
+                        self.default_packaging, merged_kwargs
                     )
                 else:
                     # Fall back to old Slurmfile packaging_defaults for compatibility

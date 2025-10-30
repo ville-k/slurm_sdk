@@ -1,6 +1,6 @@
 [project]
 name = "slurm-sdk"
-version = "0.3.0"
+version = "0.4.0"
 description = "Pythonic SDK for Slurm."
 readme = "README.md"
 license = "MIT"
@@ -35,7 +35,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# log_cli = true
+log_cli = false
 log_cli_level = "INFO"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"

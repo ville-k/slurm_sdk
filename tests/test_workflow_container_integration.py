@@ -131,7 +131,7 @@ def test_container_packaging_strategy_skip_build():
     strategy = ContainerPackagingStrategy(config)
 
     assert strategy.dockerfile is None
-    assert strategy.context is None
+    assert strategy.context == "."  # Defaults to "." even when not building
     assert strategy.image == "nvcr.io/nvidia/pytorch:latest"
     assert strategy.push is False
 
@@ -151,7 +151,7 @@ def test_container_packaging_strategy_with_explicit_image():
     # Should use the explicit image reference
     assert strategy.image == "myregistry.io/myimage:v1.0"
     assert strategy.dockerfile is None  # No build needed
-    assert strategy.context is None
+    assert strategy.context == "."  # Defaults to "." even when not building
 
 
 def test_slurmfile_upload_for_workflow_cluster_recreation(tmp_path):

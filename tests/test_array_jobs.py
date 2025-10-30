@@ -307,15 +307,12 @@ def test_array_job_fluent_api(tmp_path):
         reset_active_context(token)
 
 
-@pytest.mark.skip(
-    reason="Job objects in array items not yet supported - requires JobResultPlaceholder conversion in map path"
-)
 def test_array_job_with_job_dependencies(tmp_path):
     """Test array job where items include Job objects.
 
-    NOTE: This is a known limitation - Job objects cannot be pickled and passed
-    as array items. This would require extending the JobResultPlaceholder logic
-    to work in the array job submission path.
+    Job objects in items are automatically converted to JobResultPlaceholder
+    instances and resolved at runtime. Jobs found in items are also automatically
+    added as dependencies.
     """
     clear_active_context()
 
@@ -343,5 +340,182 @@ def test_array_job_with_job_dependencies(tmp_path):
 
         assert isinstance(array_job, ArrayJob)
         assert len(array_job) == 3
+
+        # Verify Job dependencies were extracted and added
+        assert job1 in array_job.dependencies
+        assert job2 in array_job.dependencies
+        assert job3 in array_job.dependencies
+    finally:
+        reset_active_context(token)
+
+
+def test_array_job_with_jobs_in_dicts(tmp_path):
+    """Test array items as dicts containing Job objects."""
+    clear_active_context()
+
+    @task(time="00:01:00", mem="1G")
+    def analyze_task(data: int, param: int) -> str:
+        return f"data={data}, param={param}"
+
+    cluster = create_mock_cluster(tmp_path)
+    token = set_active_context(cluster)
+
+    try:
+        # Create data jobs
+        job1 = process_item("a")
+        job2 = process_item("b")
+
+        # Map over dicts with Job values
+        items = [
+            {"data": job1, "param": 100},
+            {"data": job2, "param": 200},
+        ]
+        array_job = analyze_task.map(items)
+
+        assert isinstance(array_job, ArrayJob)
+        assert len(array_job) == 2
+
+        # Verify dependencies
+        assert job1 in array_job.dependencies
+        assert job2 in array_job.dependencies
+    finally:
+        reset_active_context(token)
+
+
+def test_array_job_with_nested_jobs(tmp_path):
+    """Test deeply nested Job objects in array items."""
+    clear_active_context()
+
+    @task(time="00:01:00", mem="1G")
+    def nested_task(config: dict) -> str:
+        return f"model={config['model']}, data={config['data']}"
+
+    cluster = create_mock_cluster(tmp_path)
+    token = set_active_context(cluster)
+
+    try:
+        # Create nested jobs
+        model_job = process_item("model")
+        data_job = process_item("data")
+
+        # Nested dicts with Jobs
+        items = [
+            {"model": model_job, "data": data_job, "seed": 42},
+        ]
+        array_job = nested_task.map(items)
+
+        assert isinstance(array_job, ArrayJob)
+        assert len(array_job) == 1
+
+        # Verify both nested dependencies were found
+        assert model_job in array_job.dependencies
+        assert data_job in array_job.dependencies
+    finally:
+        reset_active_context(token)
+
+
+def test_array_job_mixed_items_with_jobs(tmp_path):
+    """Test array with mix of regular items and items containing Jobs."""
+    clear_active_context()
+
+    @task(time="00:01:00", mem="1G")
+    def process_mixed(value: str) -> str:
+        return f"processed_{value}"
+
+    cluster = create_mock_cluster(tmp_path)
+    token = set_active_context(cluster)
+
+    try:
+        # Create one job
+        job1 = process_item("x")
+
+        # Mix of regular strings and Jobs
+        items = [
+            "plain1",
+            job1,
+            "plain2",
+        ]
+        array_job = process_mixed.map(items)
+
+        assert isinstance(array_job, ArrayJob)
+        assert len(array_job) == 3
+
+        # Only job1 should be in dependencies
+        assert job1 in array_job.dependencies
+        assert len(array_job.dependencies) == 1
+    finally:
+        reset_active_context(token)
+
+
+def test_array_job_single_job_item(tmp_path):
+    """Test array with single Job as item (simplest case)."""
+    clear_active_context()
+
+    @task(time="00:01:00", mem="1G")
+    def postprocess(result: str) -> str:
+        return f"post_{result}"
+
+    cluster = create_mock_cluster(tmp_path)
+    token = set_active_context(cluster)
+
+    try:
+        # Create jobs
+        job1 = process_item("a")
+        job2 = process_item("b")
+        job3 = process_item("c")
+
+        # Map directly over Job objects
+        items = [job1, job2, job3]
+        array_job = postprocess.map(items)
+
+        assert isinstance(array_job, ArrayJob)
+        assert len(array_job) == 3
+
+        # All jobs should be dependencies
+        assert job1 in array_job.dependencies
+        assert job2 in array_job.dependencies
+        assert job3 in array_job.dependencies
+    finally:
+        reset_active_context(token)
+
+
+def test_array_job_as_dependency(tmp_path):
+    """Test using an ArrayJob object in .after() (tests ArrayJob expansion).
+
+    This verifies that ArrayJob objects are automatically expanded to their
+    constituent Jobs when used as dependencies, preventing pickle errors.
+    """
+    clear_active_context()
+
+    @task(time="00:01:00", mem="1G")
+    def aggregate(results: list) -> str:
+        return f"aggregated_{len(results)}"
+
+    cluster = create_mock_cluster(tmp_path)
+    token = set_active_context(cluster)
+
+    try:
+        # Create an array job
+        items = ["a", "b", "c"]
+        array_job = process_item.map(items)
+
+        assert isinstance(array_job, ArrayJob)
+        assert len(array_job) == 3
+
+        # Use the ArrayJob as a dependency
+        # This should expand to all constituent Jobs, not pickle the ArrayJob
+        final_job = aggregate.after(array_job)(["result1", "result2"])
+
+        # Verify the final_job has all array element jobs as dependencies
+        # The expansion should have extracted the individual jobs
+        from slurm.job import Job
+
+        assert isinstance(final_job, Job)
+
+        # The final job should NOT have the ArrayJob itself as a dependency
+        # Instead, it should have all the constituent Jobs
+        # We can't directly check dependencies on Job, but we can verify it was created
+        assert final_job.id is not None
+
     finally:
         reset_active_context(token)

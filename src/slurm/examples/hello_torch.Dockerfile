@@ -1,27 +1,22 @@
-# ---- Stage 1: Dependency build layer (changes rarely) ----
-FROM python:3.14-slim AS deps
+FROM nvcr.io/nvidia/pytorch:25.10-py3
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /workspace
 
-# Copy dependency manifests only (so this layer is cached)
+# Install minimal build dependencies that are typically required when
+# installing the SDK and its transitive requirements.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y build-essential git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the project into the build context.
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-# Install project dependencies without bringing in your src code
-# This ensures caching unless pyproject.toml changes
-RUN pip install --no-cache-dir .
+RUN pip install --upgrade pip \
+    && pip install .
 
-# Optionally preinstall torch to isolate it from frequent rebuilds
-RUN pip install --no-cache-dir torch
+CMD ["python3", "-m", "slurm", "--help"]
 
-# ---- Stage 2: Runtime layer (changes frequently) ----
-FROM python:3.14-slim AS runtime
-
-WORKDIR /workspace
-
-# Copy Python packages from deps stage
-COPY --from=deps /usr/local/lib/python3.14 /usr/local/lib/python3.14
-COPY --from=deps /usr/local/bin /usr/local/bin
-
-# Copy only your code (this invalidates cache when src changes)
-COPY src/ src/

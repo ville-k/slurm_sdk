@@ -4,6 +4,7 @@ This example shows:
 - Map-reduce pattern with array jobs
 - Eager execution with reversed fluent API (task.after(prep).map(items))
 - Container packaging for reproducible execution
+- Cluster-level packaging defaults to avoid repetition
 - Processing data in parallel and aggregating results
 """
 
@@ -23,12 +24,6 @@ from slurm.job import Job
     time="00:02:00",
     mem="2G",
     cpus_per_task=1,
-    packaging="container",
-    packaging_platform="linux/amd64",
-    packaging_push=True,
-    packaging_registry="nvcr.io/nv-maglev/",
-    packaging_dockerfile="src/slurm/examples/map_reduce.Dockerfile",
-    packaging_context=".",
 )
 def prepare_data(num_chunks: int) -> List[dict]:
     """Prepare data by creating chunks for parallel processing.
@@ -57,12 +52,6 @@ def prepare_data(num_chunks: int) -> List[dict]:
     time="00:03:00",
     mem="1G",
     cpus_per_task=1,
-    packaging="container",
-    packaging_platform="linux/amd64",
-    packaging_push=True,
-    packaging_registry="nvcr.io/nv-maglev/",
-    packaging_dockerfile="src/slurm/examples/map_reduce.Dockerfile",
-    packaging_context=".",
 )
 def map_process_chunk(chunk_id: int, data: List[int], description: str) -> dict:
     """Process a single data chunk (MAP phase).
@@ -102,12 +91,6 @@ def map_process_chunk(chunk_id: int, data: List[int], description: str) -> dict:
     time="00:05:00",
     mem="4G",
     cpus_per_task=2,
-    packaging="container",
-    packaging_platform="linux/amd64",
-    packaging_push=True,
-    packaging_registry="nvcr.io/nv-maglev/",
-    packaging_dockerfile="src/slurm/examples/map_reduce.Dockerfile",
-    packaging_context=".",
 )
 def reduce_aggregate_results(results: List[dict]) -> dict:
     """Aggregate results from all processed chunks (REDUCE phase).
@@ -174,10 +157,13 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    # Create cluster from args
+    # Create cluster from args with default packaging configuration
     cluster = Cluster.from_args(
         args,
         callbacks=[RichLoggerCallback()],
+        # Set default packaging options for all tasks
+        default_packaging="container",
+        default_packaging_dockerfile="src/slurm/examples/map_reduce.Dockerfile",
     )
 
     with cluster:

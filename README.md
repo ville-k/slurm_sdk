@@ -1,49 +1,101 @@
-# Python SLURM SDK
+# Python Slurm SDK
 
-A developer-friendly SDK to define, submit, and manage SLURM jobs in Python.
+A developer-friendly SDK to define, submit, and manage [Slurm](https://slurm.schedmd.com/) jobs in Python with native array job support, fluent dependency APIs, and container packaging.
 
-## Quick start
+## Quick Start
+
+### Simple Task with Dependencies
 
 ```python
 from slurm import Cluster, task
-from slurm.logging import configure_logging
 
-configure_logging()  # pleasant defaults; use DEBUG for more detail
+@task(time="00:01:00", mem="1G")
+def preprocess(dataset: str) -> str:
+    return f"processed_{dataset}"
 
-@task(job_name="hello", time="00:01:00", mem="1G", ntasks=1, nodes=1)
-def hello(name: str) -> str:
-    return f"Hello {name}!"
+@task(time="00:05:00", mem="4G", cpus_per_task=4)
+def train_model(data: str, lr: float) -> dict:
+    return {"model": f"trained_on_{data}", "lr": lr, "accuracy": 0.95}
+
+@task(time="00:01:00", mem="1G")
+def evaluate(model: dict) -> str:
+    return f"Model accuracy: {model['accuracy']}"
 
 if __name__ == "__main__":
-    # Local test backend for offline dev
-    cluster = Cluster(backend_type="local")
-    job = hello.submit(cluster=cluster, packaging={"type": "none"})("world")
-    job.wait()
-    print(job.get_result())
+    # Local backend for offline development
+    with Cluster(backend_type="local") as cluster:
+        # Fluent dependency API with .after()
+        prep_job = preprocess("dataset.csv")
+        train_job = train_model.after(prep_job)(data=prep_job, lr=0.001)
+        eval_job = evaluate.after(train_job)(model=train_job)
+
+        eval_job.wait()
+        print(eval_job.get_result())
 ```
 
-SSH backend example:
+### Array Jobs for Parallel Processing
 
 ```python
-cluster = Cluster(backend_type="ssh", hostname="login.myhpc.example", username="me")
-job = hello.submit(cluster=cluster)("cluster")
-job.wait()
-print(job.get_result())
+from slurm import Cluster, task
+
+@task(time="00:02:00", mem="2G", cpus_per_task=2)
+def process_chunk(chunk_id: int, start: int, end: int) -> dict:
+    return {"chunk": chunk_id, "sum": sum(range(start, end))}
+
+@task(time="00:01:00", mem="1G")
+def aggregate(results: list) -> int:
+    return sum(r["sum"] for r in results)
+
+if __name__ == "__main__":
+    with Cluster(backend_type="local") as cluster:
+        # Map task over items to create native SLURM array job
+        chunks = [
+            {"chunk_id": i, "start": i * 1000, "end": (i + 1) * 1000}
+            for i in range(10)
+        ]
+        array_job = process_chunk.map(chunks)
+
+        # Aggregate results from array job
+        final = aggregate.after(array_job)(results=array_job.get_results())
+        final.wait()
+        print(f"Total: {final.get_result()}")
 ```
 
-## Testing
+### SSH Backend with Container Packaging
 
-- Unit tests (offline):
-  - Local backend executes tasks without external services.
-  - Run: `uv run pytest`.
+```python
+from slurm import Cluster, task
 
-- Optional SSH integration (not included by default):
-  - Configure env vars/CLI for host/user; write tests with markers in your project.
+@task(
+    time="00:10:00",
+    mem="8G",
+    packaging="container",
+    packaging_platform="linux/amd64",
+    packaging_push=True,
+    packaging_registry="myregistry.io/myproject/",
+)
+def compute_intensive_task(n: int) -> float:
+    import numpy as np
+    return np.mean(np.random.random(n))
 
-## Docs and references
+if __name__ == "__main__":
+    cluster = Cluster(
+        backend_type="ssh",
+        hostname="login.hpc.example.com",
+        username="myuser",
+    )
 
-- SLURM REST API: https://slurm.schedmd.com/SC24/REST-API.pdf
-- SLURM Containers: https://slurm.schedmd.com/SC24/Containers.pdf
+    with cluster:
+        job = compute_intensive_task(1_000_000)
+        job.wait()
+        print(job.get_result())
+```
+
+## Documentation
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Development setup, testing, and contribution guidelines
+- [AGENTS.md](AGENTS.md) - Guide for AI agents working with this codebase
+- [examples/](src/slurm/examples/) - Complete working examples including parallelization patterns
 
 
 ## Running on an ARM Mac (Apple Silicon)
