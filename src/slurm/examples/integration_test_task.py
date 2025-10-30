@@ -62,3 +62,43 @@ def get_output_dir_task(job: JobContext) -> dict:
         "job_id": job.job_id,
         "job_dir_env": job.environment.get("SLURM_JOB_DIR"),
     }
+
+
+# Array job test tasks
+@task(time="00:01:00")
+def process_string_item(item: str) -> str:
+    """Process a single string item and return uppercase."""
+    return item.upper()
+
+
+@task(time="00:01:00")
+def add_two_numbers(x: int, y: int) -> int:
+    """Add two numbers."""
+    return x + y
+
+
+@task(time="00:01:00")
+def multiply_with_default(x: int, y: int = 2) -> int:
+    """Multiply x by y (default 2)."""
+    return x * y
+
+
+@task(time="00:01:00")
+def prepare_data() -> str:
+    """Prepare initial data."""
+    return "prepared"
+
+
+@task(time="00:01:00")
+def process_item_simple(item: int) -> str:
+    """Process an item."""
+    return f"processed_{item}"
+
+
+@task(time="00:01:00")
+def slow_multiply_task(x: int) -> int:
+    """Slow task that returns x * 2."""
+    import time
+
+    time.sleep(1)
+    return x * 2

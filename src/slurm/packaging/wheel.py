@@ -195,7 +195,12 @@ class WheelPackagingStrategy(PackagingStrategy):
         job_id: Optional[str] = None,
         job_dir: Optional[str] = None,
     ) -> List[str]:
-        """Generates commands to setup environment within the specified job_dir."""
+        """Generates commands to setup environment within the specified job_dir.
+
+        This implementation uses file locking to handle concurrent execution in
+        array jobs. Only one array element will perform the setup, while others
+        wait and then use the already-setup environment.
+        """
         if not self.last_prepare_result or "wheel_path" not in self.last_prepare_result:
             raise RuntimeError(
                 "Wheel strategy 'prepare' must be called before generating setup commands."
@@ -212,9 +217,12 @@ class WheelPackagingStrategy(PackagingStrategy):
             raise RuntimeError("Missing wheel filename in prepare result.")
 
         # Build base paths
+        # Note: job_dir is "$JOB_DIR" (bash variable), paths will be properly quoted when used
         venv_dir_name = f".slurm_venv_{job_id if job_id else 'job'}"
         venv_path = f"{job_dir}/{venv_dir_name}"
         target_wheel_path = f"{job_dir}/{original_wheel_filename}"
+        lock_file = f"{job_dir}/.wheel_setup.lock"
+        setup_complete_marker = f"{venv_path}/.setup_complete"
 
         # Options
         extra_index_cmd = ""
@@ -229,44 +237,141 @@ class WheelPackagingStrategy(PackagingStrategy):
         if isinstance(version_cfg, str) and version_cfg.strip():
             selected_python = f"python{version_cfg.strip()}"
 
-        # Build command list
+        # Build command list with file locking for array job safety
         commands = [
             f"echo '--- Setting up Wheel Environment (Job ID: {job_id}) ---'",
             "echo 'Working directory: $(pwd)'",
             f"echo 'Job directory: {job_dir}'",
-            f"echo 'Using Python interpreter: {selected_python}'",
-            f"PY_EXEC={shlex.quote(selected_python)}",
-            'command -v "$PY_EXEC" >/dev/null 2>&1 || { echo "ERROR: Python interpreter not found: $PY_EXEC" >&2; exit 1; }',
-            '"$PY_EXEC" --version || { echo "ERROR: Failed to run $PY_EXEC --version" >&2; exit 1; }',
         ]
 
-        # Move uploaded wheel into JOB_DIR if we uploaded via SSH
+        # Detect if running in an array job
+        commands.append("# Detect array job execution")
+        commands.append('if [ -n "$SLURM_ARRAY_TASK_ID" ]; then')
+        commands.append(
+            f'  echo "Array task ID: $SLURM_ARRAY_TASK_ID (using file locking)"'
+        )
+        commands.append("  ARRAY_JOB=1")
+        commands.append("else")
+        commands.append("  ARRAY_JOB=0")
+        commands.append("fi")
+        commands.append("")
+
+        # Use file locking to synchronize array elements
+        commands.append("# File locking for concurrent array execution")
+        commands.append(f'LOCK_FILE="{lock_file}"')
+        commands.append(f'VENV_PATH="{venv_path}"')
+        commands.append(f'SETUP_MARKER="{setup_complete_marker}"')
+        commands.append("")
+
+        # Check if setup is already complete
+        commands.append('if [ -f "$SETUP_MARKER" ]; then')
+        commands.append(
+            '  echo "Environment already set up by another array element, skipping setup"'
+        )
+        commands.append("  SKIP_SETUP=1")
+        commands.append("else")
+        commands.append("  SKIP_SETUP=0")
+        commands.append("fi")
+        commands.append("")
+
+        # If not skipping, acquire lock and set up
+        commands.append('if [ "$SKIP_SETUP" = "0" ]; then')
+        commands.append("  # Open lock file and acquire exclusive lock")
+        commands.append('  exec 200>"$LOCK_FILE"')
+        commands.append('  echo "Acquiring setup lock..."')
+        commands.append("  flock -x 200")
+        commands.append('  echo "Lock acquired"')
+        commands.append("")
+
+        # Check again inside the lock (another process may have completed setup)
+        commands.append("  # Check again if setup was completed while waiting for lock")
+        commands.append('  if [ -f "$SETUP_MARKER" ]; then')
+        commands.append(
+            '    echo "Setup completed by another process while waiting, using existing environment"'
+        )
+        commands.append("    flock -u 200")
+        commands.append("  else")
+        commands.append('    echo "Performing environment setup..."')
+        commands.append("")
+
+        # Perform actual setup inside the lock
+        commands.append(f'    echo "Using Python interpreter: {selected_python}"')
+        commands.append(f"    PY_EXEC={shlex.quote(selected_python)}")
+        commands.append(
+            '    command -v "$PY_EXEC" >/dev/null 2>&1 || { echo "ERROR: Python interpreter not found: $PY_EXEC" >&2; exit 1; }'
+        )
+        commands.append(
+            '    "$PY_EXEC" --version || { echo "ERROR: Failed to run $PY_EXEC --version" >&2; exit 1; }'
+        )
+        commands.append("")
+
+        # Move uploaded wheel into JOB_DIR if we uploaded via SSH (with safety check)
         if remote_upload_path:
+            commands.append(f"    # Move wheel file (with concurrent access safety)")
+            commands.append(f"    if [ -f {shlex.quote(remote_upload_path)} ]; then")
             commands.append(
-                f"echo 'Moving uploaded wheel {remote_upload_path} to {target_wheel_path}'"
+                f'      echo "Moving uploaded wheel {remote_upload_path} to {target_wheel_path}"'
             )
-            commands.append(f"mv {shlex.quote(remote_upload_path)} {target_wheel_path}")
-            install_wheel_path = target_wheel_path
+            commands.append(
+                f'      mv {shlex.quote(remote_upload_path)} "{target_wheel_path}"'
+            )
+            commands.append(f'    elif [ ! -f "{target_wheel_path}" ]; then')
+            commands.append(
+                f'      echo "ERROR: Wheel file not found at source or target" >&2'
+            )
+            commands.append(f"      flock -u 200")
+            commands.append(f"      exit 1")
+            commands.append(f"    else")
+            commands.append(f'      echo "Wheel already at target location"')
+            commands.append(f"    fi")
+            install_wheel_path = f'"{target_wheel_path}"'
         else:
             # Local install directly from the built wheel path
             install_wheel_path = shlex.quote(self.last_prepare_result["wheel_path"])  # type: ignore[index]
 
         # Venv creation and activation (use explicit interpreter)
-        commands.append(f"echo 'Creating venv at {venv_path}'")
-        commands.append(f'"$PY_EXEC" -m venv {venv_path}')
-        commands.append(f"echo 'Activating venv: {venv_path}/bin/activate'")
-        commands.append(f"source {venv_path}/bin/activate")
-        commands.append(f"PY_EXEC={venv_path}/bin/python")
-        commands.append(f'echo "Updated PY_EXEC to venv python: $PY_EXEC"')
+        commands.append(f'    echo "Creating venv at $VENV_PATH"')
+        commands.append(
+            f'    "$PY_EXEC" -m venv "$VENV_PATH" || {{ echo "ERROR: Failed to create venv" >&2; flock -u 200; exit 1; }}'
+        )
+        commands.append(f'    echo "Activating venv: $VENV_PATH/bin/activate"')
+        commands.append(
+            f'    source "$VENV_PATH/bin/activate" || {{ echo "ERROR: Failed to activate venv" >&2; flock -u 200; exit 1; }}'
+        )
+        commands.append(f'    PY_EXEC="$VENV_PATH/bin/python"')
+        commands.append(f'    echo "Updated PY_EXEC to venv python: $PY_EXEC"')
+        commands.append("")
 
-        # Installation
-        commands.append("echo 'Installing wheel and dependencies using pip...'")
+        # Installation (use --quiet to avoid output size limits in SLURM)
+        commands.append('    echo "Installing wheel and dependencies using pip..."')
         if self.upgrade_pip:
-            commands.append('"$PY_EXEC" -m pip install --upgrade pip')
-        install_cmd = f'"$PY_EXEC" -m pip install {extra_index_cmd} {install_wheel_path}{extras_str} {deps_str}'
-        commands.append(install_cmd.strip())
+            commands.append(
+                '    "$PY_EXEC" -m pip install --quiet --upgrade pip || { echo "ERROR: Failed to upgrade pip" >&2; flock -u 200; exit 1; }'
+            )
+        install_cmd = f'"$PY_EXEC" -m pip install --quiet {extra_index_cmd} {install_wheel_path}{extras_str} {deps_str}'
+        commands.append(
+            f'    {install_cmd.strip()} || {{ echo "ERROR: Failed to install wheel" >&2; flock -u 200; exit 1; }}'
+        )
+        commands.append("")
 
-        commands.append('echo "Installation complete. Python: $(which \\"$PY_EXEC\\")"')
+        # Mark setup as complete
+        commands.append(
+            '    echo "Installation complete. Python: $(which \\"$PY_EXEC\\")"'
+        )
+        commands.append(
+            '    touch "$SETUP_MARKER" || { echo "ERROR: Failed to create setup marker" >&2; flock -u 200; exit 1; }'
+        )
+        commands.append('    echo "Setup complete, releasing lock"')
+        commands.append("    flock -u 200")
+        commands.append("  fi")
+        commands.append("fi")
+        commands.append("")
+
+        # All processes (whether they did setup or not) activate the venv
+        commands.append("# Activate environment (for all array elements)")
+        commands.append(f'source "{venv_path}/bin/activate"')
+        commands.append(f'PY_EXEC="{venv_path}/bin/python"')
+        commands.append('echo "Using venv python: $PY_EXEC"')
         commands.append("echo '--- Environment Setup Complete ---'")
 
         return commands

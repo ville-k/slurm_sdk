@@ -11,7 +11,6 @@ import os
 import re
 import subprocess
 import tempfile
-import uuid
 import shlex
 import logging
 from typing import Any, Dict, List, Optional
@@ -130,7 +129,7 @@ class LocalBackend(BackendBase):
 
             return result.stdout, result.stderr, result.returncode
 
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             raise BackendTimeout(f"Command timed out after {timeout} seconds: {cmd}")
         except Exception as e:
             if isinstance(e, (BackendTimeout, BackendCommandError)):
@@ -144,6 +143,7 @@ class LocalBackend(BackendBase):
         pre_submission_id: str,
         account: Optional[str] = None,
         partition: Optional[str] = None,
+        array_spec: Optional[str] = None,
     ) -> str:
         """
         Submit a job to the SLURM cluster.
@@ -154,14 +154,21 @@ class LocalBackend(BackendBase):
             pre_submission_id: The unique ID used in target_job_dir and filenames
             account: Optional SLURM account to use
             partition: Optional SLURM partition to use
+            array_spec: Optional array specification for native SLURM arrays.
+                Format: "0-N" or "0-N%M" where M is max concurrent tasks.
 
         Returns:
-            str: The job ID
+            str: The job ID. For array jobs, returns in format "12345_[0-N]".
 
         Raises:
             RuntimeError: If the job submission fails
         """
-        logger.debug("Submitting job to local Slurm cluster")
+        if array_spec:
+            logger.debug(
+                "Submitting array job to local Slurm cluster (array=%s)", array_spec
+            )
+        else:
+            logger.debug("Submitting job to local Slurm cluster")
         logger.debug("Target job directory: %s", target_job_dir)
 
         # Ensure target job directory exists
@@ -186,6 +193,8 @@ class LocalBackend(BackendBase):
                 sbatch_cmd_parts.append(f"--account={shlex.quote(account)}")
             if partition:
                 sbatch_cmd_parts.append(f"--partition={shlex.quote(partition)}")
+            if array_spec:
+                sbatch_cmd_parts.append(f"--array={array_spec}")
 
             sbatch_cmd_parts.append(shlex.quote(script_path))
             sbatch_cmd = " ".join(sbatch_cmd_parts)
@@ -209,7 +218,14 @@ class LocalBackend(BackendBase):
                 )
 
             job_id = match.group(1)
-            logger.info("Job submitted: %s", job_id)
+
+            # For array jobs, SLURM returns the base job ID
+            # We'll format it as "JOB_ID_[array_spec]" for consistency
+            if array_spec:
+                job_id = f"{job_id}_[{array_spec}]"
+                logger.info("Array job submitted: %s", job_id)
+            else:
+                logger.info("Job submitted: %s", job_id)
             return job_id
 
         finally:

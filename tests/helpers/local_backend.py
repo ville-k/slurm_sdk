@@ -24,7 +24,9 @@ class LocalBackend:
         pre_submission_id: str,
         account: str = None,
         partition: str = None,
+        array_spec: str = None,
     ) -> str:
+        """Submit a job. Note: array_spec is accepted but not supported by this simple backend."""
         os.makedirs(target_job_dir, exist_ok=True)
         script_path = os.path.join(target_job_dir, f"job_{pre_submission_id}.sh")
         with open(script_path, "w", newline="\n") as f:
@@ -32,6 +34,21 @@ class LocalBackend:
         os.chmod(script_path, 0o755)
 
         job_id = str(int(time.time() * 1000))
+
+        # For array jobs, don't execute the script (it expects SLURM env vars)
+        # Just return the array job ID format for testing
+        if array_spec:
+            self._jobs[job_id] = {
+                "dir": target_job_dir,
+                "submitted": time.time(),
+                "JobState": "COMPLETED",
+                "ExitCode": "0:0",
+                "Stdout": "",
+                "Stderr": "",
+            }
+            return f"{job_id}_[{array_spec}]"
+
+        # For regular jobs, execute the script
         env = os.environ.copy()
         proc = subprocess.Popen(
             [script_path],
@@ -55,6 +72,7 @@ class LocalBackend:
                 "Stderr": stderr.decode(errors="ignore"),
             }
         )
+
         return job_id
 
     def get_job_status(self, job_id: str) -> Dict[str, Any]:

@@ -210,12 +210,23 @@ def main():
         "--module", required=True, help="Module containing the task function"
     )
     parser.add_argument("--function", required=True, help="Name of the task function")
+
+    # Regular job arguments (mutually exclusive with array job arguments)
     parser.add_argument(
-        "--args-file", required=True, help="Path to the pickled args tuple file"
+        "--args-file", help="Path to the pickled args tuple file (regular jobs)"
     )
     parser.add_argument(
-        "--kwargs-file", required=True, help="Path to the pickled kwargs dict file"
+        "--kwargs-file", help="Path to the pickled kwargs dict file (regular jobs)"
     )
+
+    # Array job arguments (mutually exclusive with regular job arguments)
+    parser.add_argument(
+        "--array-index", type=int, help="Array task index for native SLURM arrays"
+    )
+    parser.add_argument(
+        "--array-items-file", help="Path to pickled array items file (array jobs)"
+    )
+
     parser.add_argument(
         "--output-file", required=True, help="Path to save the pickled result"
     )
@@ -239,12 +250,25 @@ def main():
 
     logging.basicConfig(level=args.loglevel)
 
-    logger.info("Starting task execution")
-    logger.debug("Module=%s, Function=%s", args.module, args.function)
-    logger.debug("Args file=%s", args.args_file)
-    logger.debug("Kwargs file=%s", args.kwargs_file)
-    logger.debug("Output file=%s", args.output_file)
-    logger.debug("Callbacks file=%s", args.callbacks_file)
+    # Determine if this is an array job
+    is_array_job = args.array_index is not None
+    array_task_id_env = os.environ.get("SLURM_ARRAY_TASK_ID")
+
+    if is_array_job:
+        logger.info("Starting array task execution (index=%s)", args.array_index)
+        logger.debug("Module=%s, Function=%s", args.module, args.function)
+        logger.debug("Array index=%s", args.array_index)
+        logger.debug("Array items file=%s", args.array_items_file)
+        logger.debug("Output file=%s", args.output_file)
+        logger.debug("Callbacks file=%s", args.callbacks_file)
+        logger.debug("SLURM_ARRAY_TASK_ID=%s", array_task_id_env)
+    else:
+        logger.info("Starting task execution")
+        logger.debug("Module=%s, Function=%s", args.module, args.function)
+        logger.debug("Args file=%s", args.args_file)
+        logger.debug("Kwargs file=%s", args.kwargs_file)
+        logger.debug("Output file=%s", args.output_file)
+        logger.debug("Callbacks file=%s", args.callbacks_file)
     logger.debug("Log level=%s", args.loglevel)
 
     job_context: JobContext = current_job_context()
@@ -263,6 +287,7 @@ def main():
         "SLURM_JOB_NAME",
         "SLURM_CLUSTER_NAME",
         "SLURM_SUBMIT_DIR",
+        "SLURM_ARRAY_TASK_ID",  # Add array task ID to snapshot
         "JOB_DIR",
     ]
     environment_snapshot = {
@@ -283,11 +308,52 @@ def main():
 
     callbacks: List[BaseCallback] = []
     try:
-        # Load arguments
-        with open(args.args_file, "rb") as f:
-            task_args = pickle.load(f)
-        with open(args.kwargs_file, "rb") as f:
-            task_kwargs = pickle.load(f)
+        # Load arguments - different logic for array jobs vs regular jobs
+        if is_array_job:
+            # Array job: load item from array items file by index
+            from slurm.array_items import load_array_item
+
+            # Resolve array items file path
+            # If it's a relative path, resolve it relative to job_dir
+            array_items_path = args.array_items_file
+            if not os.path.isabs(array_items_path):
+                # Relative path - resolve relative to job directory
+                if job_dir:
+                    array_items_path = os.path.join(job_dir, array_items_path)
+                else:
+                    # Fallback to current directory
+                    array_items_path = os.path.abspath(array_items_path)
+
+            logger.debug(
+                "Loading array item at index %s from %s",
+                args.array_index,
+                array_items_path,
+            )
+            logger.debug("Resolved array items path: %s", array_items_path)
+            item = load_array_item(array_items_path, args.array_index)
+
+            # Unpack item based on type
+            if isinstance(item, dict):
+                # Dict: unpack as kwargs
+                task_args = ()
+                task_kwargs = item
+                logger.debug("Loaded dict item as kwargs: %s keys", len(task_kwargs))
+            elif isinstance(item, tuple):
+                # Tuple: unpack as args
+                task_args = item
+                task_kwargs = {}
+                logger.debug("Loaded tuple item as args: %s elements", len(task_args))
+            else:
+                # Single value: pass as first arg
+                task_args = (item,)
+                task_kwargs = {}
+                logger.debug("Loaded single item as first arg")
+        else:
+            # Regular job: load from args/kwargs files
+            with open(args.args_file, "rb") as f:
+                task_args = pickle.load(f)
+            with open(args.kwargs_file, "rb") as f:
+                task_kwargs = pickle.load(f)
         # Load callbacks
         try:
             with open(args.callbacks_file, "rb") as f:

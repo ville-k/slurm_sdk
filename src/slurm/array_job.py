@@ -1,8 +1,7 @@
 """Array job support for Slurm SDK."""
 
-from typing import TYPE_CHECKING, TypeVar, Generic, List, Optional, Any, Union, Iterable
+from typing import TYPE_CHECKING, TypeVar, Generic, List, Optional, Any
 from pathlib import Path
-import pickle
 
 if TYPE_CHECKING:
     from .cluster import Cluster
@@ -13,20 +12,22 @@ T = TypeVar("T")
 
 
 class ArrayJob(Generic[T]):
-    """Represents a Slurm job array with grouped directory structure.
+    """Represents a Slurm job array with eager submission.
 
-    ArrayJob provides a fluent API for submitting array jobs and managing
-    their results. All tasks in the array are organized under a single
-    directory with a grouped structure.
+    ArrayJob submits all tasks immediately upon creation as a native SLURM
+    array job (--array flag), providing 10-1000x speedup over individual job
+    submissions. All tasks in the array share a single directory.
+
+    **Eager Execution**: Array jobs submit immediately when created. For
+    dependencies, use the reversed fluent API: task.after(deps).map(items)
 
     Directory structure:
         {task_name}/{timestamp}_{id}/
-        ├── array_metadata.json       # Array-level metadata
-        ├── tasks/                    # Individual array tasks
-        │   ├── 000/                  # Array index 0
-        │   ├── 001/                  # Array index 1
-        │   └── 002/                  # Array index 2
-        └── results/                  # Aggregated results
+        ├── array_items.pkl           # Serialized array items
+        ├── slurm_{id}_0.out          # Array element 0 stdout
+        ├── slurm_{id}_0.err          # Array element 0 stderr
+        ├── slurm_{id}_1.out          # Array element 1 stdout
+        └── ...
 
     Attributes:
         task: The SlurmTask to execute for each array element.
@@ -35,19 +36,19 @@ class ArrayJob(Generic[T]):
         array_dir: Path to the array submission directory.
 
     Examples:
-        Basic array job:
+        Basic array job (submits immediately):
 
             >>> @task(time="00:10:00")
             ... def process(file: str) -> Result:
             ...     return load_and_process(file)
             >>> files = ["a.csv", "b.csv", "c.csv"]
-            >>> array_job = process.map(files)
+            >>> array_job = process.map(files)  # Submits here!
             >>> results = array_job.get_results()
 
-        Array with dependencies:
+        Array with dependencies (reversed API):
 
             >>> prep_job = preprocess("data.csv")
-            >>> train_jobs = train.map(configs).after(prep_job)
+            >>> train_jobs = train.after(prep_job).map(configs)  # Deps first!
             >>> results = train_jobs.get_results()
     """
 
@@ -59,7 +60,7 @@ class ArrayJob(Generic[T]):
         max_concurrent: Optional[int] = None,
         dependencies: Optional[List["Job"]] = None,
     ):
-        """Initialize ArrayJob.
+        """Initialize ArrayJob and submit it immediately (eager execution).
 
         Args:
             task: SlurmTask to execute for each item.
@@ -80,6 +81,9 @@ class ArrayJob(Generic[T]):
         # Directory structure will be set when submitted
         self.array_dir: Optional[Path] = None
 
+        # Eager submission - submit immediately in constructor
+        self._submit()
+
     def __len__(self) -> int:
         """Get number of tasks in array."""
         return len(self.items)
@@ -93,9 +97,6 @@ class ArrayJob(Generic[T]):
         Returns:
             Job for that array element.
         """
-        if not self._submitted:
-            self._submit()
-
         if index < 0 or index >= len(self.items):
             raise IndexError(f"Array index {index} out of range [0, {len(self.items)})")
 
@@ -103,74 +104,226 @@ class ArrayJob(Generic[T]):
 
     def __iter__(self):
         """Iterate over jobs in array."""
-        if not self._submitted:
-            self._submit()
-
         return iter(self._jobs)
 
-    def after(self, *jobs: Union["Job", "ArrayJob"]) -> "ArrayJob[T]":
-        """Add dependencies (fluent API).
-
-        Args:
-            *jobs: Jobs or ArrayJobs to depend on.
-
-        Returns:
-            Self for method chaining.
-        """
-        for job in jobs:
-            if isinstance(job, ArrayJob):
-                # Depend on all jobs in the array
-                self.dependencies.extend(job._jobs if job._submitted else [])
-            else:
-                self.dependencies.append(job)
-        return self
-
-    def submit(self) -> None:
-        """Explicitly submit the array job to the cluster.
-
-        By default, array jobs are submitted lazily when you first access results
-        or iterate over the jobs. Call this method to submit immediately.
-
-        Examples:
-            Explicit submission:
-
-                >>> array_job = process.map(items)
-                >>> array_job.submit()  # Submit now instead of waiting
-                >>> # Jobs are now running on the cluster
-        """
-        self._submit()
-
     def _submit(self) -> None:
-        """Submit the array job (internal)."""
+        """Submit the array job as a native SLURM array using --array flag.
+
+        This submits a single job with --array=0-N, which is 10-1000x faster
+        than submitting N individual jobs.
+        """
         if self._submitted:
             return
 
-        # Submit each item as a separate job
-        # In a full implementation, this would use Slurm's native array job feature
-        # For now, we submit individual jobs
-        for i, item in enumerate(self.items):
-            # Prepare arguments based on item type
-            if isinstance(item, dict):
-                # Dict: unpack as kwargs
-                job = self.task(**item)
-            elif isinstance(item, tuple):
-                # Tuple: unpack as args
-                job = self.task(*item)
-            else:
-                # Single value: pass as first arg
-                job = self.task(item)
+        if not self.items:
+            self._submitted = True
+            return
+        from .array_items import serialize_array_items, generate_array_spec
+        from .rendering import render_job_script
+        import uuid
+        from datetime import datetime
+        import re
+        import tempfile
 
+        # Generate array specification
+        array_spec = generate_array_spec(len(self.items), self.max_concurrent)
+
+        # Create a base job directory for the array
+        # This will be similar to individual job dirs but shared
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_id = uuid.uuid4().hex[:8]
+        pre_submission_id = f"{timestamp}_{unique_id}"
+
+        task_name = getattr(self.task, "__name__", "array_job")
+        job_base_dir = getattr(self.cluster.backend, "job_base_dir", "/tmp/slurm_jobs")
+        array_dir = Path(job_base_dir) / task_name / pre_submission_id
+
+        # Determine target directory based on backend type
+        target_job_dir = str(array_dir)
+
+        # Check if backend is remote (SSH) or local
+        is_remote = (
+            hasattr(self.cluster.backend, "is_remote")
+            and self.cluster.backend.is_remote()
+        )
+
+        # Get packaging strategy (use cluster's default or auto)
+        from .packaging import get_packaging_strategy
+
+        packaging_config = self.task.packaging or getattr(
+            self.cluster, "packaging_defaults", None
+        )
+        packaging_strategy = get_packaging_strategy(packaging_config)
+
+        # Prepare packaging
+        try:
+            packaging_strategy.prepare(task=self.task, cluster=self.cluster)
+        except Exception as exc:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.error("Packaging preparation failed: %s", exc)
+            raise
+
+        # Get task defaults and merge with dependency options
+        task_defaults = dict(getattr(self.task, "sbatch_options", {}) or {})
+        sbatch_overrides = {}
+
+        # Add dependency if specified
+        if self.dependencies:
+            job_ids = [job.id for job in self.dependencies]
+            if job_ids:
+                dependency_str = "afterok:" + ":".join(job_ids)
+                sbatch_overrides["dependency"] = dependency_str
+
+        # Serialize array items to target location
+        # For local backends, write directly to target dir
+        # For remote backends, write to temp dir then upload
+        if is_remote:
+            # Remote backend: use temp dir and upload
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                array_items_filename = serialize_array_items(
+                    self.items,
+                    tmp_dir,
+                    self.max_concurrent,
+                )
+                local_items_file = Path(tmp_dir) / array_items_filename
+
+                # Render the job script with array job support
+                script = render_job_script(
+                    task_func=self.task.func,
+                    task_args=(),  # Not used for array jobs
+                    task_kwargs={},  # Not used for array jobs
+                    task_definition=task_defaults,
+                    sbatch_overrides=sbatch_overrides,
+                    packaging_strategy=packaging_strategy,
+                    target_job_dir=target_job_dir,
+                    pre_submission_id=pre_submission_id,
+                    callbacks=self.cluster.callbacks,
+                    cluster=self.cluster,
+                    is_array_job=True,
+                    array_items_file=array_items_filename,
+                )
+
+                # Upload the array items file to the target directory
+                if hasattr(self.cluster.backend, "_upload_file"):
+                    remote_items_path = f"{target_job_dir}/{array_items_filename}"
+                    self.cluster.backend._upload_file(
+                        str(local_items_file), remote_items_path
+                    )
+
+                # Submit the array job to the backend
+                submit_account = (
+                    task_defaults.get("account") or self.cluster.default_account
+                )
+                submit_partition = (
+                    task_defaults.get("partition") or self.cluster.default_partition
+                )
+
+                array_job_id = self.cluster.backend.submit_job(
+                    script,
+                    target_job_dir=target_job_dir,
+                    pre_submission_id=pre_submission_id,
+                    account=submit_account,
+                    partition=submit_partition,
+                    array_spec=array_spec,
+                )
+        else:
+            # Local backend: write array items directly to target directory
+            import os
+
+            os.makedirs(target_job_dir, exist_ok=True)
+            array_items_filename = serialize_array_items(
+                self.items,
+                target_job_dir,
+                self.max_concurrent,
+            )
+
+            # Render the job script with array job support
+            script = render_job_script(
+                task_func=self.task.func,
+                task_args=(),  # Not used for array jobs
+                task_kwargs={},  # Not used for array jobs
+                task_definition=task_defaults,
+                sbatch_overrides=sbatch_overrides,
+                packaging_strategy=packaging_strategy,
+                target_job_dir=target_job_dir,
+                pre_submission_id=pre_submission_id,
+                callbacks=self.cluster.callbacks,
+                cluster=self.cluster,
+                is_array_job=True,
+                array_items_file=array_items_filename,
+            )
+
+            # Submit the array job to the backend
+            submit_account = (
+                task_defaults.get("account") or self.cluster.default_account
+            )
+            submit_partition = (
+                task_defaults.get("partition") or self.cluster.default_partition
+            )
+
+            array_job_id = self.cluster.backend.submit_job(
+                script,
+                target_job_dir=target_job_dir,
+                pre_submission_id=pre_submission_id,
+                account=submit_account,
+                partition=submit_partition,
+                array_spec=array_spec,
+            )
+
+        # Parse the array job ID (format: "12345_[0-99]" or just "12345")
+        # and create Job objects for each array element
+        match = re.match(r"(\d+)_?\[?(\d+)-(\d+)\]?", array_job_id)
+        if match:
+            base_job_id = match.group(1)
+            start_idx = int(match.group(2))
+            end_idx = int(match.group(3))
+        else:
+            # Fallback: assume it's just the base ID and infer range from items
+            base_job_id = array_job_id
+            start_idx = 0
+            end_idx = len(self.items) - 1
+
+        # Create Job objects for each array element
+        from .job import Job
+
+        for idx in range(start_idx, end_idx + 1):
+            # Individual array element job ID: "12345_5"
+            element_job_id = f"{base_job_id}_{idx}"
+
+            # Get the item for this index
+            item = self.items[idx]
+            if isinstance(item, dict):
+                args = ()
+                kwargs = item
+            elif isinstance(item, tuple):
+                args = item
+                kwargs = {}
+            else:
+                args = (item,)
+                kwargs = {}
+
+            # Create Job object
+            # Note: For native arrays, all tasks share the same job directory
+            # Use non-padded idx to match SLURM's %a substitution in result filenames
+            job = Job(
+                id=element_job_id,
+                cluster=self.cluster,
+                task_func=self.task,
+                args=args,
+                kwargs=kwargs,
+                target_job_dir=target_job_dir,  # Shared directory for all array elements
+                pre_submission_id=f"{pre_submission_id}_{idx}",
+                sbatch_options=dict(task_defaults),
+                stdout_path=f"{target_job_dir}/slurm_{pre_submission_id}_{idx}.out",
+                stderr_path=f"{target_job_dir}/slurm_{pre_submission_id}_{idx}.err",
+            )
             self._jobs.append(job)
 
         self._submitted = True
-
-        # Set array directory based on first job's directory
-        if self._jobs:
-            first_job_dir = Path(self._jobs[0].target_job_dir)
-            # The array_dir should be the parent of the first job
-            # In the grouped structure: {task_name}/{timestamp}_{id}/tasks/000/
-            # So array_dir is {task_name}/{timestamp}_{id}/
-            self.array_dir = first_job_dir.parent.parent
+        self._array_job_id = array_job_id
+        self.array_dir = array_dir
 
     def get_results(self, timeout: Optional[float] = None) -> List[T]:
         """Wait for all tasks and return results.
@@ -181,9 +334,6 @@ class ArrayJob(Generic[T]):
         Returns:
             List of results from all array tasks.
         """
-        if not self._submitted:
-            self._submit()
-
         results = []
         for job in self._jobs:
             result = job.get_result(timeout=timeout)
@@ -199,10 +349,7 @@ class ArrayJob(Generic[T]):
         """
         if self.array_dir is None:
             raise RuntimeError(
-                "Cannot get results directory: array job has not been submitted yet.\n\n"
-                "Array jobs are submitted lazily when you first access their results.\n"
-                "To explicitly submit, call: array_job.submit()\n"
-                "Or access results which will trigger submission: array_job.get_results()"
+                "Cannot get results directory: array job was not properly initialized."
             )
 
         return self.array_dir / "results"
@@ -216,9 +363,6 @@ class ArrayJob(Generic[T]):
         Returns:
             True if all tasks completed, False if timeout.
         """
-        if not self._submitted:
-            self._submit()
-
         for job in self._jobs:
             if not job.wait(timeout=timeout):
                 return False

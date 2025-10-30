@@ -257,12 +257,15 @@ class SSHCommandBackend(BackendBase):
         account: Optional[str],
         partition: Optional[str],
         script_path: str,
+        array_spec: Optional[str] = None,
     ) -> str:
         parts = ["sbatch", f"--chdir={shlex.quote(target_job_dir)}"]
         if account:
             parts.append(f"--account={shlex.quote(account)}")
         if partition:
             parts.append(f"--partition={shlex.quote(partition)}")
+        if array_spec:
+            parts.append(f"--array={array_spec}")
         parts.append(shlex.quote(script_path))
         return " ".join(parts)
 
@@ -333,6 +336,7 @@ class SSHCommandBackend(BackendBase):
         pre_submission_id: str,
         account: Optional[str] = None,
         partition: Optional[str] = None,
+        array_spec: Optional[str] = None,
     ) -> str:
         """
         Submit a job to the SLURM cluster, creating the target directory first.
@@ -343,9 +347,11 @@ class SSHCommandBackend(BackendBase):
             pre_submission_id: The unique ID used in target_job_dir and filenames.
             account: Optional SLURM account to use.
             partition: Optional SLURM partition to use.
+            array_spec: Optional array specification for native SLURM arrays.
+                Format: "0-N" or "0-N%M" where M is max concurrent tasks.
 
         Returns:
-            str: The job ID.
+            str: The job ID. For array jobs, returns in format "12345_[0-N]".
 
         Raises:
             RuntimeError: If the job submission fails.
@@ -375,9 +381,13 @@ class SSHCommandBackend(BackendBase):
                 account=account,
                 partition=partition,
                 script_path=remote_script_path,
+                array_spec=array_spec,
             )
 
-            logger.debug("Submitting job via sbatch")
+            if array_spec:
+                logger.debug("Submitting array job via sbatch (array=%s)", array_spec)
+            else:
+                logger.debug("Submitting job via sbatch")
             logger.debug("Running command: %s", sbatch_cmd_to_run)
             stdout, stderr, return_code = self._run_command(sbatch_cmd_to_run)
 
@@ -393,7 +403,14 @@ class SSHCommandBackend(BackendBase):
                 )
 
             job_id = match.group(1)
-            logger.info("Job submitted: %s", job_id)
+
+            # For array jobs, SLURM returns the base job ID
+            # We'll format it as "JOB_ID_[array_spec]" for consistency
+            if array_spec:
+                job_id = f"{job_id}_[{array_spec}]"
+                logger.info("Array job submitted: %s", job_id)
+            else:
+                logger.info("Job submitted: %s", job_id)
             logger.debug("Submitted from script: %s", remote_script_path)
             return job_id
 
@@ -476,10 +493,8 @@ class SSHCommandBackend(BackendBase):
                 f"  2. Parsing error in SLURM output format\n"
                 f"  3. Unexpected SLURM response\n\n"
                 f"To diagnose:\n"
-                f"  1. Check SSH connection: ssh {hostname} echo 'connected'\n"
-                f"  2. Try manual SLURM command: ssh {hostname} scontrol show job {job_id}".format(
-                    hostname=getattr(self, "hostname", "cluster")
-                )
+                f"  1. Check SSH connection: ssh {getattr(self, 'hostname', 'cluster')} echo 'connected'\n"
+                f"  2. Try manual SLURM command: ssh {getattr(self, 'hostname', 'cluster')} scontrol show job {job_id}"
             ) from e
 
     def cancel_job(self, job_id: str) -> bool:
