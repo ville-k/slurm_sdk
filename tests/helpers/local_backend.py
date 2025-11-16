@@ -28,7 +28,10 @@ class LocalBackend:
     ) -> str:
         """Submit a job. Note: array_spec is accepted but not supported by this simple backend."""
         os.makedirs(target_job_dir, exist_ok=True)
-        script_path = os.path.join(target_job_dir, f"job_{pre_submission_id}.sh")
+        # Use the same naming convention as the real backends
+        script_path = os.path.join(
+            target_job_dir, f"slurm_job_{pre_submission_id}_script.sh"
+        )
         with open(script_path, "w", newline="\n") as f:
             f.write(script)
         os.chmod(script_path, 0o755)

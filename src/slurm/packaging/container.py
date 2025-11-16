@@ -102,11 +102,16 @@ class ContainerPackagingStrategy(PackagingStrategy):
         self.context: str = self.config.get("context", ".")
         self.image: Optional[str] = self.config.get("image")
         self.image_name: Optional[str] = self.config.get("name")
-        self.tag: str = self.config.get("tag", "latest")
+        # Generate unique UUID-based tag if not provided for reproducibility
+        if "tag" in self.config:
+            self.tag: str = self.config["tag"]
+        else:
+            self.tag: str = f"build-{uuid.uuid4().hex[:12]}"
         self.registry: Optional[str] = self.config.get("registry")
         self.platform: str = self.config.get("platform", "linux/amd64")
         self.build_args: Dict[str, Any] = self.config.get("build_args", {})
         self.push: bool = bool(self.config.get("push", True))
+        self.use_digest: bool = bool(self.config.get("use_digest", False))
         self.no_cache: bool = bool(self.config.get("no_cache", False))
         self.python_executable: str = self.config.get("python_executable", "python")
         self.modules: List[str] = list(self._as_list(self.config.get("modules", [])))
@@ -133,6 +138,16 @@ class ContainerPackagingStrategy(PackagingStrategy):
     ) -> Dict[str, Any]:
         runtime = self._detect_runtime()
         console = getattr(cluster, "console", None)
+
+        # Log packaging mode
+        if self.tag.startswith("build-"):
+            if self.use_digest:
+                logger.info(
+                    "Using auto-generated tag %s (will resolve to digest)", self.tag
+                )
+            else:
+                logger.info("Using auto-generated tag: %s", self.tag)
+
         image_ref = self._resolve_image_reference(task)
 
         built_image = False
@@ -153,6 +168,24 @@ class ContainerPackagingStrategy(PackagingStrategy):
             raise PackagingError(
                 "Container packaging requires either 'image' or 'dockerfile' in the configuration."
             )
+        else:
+            # Using pre-existing image
+            # Only pull if we need the digest for digest-based references
+            if self.use_digest:
+                try:
+                    pull_cmd = [runtime, "pull", image_ref]
+                    logger.info(
+                        "Pulling pre-existing image to get digest: %s", image_ref
+                    )
+                    subprocess.run(
+                        pull_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    logger.warning("Failed to pull image %s: %s", image_ref, e.stderr)
+                    # Continue anyway - image might already be available locally
 
         if self.push:
             self._push_container_image(
@@ -160,12 +193,31 @@ class ContainerPackagingStrategy(PackagingStrategy):
             )
             push_performed = True
 
-        self._image_reference = image_ref
+        # Optionally resolve image digest for reproducibility
+        # Note: Some Pyxis/enroot versions may not properly support digest-based auth
+        if self.use_digest:
+            digest_ref = self._get_image_digest(runtime, image_ref)
+            if digest_ref:
+                self._image_reference = digest_ref
+                logger.info("Using digest-based image reference: %s", digest_ref)
+            else:
+                # Fallback to tag-based reference if digest cannot be determined
+                self._image_reference = image_ref
+                logger.warning(
+                    "Could not resolve image digest, using tag-based reference: %s",
+                    image_ref,
+                )
+        else:
+            # Use tag-based reference (default for compatibility)
+            self._image_reference = image_ref
+            logger.info("Using tag-based image reference: %s", image_ref)
+
         self._runtime_cmd = runtime
 
         prepare_result = {
             "status": "success",
             "image": image_ref,
+            "image_digest": self._image_reference,  # Digest-based reference used in job
             "built": built_image,
             "pushed": push_performed,
             "runtime": runtime,
@@ -195,6 +247,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
             "command -v srun >/dev/null 2>&1 || { echo 'ERROR: srun not found on PATH' >&2; exit 1; }",
             f"CONTAINER_IMAGE={shlex.quote(self._image_reference)}",
             "export CONTAINER_IMAGE",
+            f"echo 'Resolved container image reference: {shlex.quote(self._image_reference)}'",
         ]
 
         # Set PY_EXEC as a bash array if it contains multiple words, otherwise as a simple variable
@@ -267,7 +320,11 @@ class ContainerPackagingStrategy(PackagingStrategy):
         # must be set as a bash array: PY_EXEC=(uv run python)
         # This ensures proper word splitting when ${PY_EXEC[@]} is expanded.
         wrapped_command = f"{' '.join(srun_parts)} {command}"
-        logger.debug("Wrapped execution command for container: %s", wrapped_command)
+        logger.debug(
+            "Wrapped execution command for container (image: %s): %s",
+            self._image_reference,
+            wrapped_command,
+        )
         return wrapped_command
 
     @staticmethod
@@ -576,7 +633,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
             registry_prefix = self.registry.rstrip("/")
             image_ref = f"{registry_prefix}/{image_ref.lstrip('/')}"
 
-        logger.debug("Resolved container image reference: %s", image_ref)
+        logger.info("Resolved container image reference: %s", image_ref)
         return image_ref
 
     def _build_container_image(
@@ -646,6 +703,71 @@ class ContainerPackagingStrategy(PackagingStrategy):
                 task_id=task_id,
                 progress_mode="push",
             )
+
+    def _get_image_digest(self, runtime: str, image_ref: str) -> Optional[str]:
+        """Get the digest (SHA256) of an image after build/push.
+
+        Args:
+            runtime: Container runtime (docker/podman)
+            image_ref: Image reference (with tag)
+
+        Returns:
+            Image digest in format: registry/image@sha256:abc123...
+            Returns None if digest cannot be determined
+        """
+        try:
+            # Use inspect to get the repo digest
+            cmd = [
+                runtime,
+                "inspect",
+                "--format",
+                "{{index .RepoDigests 0}}",
+                image_ref,
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            digest_ref = result.stdout.strip()
+
+            # RepoDigests contain the full reference with digest
+            # Format: registry/image@sha256:abc123...
+            if digest_ref and "@sha256:" in digest_ref:
+                logger.info("Resolved image digest: %s", digest_ref)
+                return digest_ref
+
+            # If RepoDigests is empty (image not pushed yet), try to get local digest
+            cmd = [runtime, "inspect", "--format", "{{.Id}}", image_ref]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            local_id = result.stdout.strip()
+
+            if local_id and local_id.startswith("sha256:"):
+                # For local images, construct reference using the local ID
+                # Remove tag from image_ref and append digest
+                if ":" in image_ref:
+                    base_ref = image_ref.rsplit(":", 1)[0]
+                else:
+                    base_ref = image_ref
+                digest_ref = f"{base_ref}@{local_id}"
+                logger.info("Using local image digest: %s", digest_ref)
+                return digest_ref
+
+            logger.warning("Could not determine digest for image: %s", image_ref)
+            return None
+
+        except subprocess.CalledProcessError as e:
+            logger.warning("Failed to get image digest for %s: %s", image_ref, e.stderr)
+            return None
+        except Exception as e:
+            logger.warning("Error getting image digest: %s", e)
+            return None
 
     def _run_container_command(
         self,

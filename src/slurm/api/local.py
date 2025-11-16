@@ -175,18 +175,17 @@ class LocalBackend(BackendBase):
         os.makedirs(target_job_dir, exist_ok=True)
         logger.debug("Ensured target job directory exists: %s", target_job_dir)
 
-        # Write script to temporary file
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".sh", delete=False, newline="\n"
-        ) as f:
+        # Write script to persistent location in job directory
+        script_filename = f"slurm_job_{pre_submission_id}_script.sh"
+        persistent_script_path = os.path.join(target_job_dir, script_filename)
+
+        logger.debug("Writing script to job directory: %s", persistent_script_path)
+        with open(persistent_script_path, "w", newline="\n") as f:
             f.write(script)
-            script_path = f.name
+        os.chmod(persistent_script_path, 0o755)
 
         try:
-            # Make script executable
-            os.chmod(script_path, 0o755)
-
-            # Build sbatch command
+            # Build sbatch command using the persistent script path
             sbatch_cmd_parts = ["sbatch", f"--chdir={shlex.quote(target_job_dir)}"]
 
             if account:
@@ -196,7 +195,7 @@ class LocalBackend(BackendBase):
             if array_spec:
                 sbatch_cmd_parts.append(f"--array={array_spec}")
 
-            sbatch_cmd_parts.append(shlex.quote(script_path))
+            sbatch_cmd_parts.append(shlex.quote(persistent_script_path))
             sbatch_cmd = " ".join(sbatch_cmd_parts)
 
             logger.debug("Submitting with command: %s", sbatch_cmd)
@@ -226,14 +225,17 @@ class LocalBackend(BackendBase):
                 logger.info("Array job submitted: %s", job_id)
             else:
                 logger.info("Job submitted: %s", job_id)
+            logger.debug("Script persisted at: %s", persistent_script_path)
             return job_id
 
-        finally:
-            # Clean up temporary script file
+        except Exception as e:
+            # On error, try to clean up the script file
             try:
-                os.unlink(script_path)
-            except Exception as e:
-                logger.warning("Failed to clean up temporary script file: %s", e)
+                if os.path.exists(persistent_script_path):
+                    os.unlink(persistent_script_path)
+            except Exception as cleanup_error:
+                logger.warning("Failed to clean up script file: %s", cleanup_error)
+            raise
 
     def get_job_status(self, job_id: str) -> Dict[str, Any]:
         """

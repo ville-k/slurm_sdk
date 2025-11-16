@@ -306,3 +306,66 @@ def test_backend_merges_environment(mock_run, temp_job_dir):
     assert "env" in call_kwargs
     assert "TEST_VAR" in call_kwargs["env"]
     assert call_kwargs["env"]["TEST_VAR"] == "test_value"
+
+
+@patch("subprocess.run")
+def test_submit_job_persists_script(mock_run, backend, temp_job_dir):
+    """Test that job script is persisted in job directory."""
+    mock_run.return_value = MagicMock(
+        stdout="Submitted batch job 12345", stderr="", returncode=0
+    )
+
+    script = "#!/bin/bash\necho hello"
+    target_job_dir = os.path.join(temp_job_dir, "test_job")
+    pre_submission_id = "test123"
+
+    job_id = backend.submit_job(
+        script=script,
+        target_job_dir=target_job_dir,
+        pre_submission_id=pre_submission_id,
+        account=None,
+        partition=None,
+    )
+
+    assert job_id == "12345"
+    assert os.path.exists(target_job_dir)
+
+    # Verify script was persisted
+    expected_script_path = os.path.join(
+        target_job_dir, f"slurm_job_{pre_submission_id}_script.sh"
+    )
+    assert os.path.exists(expected_script_path), (
+        f"Script not found at {expected_script_path}"
+    )
+
+    # Verify script content
+    with open(expected_script_path, "r") as f:
+        persisted_script = f.read()
+    assert persisted_script == script
+
+    # Verify script is executable
+    assert os.access(expected_script_path, os.X_OK)
+
+
+@patch("subprocess.run")
+def test_submit_job_script_filename_format(mock_run, backend, temp_job_dir):
+    """Test that script filename follows expected format."""
+    mock_run.return_value = MagicMock(
+        stdout="Submitted batch job 12345", stderr="", returncode=0
+    )
+
+    script = "#!/bin/bash\necho hello"
+    target_job_dir = os.path.join(temp_job_dir, "test_job")
+    pre_submission_id = "20250109_212626_81f18a7e"
+
+    backend.submit_job(
+        script=script,
+        target_job_dir=target_job_dir,
+        pre_submission_id=pre_submission_id,
+    )
+
+    expected_script_path = os.path.join(
+        target_job_dir, f"slurm_job_{pre_submission_id}_script.sh"
+    )
+    assert os.path.exists(expected_script_path)
+    assert expected_script_path.endswith("slurm_job_20250109_212626_81f18a7e_script.sh")

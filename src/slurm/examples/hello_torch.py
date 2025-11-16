@@ -7,7 +7,7 @@ from slurm.callbacks.callbacks import RichLoggerCallback
 
 @task(
     nodes=1,
-    gpus_per_node=1,
+    gpus_per_node=4,
     ntasks_per_node=1,
     exclusive=None,
 )

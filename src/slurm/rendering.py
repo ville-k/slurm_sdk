@@ -406,12 +406,21 @@ def render_job_script(
     runner_command = " ".join(runner_parts)
 
     try:
-        runner_command = packaging_strategy.wrap_execution_command(
+        wrapped_command = packaging_strategy.wrap_execution_command(
             command=runner_command,
             task=task_func,
             job_id=pre_submission_id,
             job_dir='"$JOB_DIR"',
         )
+        # Add debug output for container packaging to verify image reference
+        if (
+            hasattr(packaging_strategy, "_image_reference")
+            and packaging_strategy._image_reference
+        ):
+            script_lines.append(
+                f"echo 'Executing with container image: {packaging_strategy._image_reference}'"
+            )
+        runner_command = wrapped_command
     except Exception as e:
         logger.error("Error wrapping execution command: %s", e)
         traceback.print_exc(file=sys.stderr)

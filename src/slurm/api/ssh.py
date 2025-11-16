@@ -356,6 +356,11 @@ class SSHCommandBackend(BackendBase):
         Raises:
             RuntimeError: If the job submission fails.
         """
+        # Persist script in job directory
+        script_filename = f"slurm_job_{pre_submission_id}_script.sh"
+        persistent_script_path = f"{target_job_dir}/{script_filename}"
+
+        # Also use a temporary location for sbatch (some clusters may need this)
         remote_script_filename = f"job_{uuid.uuid4().hex[:8]}.sh"
         if not self.remote_temp_dir or not self.remote_temp_dir.startswith("/"):
             raise RuntimeError(
@@ -371,10 +376,20 @@ class SSHCommandBackend(BackendBase):
                 "--- BEGIN SCRIPT REPR ---\n%s\n--- END SCRIPT REPR ---", repr(script)
             )
 
-            logger.debug("Uploading job script to: %s", remote_script_path)
-            self._upload_string_to_file(script, remote_script_path)
+            # Write script to persistent location in job directory
+            logger.debug("Writing script to job directory: %s", persistent_script_path)
+            self._upload_string_to_file(script, persistent_script_path)
+            self._make_remote_executable(persistent_script_path)
 
-            self._make_remote_executable(remote_script_path)
+            # Also write to temp location for sbatch (if different)
+            if persistent_script_path != remote_script_path:
+                logger.debug(
+                    "Uploading job script to temp location: %s", remote_script_path
+                )
+                self._upload_string_to_file(script, remote_script_path)
+                self._make_remote_executable(remote_script_path)
+            else:
+                remote_script_path = persistent_script_path
 
             sbatch_cmd_to_run = self._build_sbatch_command(
                 target_job_dir=target_job_dir,
@@ -412,6 +427,7 @@ class SSHCommandBackend(BackendBase):
             else:
                 logger.info("Job submitted: %s", job_id)
             logger.debug("Submitted from script: %s", remote_script_path)
+            logger.debug("Script persisted at: %s", persistent_script_path)
             return job_id
 
         except Exception as e:
