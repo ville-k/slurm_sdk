@@ -9,7 +9,6 @@ import pytest
 from slurm.callbacks import BenchmarkCallback, LoggerCallback
 from slurm.examples.integration_test_workflow import (
     simple_workflow,
-    inner_workflow,
     outer_workflow,
     failing_workflow,
     sequential_workflow,

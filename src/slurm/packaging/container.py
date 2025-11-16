@@ -113,6 +113,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         self.push: bool = bool(self.config.get("push", True))
         self.use_digest: bool = bool(self.config.get("use_digest", False))
         self.no_cache: bool = bool(self.config.get("no_cache", False))
+        self.tls_verify: bool = bool(self.config.get("tls_verify", True))
         self.python_executable: str = self.config.get("python_executable", "python")
         self.modules: List[str] = list(self._as_list(self.config.get("modules", [])))
         self.srun_args: List[str] = list(
@@ -211,6 +212,9 @@ class ContainerPackagingStrategy(PackagingStrategy):
             # Use tag-based reference (default for compatibility)
             self._image_reference = image_ref
             logger.info("Using tag-based image reference: %s", image_ref)
+
+        # Convert to enroot format for Pyxis compatibility
+        self._image_reference = self._convert_to_enroot_format(self._image_reference)
 
         self._runtime_cmd = runtime
 
@@ -636,6 +640,30 @@ class ContainerPackagingStrategy(PackagingStrategy):
         logger.info("Resolved container image reference: %s", image_ref)
         return image_ref
 
+    def _convert_to_enroot_format(self, image_ref: str) -> str:
+        """Convert image reference to enroot format.
+
+        Enroot requires registry:port#path format instead of registry:port/path.
+
+        Args:
+            image_ref: Docker-style image reference (e.g., registry:5000/path/image:tag)
+
+        Returns:
+            Enroot-compatible image reference (e.g., registry:5000#path/image:tag)
+        """
+        match = re.match(r"^([^/]+:\d+)/(.*)", image_ref)
+        if match:
+            registry_with_port = match.group(1)
+            image_path = match.group(2)
+            converted = f"{registry_with_port}#{image_path}"
+            logger.info(
+                "Converted image reference to enroot format: %s → %s",
+                image_ref,
+                converted,
+            )
+            return converted
+        return image_ref
+
     def _build_container_image(
         self,
         runtime: str,
@@ -690,7 +718,15 @@ class ContainerPackagingStrategy(PackagingStrategy):
             )
 
     def _push_container_image(self, runtime: str, image_ref: str, console=None) -> None:
-        cmd = [runtime, "push", image_ref]
+        cmd = [runtime, "push"]
+
+        if not self.tls_verify:
+            cmd.extend(["--tls-verify=false"])
+
+        # Use Docker v2 format for enroot compatibility (doesn't support OCI)
+        cmd.extend(["--format", "v2s2"])
+
+        cmd.append(image_ref)
         logger.info("Pushing container image with command: %s", " ".join(cmd))
         with progress_task(console, "Container push", total=None) as (
             progress,

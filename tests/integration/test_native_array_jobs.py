@@ -16,6 +16,7 @@ from slurm.examples.integration_test_task import (
 )
 
 
+@pytest.mark.slow_integration_test
 def test_native_array_submission_with_simple_items(slurm_cluster):
     """Test native array submission with simple string items."""
 
@@ -121,6 +122,7 @@ def test_native_array_submission_with_simple_items(slurm_cluster):
         assert results == expected
 
 
+@pytest.mark.slow_integration_test
 def test_native_array_with_tuple_items(slurm_cluster):
     """Test native array submission with tuple items."""
 
@@ -140,6 +142,7 @@ def test_native_array_with_tuple_items(slurm_cluster):
         assert results == expected
 
 
+@pytest.mark.slow_integration_test
 def test_native_array_with_dict_items(slurm_cluster):
     """Test native array submission with dictionary items."""
 
@@ -163,6 +166,7 @@ def test_native_array_with_dict_items(slurm_cluster):
         assert results == expected
 
 
+@pytest.mark.slow_integration_test
 def test_native_array_with_dependencies(slurm_cluster):
     """Test native array submission with job dependencies."""
 
@@ -189,6 +193,7 @@ def test_native_array_with_dependencies(slurm_cluster):
         assert results == expected
 
 
+@pytest.mark.slow_integration_test
 def test_native_array_with_max_concurrent(slurm_cluster):
     """Test native array with max_concurrent throttling."""
 
@@ -212,6 +217,7 @@ def test_native_array_with_max_concurrent(slurm_cluster):
         assert results == expected
 
 
+@pytest.mark.slow_integration_test
 def test_native_array_with_job_items(slurm_cluster):
     """Test native array where items are Job objects from previous tasks.
 
@@ -250,6 +256,7 @@ def test_native_array_with_job_items(slurm_cluster):
             assert result == "PREPARED"
 
 
+@pytest.mark.slow_integration_test
 def test_native_array_pipeline_pattern(slurm_cluster):
     """Test pipeline pattern: stage1 → stage2 (using .after()).
 
@@ -282,6 +289,7 @@ def test_native_array_pipeline_pattern(slurm_cluster):
         assert stage2_results == ["OUTPUT_X", "OUTPUT_Y"]
 
 
+@pytest.mark.slow_integration_test
 def test_metadata_json_created(slurm_cluster):
     """Test that metadata.json is created when jobs save results.
 
@@ -327,6 +335,7 @@ def test_metadata_json_created(slurm_cluster):
             pytest.fail(f"Failed to verify metadata.json: {e}")
 
 
+@pytest.mark.slow_integration_test
 def test_array_job_as_dependency_integration(slurm_cluster):
     """Test using ArrayJob in .after() dependency (integration test).
 

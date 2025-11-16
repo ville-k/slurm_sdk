@@ -80,7 +80,13 @@ def test_prepare_builds_and_pushes(monkeypatch, tmp_path):
 
     push_invocation = captured_runs[1]
     assert push_invocation["description"] == "push"
-    assert push_invocation["cmd"] == ["docker", "push", expected_image]
+    assert push_invocation["cmd"] == [
+        "docker",
+        "push",
+        "--format",
+        "v2s2",
+        expected_image,
+    ]
 
     setup_commands = strategy.generate_setup_commands(
         task=_dummy_task, job_id="job123", job_dir='"$JOB_DIR"'
