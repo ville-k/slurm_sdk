@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Local container registry for testing
   # Accessible as "registry:5000" from other containers
@@ -17,15 +15,16 @@ services:
     volumes:
       - registry-data:/var/lib/registry
 
-  # Pyxis-enabled Slurm cluster for container packaging tests
-  # Accessible as "slurm-pyxis" from other containers
+  # Unified Slurm cluster for all integration tests
+  # Includes Pyxis/enroot for container packaging tests
+  # Accessible as "slurm" from other containers (also via "slurm-pyxis" for compatibility)
   # SSH accessible as "localhost:2222" from host
-  slurm-pyxis:
+  slurm:
     build:
       context: ../../containers/slurm-pyxis-integration
       dockerfile: Containerfile
-    image: slurm-pyxis-integration:latest
-    container_name: slurm-test-pyxis
+    image: slurm-integration:latest
+    container_name: slurm-test
     hostname: slurm-control
     privileged: true
     ports:
@@ -33,10 +32,11 @@ services:
     networks:
       slurm-test-network:
         aliases:
-          - slurm-pyxis
+          - slurm
+          - slurm-pyxis  # Backward compatibility
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
-      - pyxis-home:/home/slurm
+      - slurm-home:/home/slurm
     depends_on:
       - registry
     # Use systemd as init system
@@ -56,5 +56,5 @@ networks:
 volumes:
   registry-data:
     name: slurm-test-registry-data
-  pyxis-home:
-    name: slurm-test-pyxis-home
+  slurm-home:
+    name: slurm-test-home
