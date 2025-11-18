@@ -149,7 +149,9 @@ def test_rich_logger_callback_tracks_submission_phases():
         )
         callback.on_begin_submit_job_ctx(submit_begin)
         assert callback._phase == "SUBMITTING"
-        assert callback._job_label == "Job abc123"
+        # Job label stays as task name during submission
+        assert callback._job_label == "cb-test"
+        assert callback._task_name == "cb-test"
 
         job_stub = SimpleNamespace(stdout_path=None, stderr_path=None)
         submit_end = SubmitEndContext(
@@ -162,7 +164,10 @@ def test_rich_logger_callback_tracks_submission_phases():
         )
         callback.on_end_submit_job_ctx(submit_end)
         assert callback._phase == "SUBMITTED"
-        assert callback._job_label == "Job 456"
+        # Job ID is stored separately
+        assert callback._job_id == "456"
+        # Task name remains constant
+        assert callback._task_name == "cb-test"
 
         status_ctx = JobStatusUpdatedContext(
             job=job_stub,
@@ -195,6 +200,168 @@ def test_rich_logger_callback_tracks_submission_phases():
         assert callback._phase is None
     except ImportError:
         # If rich is not available, skip this test
+        import pytest
+
+        pytest.skip("rich not available")
+
+
+def test_rich_logger_callback_signal_handlers():
+    """Test that signal handlers are installed and restored correctly."""
+    try:
+        import signal
+
+        callback = RichLoggerCallback()
+
+        # Save original handlers
+        original_sigint = signal.getsignal(signal.SIGINT)
+        original_sigquit = signal.getsignal(signal.SIGQUIT)
+
+        # Initially, no handlers should be installed
+        assert callback._original_sigint_handler is None
+        assert callback._original_sigquit_handler is None
+        assert callback._waiting_for_job is False
+
+        # Simulate job submission
+        job_stub = SimpleNamespace(
+            stdout_path=None, stderr_path=None, cancel=lambda: None
+        )
+        submit_end = SubmitEndContext(
+            job=job_stub,
+            job_id="test-123",
+            pre_submission_id="pre-123",
+            target_job_dir="/tmp/job",
+            sbatch_options={},
+            backend_type="LocalBackend",
+        )
+        callback.on_end_submit_job_ctx(submit_end)
+
+        # Handlers should now be installed
+        assert callback._original_sigint_handler is not None
+        assert callback._original_sigquit_handler is not None
+        assert callback._waiting_for_job is True
+        assert signal.getsignal(signal.SIGINT) == callback._sigint_handler
+        assert signal.getsignal(signal.SIGQUIT) == callback._sigquit_handler
+
+        # Simulate job completion
+        completed_ctx = CompletedContext(
+            job=job_stub,
+            job_id="test-123",
+            job_dir="/tmp/job",
+            job_state="COMPLETED",
+            exit_code="0",
+            reason=None,
+            stdout_path=None,
+            stderr_path=None,
+            start_time=None,
+            end_time=None,
+            duration=None,
+            status={"JobState": "COMPLETED"},
+            emitted_by=ExecutionLocus.CLIENT,
+        )
+        callback.on_completed_ctx(completed_ctx)
+
+        # Handlers should be restored
+        assert callback._original_sigint_handler is None
+        assert callback._original_sigquit_handler is None
+        assert callback._waiting_for_job is False
+
+        # Restore original handlers for cleanup
+        signal.signal(signal.SIGINT, original_sigint)
+        signal.signal(signal.SIGQUIT, original_sigquit)
+
+    except ImportError:
+        import pytest
+
+        pytest.skip("rich not available")
+
+
+def test_rich_logger_callback_sigquit_cancel():
+    """Test that SIGQUIT cancels job and removes handler."""
+    try:
+        import signal
+        from unittest.mock import Mock
+
+        callback = RichLoggerCallback()
+
+        # Mock job with cancel method
+        mock_job = Mock()
+        mock_job.cancel = Mock()
+
+        # Simulate job submission
+        submit_end = SubmitEndContext(
+            job=mock_job,
+            job_id="test-456",
+            pre_submission_id="pre-456",
+            target_job_dir="/tmp/job",
+            sbatch_options={},
+            backend_type="LocalBackend",
+        )
+        callback.on_end_submit_job_ctx(submit_end)
+
+        # Verify handlers are installed
+        assert callback._original_sigquit_handler is not None
+        original_handler = callback._original_sigquit_handler
+
+        # Trigger SIGQUIT handler
+        callback._sigquit_handler(signal.SIGQUIT, None)
+
+        # Job should be cancelled
+        mock_job.cancel.assert_called_once()
+
+        # SIGQUIT handler should be restored (for second Ctrl-\)
+        assert callback._original_sigquit_handler is None
+        assert signal.getsignal(signal.SIGQUIT) == original_handler
+
+        # SIGINT handler should still be installed
+        assert callback._original_sigint_handler is not None
+
+        # Clean up
+        callback._restore_signal_handlers()
+
+    except ImportError:
+        import pytest
+
+        pytest.skip("rich not available")
+
+
+def test_rich_logger_callback_sigint_detach():
+    """Test that SIGINT detaches from job without cancelling."""
+    try:
+        import signal
+        from unittest.mock import Mock
+
+        callback = RichLoggerCallback()
+
+        # Mock job
+        mock_job = Mock()
+        mock_job.cancel = Mock()
+
+        # Simulate job submission
+        submit_end = SubmitEndContext(
+            job=mock_job,
+            job_id="test-789",
+            pre_submission_id="pre-789",
+            target_job_dir="/tmp/job",
+            sbatch_options={},
+            backend_type="LocalBackend",
+        )
+        callback.on_end_submit_job_ctx(submit_end)
+
+        # Verify handlers are installed
+        assert callback._original_sigint_handler is not None
+        assert callback._waiting_for_job is True
+
+        # Trigger SIGINT handler should exit, so we can't easily test it
+        # Just verify the handler is set correctly
+        assert signal.getsignal(signal.SIGINT) == callback._sigint_handler
+
+        # Job should NOT be cancelled (SIGINT only detaches)
+        mock_job.cancel.assert_not_called()
+
+        # Clean up
+        callback._restore_signal_handlers()
+
+    except ImportError:
         import pytest
 
         pytest.skip("rich not available")

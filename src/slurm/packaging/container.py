@@ -140,14 +140,25 @@ class ContainerPackagingStrategy(PackagingStrategy):
         runtime = self._detect_runtime()
         console = getattr(cluster, "console", None)
 
-        # Log packaging mode
-        if self.tag.startswith("build-"):
-            if self.use_digest:
-                logger.info(
-                    "Using auto-generated tag %s (will resolve to digest)", self.tag
-                )
-            else:
-                logger.info("Using auto-generated tag: %s", self.tag)
+        # Check for RichLoggerCallback to determine verbosity
+        self._packaging_callback = None
+        self._verbose_packaging = True  # Default to verbose
+        callbacks = getattr(cluster, "callbacks", [])
+        if callbacks:
+            from ..callbacks import RichLoggerCallback
+
+            for callback in callbacks:
+                if isinstance(callback, RichLoggerCallback):
+                    self._packaging_callback = callback
+                    self._verbose_packaging = getattr(callback, "_verbose", True)
+                    break
+
+        if self.use_digest:
+            logger.debug(
+                "Using auto-generated tag %s (will resolve to digest)", self.tag
+            )
+        else:
+            logger.debug("Using auto-generated tag: %s", self.tag)
 
         image_ref = self._resolve_image_reference(task)
 
@@ -175,7 +186,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
             if self.use_digest:
                 try:
                     pull_cmd = [runtime, "pull", image_ref]
-                    logger.info(
+                    logger.debug(
                         "Pulling pre-existing image to get digest: %s", image_ref
                     )
                     subprocess.run(
@@ -200,7 +211,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
             digest_ref = self._get_image_digest(runtime, image_ref)
             if digest_ref:
                 self._image_reference = digest_ref
-                logger.info("Using digest-based image reference: %s", digest_ref)
+                logger.debug("Using digest-based image reference: %s", digest_ref)
             else:
                 # Fallback to tag-based reference if digest cannot be determined
                 self._image_reference = image_ref
@@ -211,7 +222,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         else:
             # Use tag-based reference (default for compatibility)
             self._image_reference = image_ref
-            logger.info("Using tag-based image reference: %s", image_ref)
+            logger.debug("Using tag-based image reference: %s", image_ref)
 
         # Convert to enroot format for Pyxis compatibility
         self._image_reference = self._convert_to_enroot_format(self._image_reference)
@@ -637,7 +648,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
             registry_prefix = self.registry.rstrip("/")
             image_ref = f"{registry_prefix}/{image_ref.lstrip('/')}"
 
-        logger.info("Resolved container image reference: %s", image_ref)
+        logger.debug("Resolved container image reference: %s", image_ref)
         return image_ref
 
     def _convert_to_enroot_format(self, image_ref: str) -> str:
@@ -701,7 +712,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
 
         cmd.append(str(context_path))
 
-        logger.info("Building container image with command: %s", " ".join(cmd))
+        logger.debug("Building container image with command: %s", " ".join(cmd))
 
         run_env = os.environ.copy()
         if env_overrides:
@@ -727,7 +738,8 @@ class ContainerPackagingStrategy(PackagingStrategy):
         cmd.extend(["--format", "v2s2"])
 
         cmd.append(image_ref)
-        logger.info("Pushing container image with command: %s", " ".join(cmd))
+
+        logger.debug("Pushing container image with command: %s", " ".join(cmd))
         with progress_task(console, "Container push", total=None) as (
             progress,
             task_id,
@@ -843,7 +855,16 @@ class ContainerPackagingStrategy(PackagingStrategy):
                     if progress and hasattr(progress, "log"):
                         progress.log(line)
                     else:
-                        logger.info("[%s] %s", description, line)
+                        # Check if we should suppress verbose logging
+                        verbose_packaging = getattr(self, "_verbose_packaging", True)
+                        packaging_callback = getattr(self, "_packaging_callback", None)
+
+                        if not verbose_packaging and packaging_callback:
+                            # In non-verbose mode, send output to callback
+                            packaging_callback.update_packaging_output(line)
+                        else:
+                            # In verbose mode or no callback, use standard logging
+                            logger.info("[%s] %s", description, line)
 
             return_code = process.wait()
         finally:

@@ -10,6 +10,7 @@ from slurm.callbacks.callbacks import RichLoggerCallback
     gpus_per_node=4,
     ntasks_per_node=1,
     exclusive=None,
+    reservation="oos_av_mlops_alpamayo",
 )
 def hello_torch() -> str:
     import socket

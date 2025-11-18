@@ -1000,7 +1000,7 @@ class Cluster:
             f"[{pre_submission_id}] Submitting job via {self.backend_type} backend"
         )
         try:
-            logger.info(submission_message)
+            logger.debug(submission_message)
             job_submission_result = self.backend.submit_job(
                 script,
                 target_job_dir=target_job_dir,
