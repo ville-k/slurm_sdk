@@ -22,7 +22,7 @@ from slurm.job import Job
 
 @task(
     time="00:02:00",
-    mem="2G",
+    mem="256M",
     cpus_per_task=1,
 )
 def prepare_data(num_chunks: int) -> List[dict]:
@@ -50,7 +50,7 @@ def prepare_data(num_chunks: int) -> List[dict]:
 
 @task(
     time="00:03:00",
-    mem="1G",
+    mem="256M",
     cpus_per_task=1,
 )
 def map_process_chunk(chunk_id: int, data: List[int], description: str) -> dict:
@@ -89,8 +89,8 @@ def map_process_chunk(chunk_id: int, data: List[int], description: str) -> dict:
 
 @task(
     time="00:05:00",
-    mem="4G",
-    cpus_per_task=2,
+    mem="512M",
+    cpus_per_task=1,
 )
 def reduce_aggregate_results(results: List[dict]) -> dict:
     """Aggregate results from all processed chunks (REDUCE phase).
@@ -157,11 +157,9 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    # Create cluster from args with default packaging configuration
     cluster = Cluster.from_args(
         args,
         callbacks=[RichLoggerCallback()],
-        # Set default packaging options for all tasks
         default_packaging="container",
         default_packaging_dockerfile="src/slurm/examples/map_reduce.Dockerfile",
     )

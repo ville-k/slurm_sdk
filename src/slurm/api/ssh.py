@@ -208,10 +208,27 @@ class SSHCommandBackend(BackendBase):
         """
         for attempt in range(retry_count):
             try:
+                # Set socket timeout to prevent hanging on recv_exit_status()
+                # This is critical because paramiko's timeout parameter only applies to exec_command(),
+                # not to channel operations like recv_exit_status() which can hang indefinitely
+                try:
+                    transport = self.client.get_transport()
+                    if transport and hasattr(transport, "sock") and transport.sock:
+                        transport.sock.settimeout(timeout)
+                except Exception as e:
+                    logger.debug(f"Could not set socket timeout: {e}")
+
                 _, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
+                # Use settimeout on the channel to prevent recv_exit_status from hanging
+                try:
+                    stdout.channel.settimeout(timeout)
+                except Exception as e:
+                    logger.debug(f"Could not set channel timeout: {e}")
+
                 exit_status = stdout.channel.recv_exit_status()
                 stdout_str = stdout.read().decode("utf-8")
                 stderr_str = stderr.read().decode("utf-8")
+
                 return stdout_str, stderr_str, exit_status
             except socket.timeout:
                 if attempt < retry_count - 1:

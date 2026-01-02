@@ -1,16 +1,136 @@
 """Integration test fixtures for Slurm container tests."""
 
 import os
+import shlex
+import shutil
 import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
 import pytest
 
 
 SLURM_USER = "slurm"
+
+
+# ============================================================================
+# Execution Mode Detection
+# ============================================================================
+
+
+def _detect_execution_mode() -> str:
+    """Detect whether running on host, in devcontainer, or in CI.
+
+    The execution mode affects how we connect to the Slurm cluster:
+    - "host": Running on developer's machine, connect via localhost:2222
+    - "devcontainer": Running inside devcontainer, connect via slurm:22 (internal DNS)
+    - "ci": Running in CI pipeline, similar to devcontainer
+
+    Returns:
+        str: One of "host", "devcontainer", "ci"
+    """
+    # Explicit override via environment variable
+    if mode := os.environ.get("SLURM_SDK_DEV_MODE"):
+        return mode
+
+    # CI detection (GitHub Actions, GitLab CI, etc.)
+    if (
+        os.environ.get("CI")
+        or os.environ.get("GITHUB_ACTIONS")
+        or os.environ.get("GITLAB_CI")
+    ):
+        return "ci"
+
+    # VSCode devcontainer detection
+    if os.environ.get("REMOTE_CONTAINERS"):
+        return "devcontainer"
+
+    # Check if we're inside a Docker container
+    if os.path.exists("/.dockerenv"):
+        return "devcontainer"
+
+    # Check for container-specific environment
+    if os.environ.get("SLURM_HOST") == "slurm":
+        return "devcontainer"
+
+    return "host"
+
+
+EXECUTION_MODE = _detect_execution_mode()
+
+
+def _docker_cli_available() -> bool:
+    """Check if docker or podman CLI is available and can access the daemon.
+
+    Some tests use testinfra's DockerBackend to run commands inside containers,
+    which requires docker/podman CLI access. This isn't available inside the
+    devcontainer unless the socket is mounted with proper permissions.
+    """
+    for cli in ["docker", "podman"]:
+        try:
+            result = subprocess.run(
+                [cli, "info"],
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return False
+
+
+DOCKER_CLI_AVAILABLE = _docker_cli_available()
+
+
+@pytest.fixture(autouse=True)
+def skip_container_packaging_without_docker(request):
+    """Skip container_packaging tests if docker CLI is not available.
+
+    Container packaging tests build Docker images locally, which requires
+    docker CLI access to the host daemon. When running inside a devcontainer
+    without proper socket access, these tests cannot run.
+    """
+    marker = request.node.get_closest_marker("container_packaging")
+    if marker is not None and not DOCKER_CLI_AVAILABLE:
+        pytest.skip("Docker CLI not available (required for container packaging tests)")
+
+
+def _get_slurm_connection_info() -> Tuple[str, int]:
+    """Get Slurm connection info based on execution mode.
+
+    Returns:
+        Tuple[str, int]: (hostname, port) for SSH connection to Slurm
+    """
+    if EXECUTION_MODE in ("devcontainer", "ci"):
+        # Inside container network - use internal DNS
+        hostname = os.environ.get("SLURM_HOST", "slurm")
+        port = int(os.environ.get("SLURM_PORT", "22"))
+        return hostname, port
+    else:
+        # On host - use port mapping
+        return "127.0.0.1", 2222
+
+
+def _services_already_running() -> bool:
+    """Check if docker-compose services are already running.
+
+    This is useful when running inside a devcontainer where services
+    are started by the devcontainer configuration, or when re-running
+    integration tests on host with SLURM_TEST_KEEP=1.
+    """
+    # Check if slurm is reachable by attempting to connect
+    hostname, port = _get_slurm_connection_info()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((hostname, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
 
 
 @pytest.fixture(scope="session")
@@ -49,7 +169,14 @@ def slurm_testinfra(pyxis_container):
     """Testinfra connection to the Slurm container.
 
     Now uses the unified docker-compose Slurm container instead of podman run.
+
+    This fixture requires docker CLI access to the host daemon. When running
+    inside a devcontainer without socket access, tests using this fixture
+    will be skipped.
     """
+    if not DOCKER_CLI_AVAILABLE:
+        pytest.skip("Docker CLI not available (required for testinfra docker backend)")
+
     testinfra = pytest.importorskip("testinfra")
 
     # Use docker/podman backend to connect directly to the container
@@ -147,16 +274,197 @@ def _wait_for_port(host: str, port: int, timeout: int = 30) -> bool:
 COMPOSE_FILE = Path(__file__).parent / "docker-compose.yml"
 
 
+def _compose_cmd() -> list[str] | None:
+    override = os.environ.get("SLURM_TEST_COMPOSE_COMMAND")
+    if override:
+        parts = shlex.split(override)
+        if parts and shutil.which(parts[0]) is not None:
+            return parts
+        return None
+
+    if shutil.which("docker-compose") is not None:
+        return ["docker-compose"]
+    if shutil.which("docker") is not None:
+        return ["docker", "compose"]
+    if shutil.which("podman-compose") is not None:
+        return ["podman-compose"]
+    if shutil.which("podman") is not None:
+        return ["podman", "compose"]
+    return None
+
+
+def _engine_cmd_for(compose_cmd: list[str]) -> str | None:
+    if not compose_cmd:
+        return None
+    head = compose_cmd[0]
+    if head in {"docker", "docker-compose"}:
+        return "docker"
+    if head in {"podman", "podman-compose"}:
+        return "podman"
+    return None
+
+
+def _preflight_engine(engine_cmd: str) -> None:
+    """Validate that the container engine is reachable (daemon/VM running)."""
+    if shutil.which(engine_cmd) is None:
+        pytest.skip(f"Integration tests require `{engine_cmd}` to be installed.")
+
+    result = subprocess.run(
+        [engine_cmd, "info"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+
+    stderr = result.stderr.strip()
+    stdout = result.stdout.strip()
+    combined = "\n".join(part for part in [stdout, stderr] if part)
+
+    needles = [
+        "Cannot connect to the Docker daemon",
+        "Is the docker daemon running",
+        "Cannot connect to Podman",
+        "unable to connect",
+        "failed to connect",
+        "Error:",
+    ]
+    first_line = next(
+        (
+            line.strip()
+            for line in combined.splitlines()
+            if any(n in line for n in needles)
+        ),
+        next(
+            (line.strip() for line in combined.splitlines() if line.strip()), combined
+        ),
+    )
+
+    hint_lines: list[str] = []
+    display_engine = engine_cmd
+    if engine_cmd == "docker" and "Cannot connect to Podman" in combined:
+        display_engine = "docker (podman-docker shim)"
+    if (
+        "Cannot connect to the Docker daemon" in combined
+        or "Is the docker daemon running" in combined
+    ):
+        hint_lines.append(
+            "Hint: start Docker Desktop (or ensure the Docker daemon is running)."
+        )
+    if "Cannot connect to Podman" in combined or "podman machine" in combined:
+        hint_lines.append(
+            "Hint: run `podman machine init --now` (one-time) then `podman machine start`."
+        )
+
+    hint = ("\n" + "\n".join(hint_lines)) if hint_lines else ""
+    pytest.fail(
+        f"Container engine `{display_engine}` is not reachable: {first_line}{hint}\n\n{combined}"
+    )
+
+
+def _assert_port_available(host: str, port: int, description: str) -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+    except OSError:
+        pytest.fail(
+            f"Port {port} is already in use ({description}). "
+            "Stop the conflicting service or change the port mappings in tests/integration/docker-compose.yml."
+        )
+    finally:
+        sock.close()
+
+
+def _container_runtime_for(container_name: str) -> str | None:
+    preferred = os.environ.get("SLURM_TEST_CONTAINER_RUNTIME")
+    candidates: list[str] = [preferred] if preferred else []
+    candidates.extend(["docker", "podman"])
+
+    tried: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in tried:
+            continue
+        tried.add(candidate)
+        if shutil.which(candidate) is None:
+            continue
+        result = subprocess.run(
+            [candidate, "inspect", container_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return candidate
+    return None
+
+
 @pytest.fixture(scope="session")
 def docker_compose_project(request):
     """Start docker-compose services and provide connection info.
 
+    In devcontainer/CI mode, services may already be running (started by
+    docker-compose via devcontainer.json). In that case, we skip the startup
+    and just return connection info.
+
     Returns:
         dict: Connection info for registry and Pyxis services
     """
+    # Check if services are already running (devcontainer/CI mode)
+    services_prestarted = _services_already_running()
+    hostname, port = _get_slurm_connection_info()
+
+    if services_prestarted:
+        print(
+            f"\nServices already running (mode={EXECUTION_MODE}), using {hostname}:{port}"
+        )
+        # Detect container runtime for exec commands
+        container_runtime = _container_runtime_for("slurm-test")
+        if container_runtime is None:
+            # In devcontainer, we might not have direct container access
+            # Try common runtimes
+            for rt in ["docker", "podman"]:
+                if shutil.which(rt):
+                    container_runtime = rt
+                    break
+            if container_runtime is None:
+                container_runtime = "docker"  # Default fallback
+
+        return {
+            "registry_url": "registry:5000",
+            "registry_url_container": "registry:5000",
+            "container_runtime": container_runtime,
+            "compose_cmd": ["docker", "compose"],  # Assume docker compose
+            "pyxis_hostname": hostname,
+            "pyxis_port": port,
+            "pyxis_username": SLURM_USER,
+            "pyxis_password": SLURM_USER,
+            "pyxis_container_name": "slurm-test",
+            "_services_prestarted": True,
+        }
+
+    # Host mode: start services ourselves
+    compose_cmd = _compose_cmd()
+    if compose_cmd is None:
+        pytest.skip(
+            "Integration tests require Docker Compose; install `docker compose` or `docker-compose`, "
+            "or set SLURM_TEST_COMPOSE_COMMAND."
+        )
+
+    engine_cmd = _engine_cmd_for(compose_cmd)
+    if engine_cmd is not None:
+        _preflight_engine(engine_cmd)
+
+    _assert_port_available("0.0.0.0", REGISTRY_PORT, "test registry")
+    _assert_port_available("0.0.0.0", 2222, "Slurm SSH")
+
     print("\nStarting docker-compose services...")
+    up_cmd = [*compose_cmd, "-f", str(COMPOSE_FILE), "up", "-d"]
+    if os.environ.get("SLURM_TEST_COMPOSE_NO_BUILD") is None:
+        up_cmd.append("--build")
+
     result = subprocess.run(
-        ["docker-compose", "-f", str(COMPOSE_FILE), "up", "-d", "--build"],
+        up_cmd,
         cwd=COMPOSE_FILE.parent,
         capture_output=True,
         text=True,
@@ -164,13 +472,41 @@ def docker_compose_project(request):
     )
 
     if result.returncode != 0:
-        pytest.fail(f"Failed to start docker-compose services:\n{result.stderr}")
+        command_str = " ".join(shlex.quote(part) for part in up_cmd)
+        combined = "\n".join(
+            part for part in [result.stdout.strip(), result.stderr.strip()] if part
+        )
+        stderr_first = next(
+            (line for line in combined.splitlines() if line.strip()), "(no output)"
+        )
+        hint_lines: list[str] = []
+        if (
+            "Cannot connect to the Docker daemon" in combined
+            or "Is the docker daemon running" in combined
+        ):
+            hint_lines.append(
+                "Hint: start Docker Desktop (or ensure the Docker daemon is running)."
+            )
+        if "Cannot connect to Podman" in combined or "podman machine" in combined:
+            hint_lines.append(
+                "Hint: run `podman machine init --now` (one-time) then `podman machine start`."
+            )
+        hint = ("\n" + "\n".join(hint_lines)) if hint_lines else ""
+        details = "\n".join(
+            [
+                f"Failed to start docker-compose services: {stderr_first}{hint}",
+                f"Command: {command_str}",
+                f"stdout:\n{result.stdout}",
+                f"stderr:\n{result.stderr}",
+            ]
+        )
+        pytest.fail(details)
 
     max_retries = 60
     for i in range(max_retries):
         result = subprocess.run(
             [
-                "docker-compose",
+                *compose_cmd,
                 "-f",
                 str(COMPOSE_FILE),
                 "ps",
@@ -192,17 +528,36 @@ def docker_compose_project(request):
         time.sleep(1)
     else:
         subprocess.run(
-            ["docker-compose", "-f", str(COMPOSE_FILE), "down", "-v"],
+            [*compose_cmd, "-f", str(COMPOSE_FILE), "down", "-v"],
             cwd=COMPOSE_FILE.parent,
             check=False,
         )
         pytest.fail("Docker compose services did not start within timeout")
 
+    container_runtime = _container_runtime_for("slurm-test")
+    if container_runtime is None:
+        subprocess.run(
+            [*compose_cmd, "-f", str(COMPOSE_FILE), "down", "-v"],
+            cwd=COMPOSE_FILE.parent,
+            check=False,
+        )
+        pytest.fail(
+            "Could not detect container runtime (`docker` or `podman`) for container `slurm-test`. "
+            "Set SLURM_TEST_CONTAINER_RUNTIME to `docker` or `podman`."
+        )
+
     # Wait for systemd to initialize
     time.sleep(10)
     for i in range(30):
         result = subprocess.run(
-            ["podman", "exec", "slurm-test", "systemctl", "is-active", "sshd"],
+            [
+                container_runtime,
+                "exec",
+                "slurm-test",
+                "systemctl",
+                "is-active",
+                "sshd",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -213,33 +568,56 @@ def docker_compose_project(request):
         time.sleep(1)
     else:
         subprocess.run(
-            ["docker-compose", "-f", str(COMPOSE_FILE), "down", "-v"],
+            [*compose_cmd, "-f", str(COMPOSE_FILE), "down", "-v"],
             cwd=COMPOSE_FILE.parent,
             check=False,
         )
         pytest.fail("SSH service did not start in Pyxis container")
 
+    # Enable oversubscription so workflows can run child tasks on the same node
+    subprocess.run(
+        [
+            container_runtime,
+            "exec",
+            "slurm-test",
+            "scontrol",
+            "update",
+            "PartitionName=debug",
+            "OverSubscribe=YES",
+        ],
+        capture_output=True,
+        check=False,
+    )
+
     info = {
         "registry_url": "registry:5000",
         "registry_url_container": "registry:5000",
-        "pyxis_hostname": "127.0.0.1",
-        "pyxis_port": 2222,
+        "container_runtime": container_runtime,
+        "compose_cmd": compose_cmd,
+        "pyxis_hostname": hostname,
+        "pyxis_port": port,
         "pyxis_username": SLURM_USER,
         "pyxis_password": SLURM_USER,
         "pyxis_container_name": "slurm-test",
+        "_services_prestarted": False,
     }
 
     def cleanup():
-        if not os.environ.get("SLURM_TEST_KEEP"):
-            print("\nStopping docker-compose services...")
-            subprocess.run(
-                ["docker-compose", "-f", str(COMPOSE_FILE), "down", "-v"],
-                cwd=COMPOSE_FILE.parent,
-                check=False,
-                capture_output=True,
-            )
-        else:
+        # Don't clean up if services were pre-started (devcontainer/CI mode)
+        # or if SLURM_TEST_KEEP is set
+        if info.get("_services_prestarted"):
+            print("\nKeeping docker-compose services (pre-started by devcontainer)")
+            return
+        if os.environ.get("SLURM_TEST_KEEP"):
             print("\nKeeping docker-compose services (SLURM_TEST_KEEP set)")
+            return
+        print("\nStopping docker-compose services...")
+        subprocess.run(
+            [*compose_cmd, "-f", str(COMPOSE_FILE), "down", "-v"],
+            cwd=COMPOSE_FILE.parent,
+            check=False,
+            capture_output=True,
+        )
 
     request.addfinalizer(cleanup)
 
@@ -289,7 +667,7 @@ def pyxis_container(docker_compose_project):
         dict: Container information including hostname, port, credentials
     """
     return {
-        "runtime": "podman",  # Docker-compose uses podman for container operations
+        "runtime": docker_compose_project["container_runtime"],
         "hostname": docker_compose_project["pyxis_hostname"],
         "port": docker_compose_project["pyxis_port"],
         "username": docker_compose_project["pyxis_username"],
@@ -304,30 +682,67 @@ def pyxis_container(docker_compose_project):
 def sdk_on_pyxis_cluster(docker_compose_project) -> Path:
     """Install the SDK on the Pyxis cluster container.
 
+    This fixture requires docker CLI access to run docker exec commands.
+    When running inside a devcontainer without socket access, tests using
+    this fixture will be skipped.
+
     Returns:
         Path: Path to SDK installation on the container
     """
+    if not DOCKER_CLI_AVAILABLE:
+        pytest.skip(
+            "Docker CLI not available (required for sdk_on_pyxis_cluster fixture)"
+        )
+
     container_name = docker_compose_project["pyxis_container_name"]
+    container_runtime = docker_compose_project["container_runtime"]
     sdk_root = Path(__file__).resolve().parents[2]
 
     subprocess.run(
-        ["podman", "exec", container_name, "mkdir", "-p", "/tmp/slurm_sdk"],
+        [container_runtime, "exec", container_name, "mkdir", "-p", "/tmp/slurm_sdk"],
         check=True,
         capture_output=True,
     )
 
-    tar_cmd = f"tar -cf - -C {sdk_root} src pyproject.toml README.md | podman exec -i {container_name} tar -xf - -C /tmp/slurm_sdk"
-    result = subprocess.run(
-        tar_cmd, shell=True, capture_output=True, text=True, check=False
+    tar_proc = subprocess.Popen(
+        ["tar", "-cf", "-", "-C", str(sdk_root), "src", "pyproject.toml", "README.md"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
     )
+    assert tar_proc.stdout is not None
+    assert tar_proc.stderr is not None
+    exec_result = subprocess.run(
+        [
+            container_runtime,
+            "exec",
+            "-i",
+            container_name,
+            "tar",
+            "-xf",
+            "-",
+            "-C",
+            "/tmp/slurm_sdk",
+        ],
+        stdin=tar_proc.stdout,
+        capture_output=True,
+        check=False,
+    )
+    tar_proc.stdout.close()
+    tar_stderr = tar_proc.stderr.read()
+    tar_returncode = tar_proc.wait(timeout=60)
 
-    if result.returncode != 0:
-        pytest.fail(f"Failed to copy SDK files to Pyxis cluster: {result.stderr}")
+    if tar_returncode != 0:
+        tar_error = tar_stderr.decode("utf-8", "replace")
+        pytest.fail(f"Failed to create SDK tarball: {tar_error}")
+    if exec_result.returncode != 0:
+        exec_error = exec_result.stderr.decode("utf-8", "replace")
+        pytest.fail(f"Failed to copy SDK files to Pyxis cluster: {exec_error}")
 
     # --break-system-packages required for Debian 12+
     result = subprocess.run(
         [
-            "podman",
+            container_runtime,
             "exec",
             container_name,
             "python3",

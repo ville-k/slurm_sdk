@@ -1,21 +1,17 @@
 """Unit tests for workflow context injection and runner integration."""
 
 import sys
-import pytest
 from pathlib import Path
-from typing import Optional
 
 from slurm.decorators import workflow
 from slurm.workflow import WorkflowContext
 from slurm.cluster import Cluster
 from slurm.runtime import JobContext
-from slurm.context import set_active_context, reset_active_context, clear_active_context
 
 # Allow importing test helpers
 HELPERS_DIR = Path(__file__).parent / "helpers"
 if str(HELPERS_DIR) not in sys.path:
     sys.path.insert(0, str(HELPERS_DIR))
-from local_backend import LocalBackend  # type: ignore
 
 
 def test_workflow_context_creation(tmp_path):

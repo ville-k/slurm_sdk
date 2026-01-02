@@ -73,18 +73,18 @@ def test_workflow_with_callbacks(slurm_cluster):
             slurmfile_content = slurm_cluster.backend.execute_command(
                 f"cat {job_dir}/Slurmfile.toml"
             )
-            print(f"\n--- Slurmfile.toml Content ---")
+            print("\n--- Slurmfile.toml Content ---")
             print(slurmfile_content)
 
             # Check the job script for environment variables
-            print(f"\n--- Checking for SLURM_SDK env vars in stderr ---")
+            print("\n--- Checking for SLURM_SDK env vars in stderr ---")
             stderr_grep = slurm_cluster.backend.execute_command(
                 f"grep -E 'SLURM_SDK_SLURMFILE|SLURM_SDK_ENV|export.*SLURM_SDK' {job.stderr_path} || echo 'Not found in stderr'"
             )
             print(stderr_grep)
 
             # Check child task outputs
-            print(f"\n--- Checking Child Task Outputs ---")
+            print("\n--- Checking Child Task Outputs ---")
             tasks_dir = f"{job_dir}/tasks"
             find_tasks = slurm_cluster.backend.execute_command(
                 f"find {tasks_dir} -name '*.err' -o -name '*.out' 2>/dev/null || echo 'No task outputs found'"
@@ -96,7 +96,7 @@ def test_workflow_with_callbacks(slurm_cluster):
                 f"find {tasks_dir} -name '*.err' | head -1 | xargs cat 2>/dev/null || echo 'No stderr files found'"
             )
             if first_stderr and "No stderr files found" not in first_stderr:
-                print(f"\n--- First Child Task STDERR ---")
+                print("\n--- First Child Task STDERR ---")
                 print(first_stderr)
 
         except Exception as e:
@@ -234,6 +234,6 @@ def test_benchmark_callback_metrics_accuracy(slurm_cluster):
         )
         assert metrics["submission_throughput"] > 0
 
-    print(f"\nWorkflow performance metrics:")
+    print("\nWorkflow performance metrics:")
     for key, value in metrics.items():
         print(f"  {key}: {value}")

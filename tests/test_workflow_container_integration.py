@@ -4,7 +4,6 @@ These tests verify that workflows correctly handle container packaging for neste
 including image reuse and proper cluster configuration.
 """
 
-import pytest
 from pathlib import Path
 from slurm.workflow import WorkflowContext
 from slurm.cluster import Cluster
@@ -176,7 +175,6 @@ image = "test:latest"
 
 def test_environment_variables_for_cluster_recreation():
     """Test environment variable naming for cluster recreation."""
-    import os
 
     # These environment variables should be set by rendering.py
     expected_vars = [

@@ -97,9 +97,15 @@ class ContainerPackagingStrategy(PackagingStrategy):
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(config)
+        # Track whether context was explicitly provided; default to "." for display
+        # without forcing builds when unset.
+        self._context_provided: bool = "context" in self.config
         self.runtime: Optional[str] = self.config.get("runtime")
         self.dockerfile: Optional[str] = self.config.get("dockerfile")
-        self.context: str = self.config.get("context", ".")
+        if self._context_provided:
+            self.context: Optional[str] = self.config.get("context")
+        else:
+            self.context = "."
         self.image: Optional[str] = self.config.get("image")
         self.image_name: Optional[str] = self.config.get("name")
         # Generate unique UUID-based tag if not provided for reproducibility
@@ -137,7 +143,6 @@ class ContainerPackagingStrategy(PackagingStrategy):
     def prepare(
         self, task: Union["SlurmTask", Callable], cluster: "Cluster"
     ) -> Dict[str, Any]:
-        runtime = self._detect_runtime()
         console = getattr(cluster, "console", None)
 
         # Check for RichLoggerCallback to determine verbosity
@@ -166,6 +171,32 @@ class ContainerPackagingStrategy(PackagingStrategy):
         push_performed = False
 
         dockerfile_path, context_path = self._resolve_build_paths()
+
+        # Fast path: if we have a pre-built image and don't need to build/push,
+        # skip runtime detection entirely (for nested tasks inside containers)
+        needs_runtime = bool(
+            dockerfile_path or context_path or self.push or self.use_digest
+        )
+        if not needs_runtime and self.image:
+            # Pre-built image, no runtime needed
+            self._image_reference = self._convert_to_enroot_format(image_ref)
+            logger.debug(
+                "Using pre-built image reference (no runtime needed): %s",
+                self._image_reference,
+            )
+            self._runtime_cmd = None
+            prepare_result = {
+                "status": "success",
+                "image": image_ref,
+                "image_digest": self._image_reference,
+                "built": False,
+                "pushed": False,
+            }
+            self.last_prepare_result = prepare_result
+            return prepare_result
+
+        # Need runtime for build/push/pull operations
+        runtime = self._detect_runtime()
 
         if dockerfile_path or context_path:
             self._build_container_image(
@@ -313,7 +344,11 @@ class ContainerPackagingStrategy(PackagingStrategy):
             for spec in self._mount_specs
         ]
         if self.mount_job_dir and job_dir_expr:
-            mounts.append(f"{job_dir_expr}:{job_dir_expr}:rw")
+            # Mount the job base directory (parent of parent of job_dir) to allow
+            # the runner to find result files from dependent jobs when resolving
+            # JobResultPlaceholders. The job_dir structure is: {base}/{task}/{id}/
+            job_base_dir_expr = f"$(dirname $(dirname {job_dir_expr}))"
+            mounts.append(f"{job_base_dir_expr}:{job_base_dir_expr}:rw")
 
         srun_parts: List[str] = ["srun"]
         srun_parts.extend(self.srun_args)
@@ -547,6 +582,25 @@ class ContainerPackagingStrategy(PackagingStrategy):
             return self.runtime
         for candidate in ("docker", "podman"):
             if shutil.which(candidate):
+                # Check if this is podman masquerading as docker
+                # (common on macOS with Podman Desktop which provides a docker shim)
+                try:
+                    result = subprocess.run(
+                        [candidate, "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0 and "podman" in result.stdout.lower():
+                        # Use podman directly if available, since we now know it's podman
+                        if shutil.which("podman"):
+                            logger.debug(
+                                "Detected container runtime: podman (via %s shim)",
+                                candidate,
+                            )
+                            return "podman"
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
                 logger.debug("Detected container runtime: %s", candidate)
                 return candidate
         raise PackagingError(
@@ -593,15 +647,17 @@ class ContainerPackagingStrategy(PackagingStrategy):
                     f"  4. Check working directory: {pathlib.Path.cwd()}"
                 )
 
-        if self.context:
-            context_path = pathlib.Path(self.context).expanduser()
+        context_value = self.context if self._context_provided else None
+
+        if context_value:
+            context_path = pathlib.Path(context_value).expanduser()
             if not context_path.is_absolute():
                 context_path = (project_root / context_path).resolve()
             if not context_path.exists():
                 raise PackagingError(
                     f"Build context directory not found.\n\n"
                     f"Expected location: {context_path}\n"
-                    f"Specified path: {self.context}\n"
+                    f"Specified path: {context_value}\n"
                     f"Project root: {project_root}\n\n"
                     "The build context is the directory containing files needed for the Docker build.\n\n"
                     "To fix:\n"
@@ -623,7 +679,10 @@ class ContainerPackagingStrategy(PackagingStrategy):
                 )
 
         if dockerfile_path and not context_path:
-            context_path = dockerfile_path.parent
+            # Default to project root when no explicit context is provided.
+            # This ensures build-time assets like pyproject.toml are available
+            # even if the Dockerfile lives outside the repository root.
+            context_path = project_root
 
         return dockerfile_path, context_path
 
@@ -731,11 +790,12 @@ class ContainerPackagingStrategy(PackagingStrategy):
     def _push_container_image(self, runtime: str, image_ref: str, console=None) -> None:
         cmd = [runtime, "push"]
 
-        if not self.tls_verify:
-            cmd.extend(["--tls-verify=false"])
-
-        # Use Docker v2 format for enroot compatibility (doesn't support OCI)
-        cmd.extend(["--format", "v2s2"])
+        # Podman-specific flags (not supported by Docker)
+        if runtime == "podman":
+            if not self.tls_verify:
+                cmd.extend(["--tls-verify=false"])
+            # Use Docker v2 format for enroot compatibility (doesn't support OCI)
+            cmd.extend(["--format", "v2s2"])
 
         cmd.append(image_ref)
 

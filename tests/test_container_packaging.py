@@ -1,4 +1,3 @@
-import pathlib
 
 import pytest
 
@@ -15,6 +14,22 @@ def test_prepare_requires_image_or_dockerfile(tmp_path):
 
     with pytest.raises(PackagingError):
         strategy.prepare(task=_dummy_task, cluster=object())
+
+
+def test_dockerfile_without_context_defaults_to_project_root(tmp_path, monkeypatch):
+    dockerfile_dir = tmp_path / "docker"
+    dockerfile_dir.mkdir()
+    dockerfile = dockerfile_dir / "Dockerfile"
+    dockerfile.write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    strategy = ContainerPackagingStrategy({"dockerfile": str(dockerfile)})
+    monkeypatch.setattr(strategy, "_resolve_project_root", lambda: tmp_path)
+
+    dockerfile_path, context_path = strategy._resolve_build_paths()
+
+    assert dockerfile_path == dockerfile.resolve()
+    assert context_path == tmp_path
+    assert strategy.context == "."
 
 
 def test_prepare_builds_and_pushes(monkeypatch, tmp_path):
@@ -80,11 +95,10 @@ def test_prepare_builds_and_pushes(monkeypatch, tmp_path):
 
     push_invocation = captured_runs[1]
     assert push_invocation["description"] == "push"
+    # Docker doesn't support --format or --tls-verify flags (those are podman-specific)
     assert push_invocation["cmd"] == [
         "docker",
         "push",
-        "--format",
-        "v2s2",
         expected_image,
     ]
 
@@ -106,7 +120,10 @@ def test_prepare_builds_and_pushes(monkeypatch, tmp_path):
     assert wrapped.startswith(
         "srun --mpi=none --container-image=registry.example.com/team/demo:v1"
     )
-    assert '--container-mounts="$JOB_DIR:$JOB_DIR:rw"' in wrapped
+    assert (
+        '--container-mounts="$(dirname $(dirname $JOB_DIR)):$(dirname $(dirname $JOB_DIR)):rw"'
+        in wrapped
+    )
     assert '--container-workdir="$JOB_DIR"' in wrapped
     # The command is passed through directly - shell expansion happens before srun
     assert '"${PY_EXEC[@]:-python}" -m slurm.runner' in wrapped

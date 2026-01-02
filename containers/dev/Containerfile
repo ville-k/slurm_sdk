@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1.4
+#
+# Development container for Slurm SDK
+# Includes uv, Python tooling, and SSH client for cluster access
+#
+
+FROM python:3.11-slim-bookworm
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    openssh-client \
+    curl \
+    ca-certificates \
+    build-essential \
+    # For paramiko/SSH
+    libffi-dev \
+    # For potential native extensions
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install podman-remote for container packaging tests
+# We only need the client, which talks to host's podman daemon via socket
+# Using podman-remote v5.x to match host podman version
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/containers/podman/releases/download/v5.3.1/podman-remote-static-linux_${ARCH}.tar.gz" \
+    | tar -xzf - -C /usr/local/bin --strip-components=1 && \
+    ln -sf /usr/local/bin/podman-remote-static-linux_${ARCH} /usr/local/bin/podman
+
+# Configure podman to use the mounted socket from host
+# This allows podman CLI to talk to the host's podman daemon
+ENV CONTAINER_HOST=unix:///var/run/docker.sock
+
+# Install uv (fast Python package manager)
+# Using the official install script
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Add uv to PATH
+ENV PATH="/root/.local/bin:$PATH"
+
+# Verify uv is installed
+RUN uv --version
+
+# Configure SSH for Slurm cluster access
+# Disable strict host key checking for test containers
+RUN mkdir -p /root/.ssh && \
+    chmod 700 /root/.ssh && \
+    printf '%s\n' \
+        'Host slurm slurm-control slurm-pyxis' \
+        '    StrictHostKeyChecking no' \
+        '    UserKnownHostsFile /dev/null' \
+        '    LogLevel ERROR' \
+        '' \
+        'Host 127.0.0.1 localhost' \
+        '    StrictHostKeyChecking no' \
+        '    UserKnownHostsFile /dev/null' \
+        '    LogLevel ERROR' \
+    > /root/.ssh/config && \
+    chmod 600 /root/.ssh/config
+
+# Set working directory
+WORKDIR /workspace
+
+# Default command for interactive development
+CMD ["bash"]

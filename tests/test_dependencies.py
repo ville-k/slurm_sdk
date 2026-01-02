@@ -1,7 +1,6 @@
 """Unit tests for automatic dependency tracking via Job passing."""
 
 import sys
-import pytest
 from pathlib import Path
 
 from slurm.cluster import Cluster
@@ -236,7 +235,6 @@ def test_job_result_placeholder_serialization(tmp_path):
     """Test that Jobs are converted to result placeholders for serialization."""
     clear_active_context()
 
-    from slurm.task import JobResultPlaceholder
 
     cluster = create_mock_cluster(tmp_path)
     token = set_active_context(cluster)

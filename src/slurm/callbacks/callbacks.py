@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 from ..runtime import JobContext
+from ..logging import configure_logging as configure_sdk_logging
 
 try:  # pragma: no cover - rich is a hard dependency of the SDK
     from rich.console import Console
@@ -361,7 +362,7 @@ class BaseCallback:
 
 
 class LoggerCallback(BaseCallback):
-    """Log lifecycle transitions using standard Python logging (no rich dependencies)."""
+    """Log lifecycle transitions using standard logging, configuring runner logging by default."""
 
     poll_interval_secs: Optional[float] = 2.0
 
@@ -370,14 +371,20 @@ class LoggerCallback(BaseCallback):
         *,
         logger: Optional[logging.Logger] = None,
         poll_interval: Optional[float] = None,
+        log_level: int = logging.INFO,
+        configure_logging: bool = True,
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
         if poll_interval is not None:
             self.poll_interval_secs = poll_interval
 
+        self.log_level = log_level
+        self.configure_logging = configure_logging
+        self._logging_configured = False
         self._last_state: Optional[str] = None
         # Track workflow nesting depth for indented logging
         self._workflow_depth: Dict[str, int] = {}
+        self._persisted_metrics: Dict[str, Dict[str, Any]] = {}
 
     def __getstate__(self) -> Dict[str, Any]:
         state = self.__dict__.copy()
@@ -501,68 +508,6 @@ class LoggerCallback(BaseCallback):
 
         self._persisted_metrics[workflow_id] = metrics
 
-    def _persist_metrics_to_disk(
-        self, workflow_dir: Path, metrics: Dict[str, Any]
-    ) -> None:
-        try:
-            workflow_dir.mkdir(parents=True, exist_ok=True)
-            metrics_path = workflow_dir / WORKFLOW_METRICS_FILENAME
-            with metrics_path.open("w", encoding="utf-8") as fh:
-                json.dump(metrics, fh, indent=2)
-        except Exception as exc:  # pragma: no cover - best effort logging only
-            self.logger.debug(
-                "Failed to write workflow metrics to %s: %s",
-                workflow_dir,
-                exc,
-            )
-
-    def _load_metrics_from_disk(
-        self,
-        workflow_id: str,
-        job_dir: Optional[str],
-        cluster: Optional["Cluster"],
-    ) -> None:
-        if not job_dir or cluster is None:
-            return
-
-        metrics_path = os.path.join(job_dir, WORKFLOW_METRICS_FILENAME)
-        try:
-            content = cluster.backend.read_file(metrics_path)
-        except FileNotFoundError:
-            self.logger.debug(
-                "Workflow metrics file not found at %s for %s",
-                metrics_path,
-                workflow_id,
-            )
-            return
-        except Exception as exc:
-            self.logger.warning(
-                "Failed to read workflow metrics file %s: %s",
-                metrics_path,
-                exc,
-            )
-            return
-
-        try:
-            metrics = json.loads(content)
-        except json.JSONDecodeError as exc:
-            self.logger.warning(
-                "Invalid workflow metrics JSON at %s: %s",
-                metrics_path,
-                exc,
-            )
-            return
-
-        if not isinstance(metrics, dict):
-            self.logger.debug(
-                "Ignoring workflow metrics at %s: expected dict, got %s",
-                metrics_path,
-                type(metrics).__name__,
-            )
-            return
-
-        self._persisted_metrics[workflow_id] = metrics
-
     def on_begin_package_ctx(self, ctx: PackagingBeginContext) -> None:
         task_name = getattr(ctx.task, "sbatch_options", {}).get(
             "job_name", getattr(getattr(ctx.task, "func", ctx.task), "__name__", "task")
@@ -604,6 +549,7 @@ class LoggerCallback(BaseCallback):
         self.logger.info("[%s] status=%s", ctx.job_id, state)
 
     def on_begin_run_job_ctx(self, ctx: RunBeginContext) -> None:
+        self._configure_runner_logging()
         self.logger.info(
             "Starting remote execution: %s.%s on host=%s",
             ctx.module,
@@ -685,6 +631,15 @@ class LoggerCallback(BaseCallback):
         else:
             self.logger.info("%s[Workflow] '%s' completed", indent, ctx.workflow_name)
 
+    def _configure_runner_logging(self) -> None:
+        if not self.configure_logging or self._logging_configured:
+            return
+        try:
+            configure_sdk_logging(level=self.log_level, use_rich=False)
+            self._logging_configured = True
+        except Exception as exc:  # pragma: no cover - best effort
+            self.logger.warning("Failed to configure logging on runner: %s", exc)
+
 
 class RichLoggerCallback(BaseCallback):
     """Log lifecycle transitions with rich progress bars and formatted output.
@@ -698,6 +653,8 @@ class RichLoggerCallback(BaseCallback):
     Args:
         console: Optional rich Console instance. If not provided, creates a new one.
         poll_interval: Polling interval in seconds for job status updates (default: 2.0)
+        log_level: Logging level applied on the runner when configure_logging is True.
+        configure_logging: If True (default), configure runner logging before execution.
         verbose: If True, show detailed line-by-line logging output during packaging.
                  If False (default), show only the most recent packaging output line
                  in the progress bar for a cleaner display.
@@ -728,6 +685,8 @@ class RichLoggerCallback(BaseCallback):
         console: Optional["Console"] = None,
         poll_interval: Optional[float] = None,
         verbose: bool = False,
+        log_level: int = logging.INFO,
+        configure_logging: bool = True,
     ) -> None:
         if Console is None:
             raise ImportError(
@@ -740,6 +699,9 @@ class RichLoggerCallback(BaseCallback):
         if poll_interval is not None:
             self.poll_interval_secs = poll_interval
         self._verbose = verbose
+        self.log_level = log_level
+        self.configure_logging = configure_logging
+        self._logging_configured = False
 
         # Suppress verbose paramiko logging
         logging.getLogger("paramiko").setLevel(logging.WARNING)
@@ -1021,6 +983,7 @@ class RichLoggerCallback(BaseCallback):
         self._set_phase(state, phase_info="")
 
     def on_begin_run_job_ctx(self, ctx: RunBeginContext) -> None:
+        self._configure_runner_logging(use_rich=True)
         self._log(
             f"[cyan]Starting remote execution:[/cyan] {ctx.module}.{ctx.function} "
             f"on [bold]{ctx.hostname or 'unknown'}[/bold]"
@@ -1129,6 +1092,16 @@ class RichLoggerCallback(BaseCallback):
             self._log(
                 f"{indent}✅ [bold green]Workflow[/bold green] '{ctx.workflow_name}' completed"
             )
+
+    def _configure_runner_logging(self, *, use_rich: bool) -> None:
+        if not self.configure_logging or self._logging_configured:
+            return
+        try:
+            configure_sdk_logging(level=self.log_level, use_rich=use_rich)
+            self._logging_configured = True
+        except Exception:  # pragma: no cover - best effort
+            # console may not be initialized yet; use logger for fallback
+            self.logger.warning("Failed to configure logging on runner", exc_info=True)
 
 
 class BenchmarkCallback(BaseCallback):

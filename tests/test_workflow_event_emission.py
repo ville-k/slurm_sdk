@@ -1,7 +1,6 @@
 """Integration tests for workflow callback event emission (Phase 2)."""
 
 import sys
-import tempfile
 from pathlib import Path
 from typing import List
 
@@ -11,7 +10,6 @@ from slurm.callbacks.callbacks import (
     WorkflowTaskSubmitContext,
 )
 from slurm.decorators import task, workflow
-from slurm.cluster import Cluster
 from slurm.workflow import WorkflowContext
 
 # Allow importing test helpers

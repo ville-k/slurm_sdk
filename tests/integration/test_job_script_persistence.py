@@ -1,5 +1,6 @@
 """Integration tests for job script persistence."""
 
+import os
 import pytest
 from pathlib import Path
 
@@ -14,7 +15,8 @@ def test_job_script_persisted_in_job_directory(slurm_cluster):
     job = slurm_cluster.submit(hello_world)()
 
     # Wait for completion
-    success = job.wait(timeout=180, poll_interval=5)
+    timeout = int(os.environ.get("SLURM_TEST_JOB_TIMEOUT", "300"))
+    success = job.wait(timeout=timeout, poll_interval=5)
     assert success, f"Job failed: {job.get_status()}"
 
     # Verify script exists in job directory
@@ -59,7 +61,8 @@ def test_job_get_script_retrieves_persisted_script(slurm_cluster):
     job = slurm_cluster.submit(hello_world)()
 
     # Wait for completion
-    success = job.wait(timeout=180, poll_interval=5)
+    timeout = int(os.environ.get("SLURM_TEST_JOB_TIMEOUT", "300"))
+    success = job.wait(timeout=timeout, poll_interval=5)
     assert success, f"Job failed: {job.get_status()}"
 
     # Retrieve script via get_script()

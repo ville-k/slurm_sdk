@@ -10,7 +10,6 @@ such as workflow orchestrators running within a Slurm job.
 import os
 import re
 import subprocess
-import tempfile
 import shlex
 import logging
 from typing import Any, Dict, List, Optional
@@ -228,7 +227,7 @@ class LocalBackend(BackendBase):
             logger.debug("Script persisted at: %s", persistent_script_path)
             return job_id
 
-        except Exception as e:
+        except Exception:
             # On error, try to clean up the script file
             try:
                 if os.path.exists(persistent_script_path):

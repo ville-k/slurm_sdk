@@ -1,5 +1,4 @@
 import sys
-import types
 from pathlib import Path
 
 from slurm.callbacks import BaseCallback

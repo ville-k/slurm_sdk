@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -73,7 +73,6 @@ def test_prepare_upload_failure_raises_packaging_error(tmp_path, monkeypatch):
         def upload_file(self, local_path: str, remote_path: str):
             raise RuntimeError("upload failed")
 
-    from slurm import packaging as packaging_pkg
     from slurm.packaging import wheel as wheel_mod
 
     # Use dummy backend instance and ensure isinstance check passes by monkeypatching type

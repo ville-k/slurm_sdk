@@ -22,7 +22,7 @@ from slurm.job import Job
 
 @task(
     time="00:05:00",
-    mem="10G",
+    mem="512M",
     cpus_per_task=1,
 )
 def hello_container_task(greeted: str) -> str:
@@ -48,11 +48,9 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    # Create cluster from args with default container packaging
     cluster = Cluster.from_args(
         args,
         callbacks=[RichLoggerCallback()],
-        # Set default container packaging configuration
         default_packaging="container",
         default_packaging_dockerfile="src/slurm/examples/hello_container.Dockerfile",
     )

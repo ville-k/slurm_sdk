@@ -155,7 +155,10 @@ class SlurmTaskWithDependencies:
             cluster = getattr(ctx, "cluster", None)
             if cluster is None:
                 raise RuntimeError(
-                    f"Context {type(ctx).__name__} does not have a cluster attribute"
+                    "Workflow context does not have an initialized cluster.\n"
+                    "This typically means the cluster failed to initialize when the workflow started.\n"
+                    "Check the workflow job logs for cluster initialization errors.\n"
+                    "Common causes: Slurmfile not found, SSH connection timeout, or invalid backend configuration."
                 )
 
         # Extract Job dependencies from arguments (automatic dependency tracking)
@@ -380,6 +383,9 @@ class SlurmTask:
         # Track explicit dependencies set via .after() (before task is called)
         self._pending_dependencies: list = []
 
+        # Track container dependencies for workflows (tasks that need their containers pre-built)
+        self._container_dependencies: list = []
+
     def __call__(self, *args, **kwargs):
         """
         Call the task - returns Job if in cluster context, raises otherwise.
@@ -422,7 +428,10 @@ class SlurmTask:
             cluster = getattr(ctx, "cluster", None)
             if cluster is None:
                 raise RuntimeError(
-                    f"Context {type(ctx).__name__} does not have a cluster attribute"
+                    "Workflow context does not have an initialized cluster.\n"
+                    "This typically means the cluster failed to initialize when the workflow started.\n"
+                    "Check the workflow job logs for cluster initialization errors.\n"
+                    "Common causes: Slurmfile not found, SSH connection timeout, or invalid backend configuration."
                 )
 
         # Extract Job dependencies from arguments (for automatic dependency tracking)
@@ -639,20 +648,20 @@ class SlurmTask:
         # Return a wrapper that supports both __call__ and .map()
         return SlurmTaskWithDependencies(task=self, dependencies=flattened_deps)
 
-    def with_options(self, **sbatch_options):
-        """Create a variant of this task with different SBATCH options.
+    def with_options(self, **options):
+        """Create a variant of this task with different SBATCH or packaging options.
 
-        Returns a new SlurmTask instance with updated SBATCH options while preserving
-        the function, packaging, and any pending dependencies from .after().
+        Returns a new SlurmTask instance with updated options while preserving
+        the function and any pending dependencies from .after().
         This is useful for dynamic resource allocation based on runtime conditions.
 
         Args:
-            **sbatch_options: SBATCH parameter overrides (e.g., partition="gpu",
-                gpus=1, mem="32GB"). These override the task decorator's defaults
-                and Slurmfile settings.
+            **options: SBATCH parameter overrides (e.g., partition="gpu",
+                gpus=1, mem="32GB") and packaging options (e.g., packaging_registry,
+                packaging_dockerfile). These override the task decorator's defaults.
 
         Returns:
-            New SlurmTask instance with merged SBATCH options.
+            New SlurmTask instance with merged options.
 
         Examples:
             Override partition for specific data:
@@ -668,25 +677,100 @@ class SlurmTask:
                 ...     cpu_job = process("small.csv")
                 ...     return [gpu_job.get_result(), cpu_job.get_result()]
 
+            Override packaging options:
+
+                >>> containerized = task.with_options(
+                ...     packaging_registry="registry.example.com/",
+                ...     packaging_container_tag="v2",
+                ... )
+
             Compose with .after():
 
                 >>> gpu_job = train.after(prep).with_options(gpus=2)("model.pt")
                 >>> # Or in reverse order
                 >>> gpu_job = train.with_options(gpus=2).after(prep)("model.pt")
         """
-        # Merge options: self.sbatch_options + new overrides
-        merged_options = {**self.sbatch_options, **sbatch_options}
+        # Extract packaging_* options from other options
+        packaging_overrides = {}
+        sbatch_options = {}
+        for key, value in options.items():
+            if key.startswith("packaging_"):
+                # Remove the "packaging_" prefix
+                packaging_overrides[key[10:]] = value
+            else:
+                sbatch_options[key] = value
+
+        # Merge sbatch options
+        merged_sbatch = {**self.sbatch_options, **sbatch_options}
+
+        # Merge packaging options
+        merged_packaging = self.packaging.copy() if self.packaging else {}
+        merged_packaging.update(packaging_overrides)
 
         # Create new SlurmTask with merged options
         new_task = SlurmTask(
             func=self.func,
-            sbatch_options=merged_options,
+            sbatch_options=merged_sbatch,
+            packaging=merged_packaging,
+            **self.slurm_options,
+        )
+
+        # Preserve pending dependencies from .after()
+        new_task._pending_dependencies = self._pending_dependencies.copy()
+
+        # Preserve container dependencies from .with_dependencies()
+        new_task._container_dependencies = self._container_dependencies.copy()
+
+        # Preserve workflow flag
+        if hasattr(self, "_is_workflow"):
+            new_task._is_workflow = self._is_workflow
+
+        return new_task
+
+    def with_dependencies(self, tasks):
+        """Specify tasks that need their containers pre-built before this workflow runs.
+
+        This method is used for workflows that call tasks with different container
+        configurations. It ensures that child task containers are built before
+        the workflow is submitted, so they are available when the workflow runs.
+
+        Args:
+            tasks: List of SlurmTask instances whose containers need to be pre-built.
+
+        Returns:
+            New SlurmTask instance with container dependencies set.
+
+        Examples:
+            Workflow with a child task that has its own container:
+
+                >>> @task(packaging="container")
+                ... def gpu_task(data: str) -> Result:
+                ...     return process_on_gpu(data)
+                >>> @workflow
+                ... def my_workflow(ctx: WorkflowContext, data: str):
+                ...     job = gpu_task(data)
+                ...     return job.get_result()
+                >>> with cluster:
+                ...     # Pre-build gpu_task's container before submitting workflow
+                ...     job = cluster.submit(my_workflow.with_dependencies([gpu_task]))("input.csv")
+        """
+        # Create a new SlurmTask with container dependencies
+        new_task = SlurmTask(
+            func=self.func,
+            sbatch_options=self.sbatch_options.copy(),
             packaging=self.packaging.copy() if self.packaging else None,
             **self.slurm_options,
         )
 
         # Preserve pending dependencies from .after()
         new_task._pending_dependencies = self._pending_dependencies.copy()
+
+        # Set container dependencies
+        new_task._container_dependencies = list(tasks)
+
+        # Preserve workflow flag
+        if hasattr(self, "_is_workflow"):
+            new_task._is_workflow = self._is_workflow
 
         return new_task
 

@@ -1,13 +1,13 @@
 """Simple hello world example demonstrating basic slurm-sdk usage.
 
 This example shows:
-- Creating a cluster with explicit configuration
-- Using string-based packaging syntax with cluster defaults
-- Using argparse helpers for common cluster configuration
+- Creating a cluster with argparse helpers
+- Using container packaging with a Dockerfile
+- Submitting a task and retrieving results
 """
 
-import logging
 import argparse
+import logging
 
 from slurm.callbacks.callbacks import LoggerCallback
 from slurm.cluster import Cluster
@@ -50,16 +50,11 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    # Create cluster from args with default packaging configuration
     cluster = Cluster.from_args(
         args,
-        banner_timeout=args.banner_timeout,
-        callbacks=[
-            LoggerCallback(),
-        ],
-        # Set default packaging to wheel with Python 3.9
-        default_packaging="wheel",
-        default_packaging_python_version="3.12",
+        callbacks=[LoggerCallback()],
+        default_packaging="container",
+        default_packaging_dockerfile="src/slurm/examples/hello_world.Dockerfile",
     )
 
     # Submit job (uses cluster defaults for packaging, account, partition)

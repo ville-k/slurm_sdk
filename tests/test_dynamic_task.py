@@ -44,6 +44,7 @@ def test_dynamic_task_with_container_file():
     assert container_task.packaging is not None
     assert container_task.packaging["type"] == "container"
     assert container_task.packaging["dockerfile"] == "path/to/Dockerfile"
+    assert "image" not in container_task.packaging
 
     # Verify SBATCH options
     assert container_task.sbatch_options["time"] == "00:30:00"
@@ -142,3 +143,4 @@ def test_dynamic_task_packaging_with_kwargs():
     assert my_task.packaging["type"] == "container"
     assert my_task.packaging["dockerfile"] == "path/to/Dockerfile"
     assert my_task.packaging["push"] is True
+    assert "image" not in my_task.packaging

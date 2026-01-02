@@ -4,7 +4,6 @@ This module provides functions for rendering Slurm job scripts from task definit
 
 import logging
 import pickle
-import base64
 from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING
 import inspect
 import sys
@@ -181,19 +180,71 @@ def render_job_script(
     script_lines.append("")
     script_lines.append(f'echo "Target Job Directory (from Python): {target_job_dir}"')
     script_lines.append(f"export JOB_DIR={shlex.quote(target_job_dir)}")
+    # Export the job base directory for the runner to find result files from dependent jobs
+    script_lines.append("export SLURM_JOBS_DIR=$(dirname $(dirname $JOB_DIR))")
 
     # Export cluster configuration for workflow support
     if cluster is not None:
         slurmfile_path = getattr(cluster, "slurmfile_path", None)
         env_name = getattr(cluster, "env_name", None)
         # The Slurmfile will be uploaded to the job directory as "Slurmfile.toml"
-        if slurmfile_path:
+        is_workflow = getattr(task_func, "_is_workflow", False)
+        if is_workflow or slurmfile_path:
             remote_slurmfile_path = f"{target_job_dir}/Slurmfile.toml"
             script_lines.append(
                 f"export SLURM_SDK_SLURMFILE={shlex.quote(remote_slurmfile_path)}"
             )
         if env_name:
             script_lines.append(f"export SLURM_SDK_ENV={shlex.quote(env_name)}")
+
+    # Export packaging configuration for child tasks to inherit
+    # This is especially important for container packaging where the image reference
+    # needs to be passed to nested tasks
+    if packaging_strategy is not None:
+        import json
+        import base64
+
+        packaging_config = getattr(packaging_strategy, "config", {})
+        if packaging_config:
+            # Include the packaging type
+            config_to_export = dict(packaging_config)
+            config_to_export["type"] = (
+                getattr(packaging_strategy, "__class__", type(packaging_strategy))
+                .__name__.replace("PackagingStrategy", "")
+                .lower()
+            )
+
+            # For container packaging, clean up the config for child tasks
+            # Remove build-time fields and set the resolved image reference
+            if hasattr(packaging_strategy, "_image_reference"):
+                config_to_export["image"] = packaging_strategy._image_reference
+                # Remove fields that would trigger a rebuild
+                # Child tasks should use the pre-built image directly
+                for key in ["dockerfile", "context", "registry", "name", "tag"]:
+                    config_to_export.pop(key, None)
+                # Don't push - image already exists in registry
+                config_to_export["push"] = False
+
+            # Serialize and encode for safe shell export
+            config_json = json.dumps(config_to_export)
+            config_b64 = base64.b64encode(config_json.encode()).decode()
+            script_lines.append(
+                f"export SLURM_SDK_PACKAGING_CONFIG={shlex.quote(config_b64)}"
+            )
+
+    # Export pre-built dependency images for workflows
+    # This allows child tasks to use pre-built images instead of inheriting
+    if cluster is not None:
+        prebuilt_images = getattr(cluster, "_prebuilt_dependency_images", None)
+        if prebuilt_images:
+            import json
+            import base64
+
+            images_json = json.dumps(prebuilt_images)
+            images_b64 = base64.b64encode(images_json.encode()).decode()
+            script_lines.append(
+                f"export SLURM_SDK_PREBUILT_IMAGES={shlex.quote(images_b64)}"
+            )
 
     script_lines.append("")
     script_lines.append('echo "SLURM Job ID: ${SLURM_JOB_ID:-}"')

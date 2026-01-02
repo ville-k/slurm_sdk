@@ -1,0 +1,34 @@
+# Example Slurmfile for running the CUDA/PyTorch container example.
+#
+# Update backend credentials, partitions, and accounts before running
+# ``python -m slurm.examples.hello_cuda``.
+
+[default.cluster]
+backend = "ssh"
+job_base_dir = "~/slurm_jobs"
+
+[default.cluster.backend_config]
+hostname = "login.example.com"
+username = "slurm-user"
+banner_timeout = 30
+
+[default.packaging]
+type = "container"
+runtime = "docker"
+dockerfile = "src/slurm/examples/container_image/cuda.Dockerfile"
+context = "."
+name = "slurm-sdk/hello-cuda"
+tag = "latest"
+registry = "registry.example.com/team"
+push = true
+python_executable = "python3"
+modules = ["pyxis/0.15.0", "enroot/3.4.1"]
+# ``--gpus`` flag ensures the container launch mirrors the SBATCH gres request.
+srun_args = ["--gpus=1", "--gpu-bind=closest"]
+platform = "linux/amd64"
+
+[default.submit]
+account = "research"
+partition = "gpu"
+gres = "gpu:1"
+qos = "normal"

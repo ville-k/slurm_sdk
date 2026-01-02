@@ -304,6 +304,63 @@ class Job(Generic[T]):
             return None
         return self.target_job_dir
 
+    @staticmethod
+    def _tail_text(text: str, *, max_lines: int = 200, max_chars: int = 10_000) -> str:
+        """Return a tail slice of the given text for error messages."""
+        if not text:
+            return ""
+
+        original_len = len(text)
+        truncated_chars = False
+        if original_len > max_chars:
+            text = text[-max_chars:]
+            truncated_chars = True
+
+        lines = text.splitlines()
+        truncated_lines = False
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+            truncated_lines = True
+
+        rendered = "\n".join(lines)
+        if truncated_chars or truncated_lines:
+            note_parts = []
+            if truncated_chars:
+                note_parts.append(f"chars>{max_chars}")
+            if truncated_lines:
+                note_parts.append(f"lines>{max_lines}")
+            note = ", ".join(note_parts)
+            return f"[... output truncated ({note}) ...]\n{rendered}"
+        return rendered
+
+    def _format_failure_diagnostics(self) -> str:
+        parts: list[str] = []
+
+        if self.target_job_dir:
+            parts.append(f"Check job output in: {self.target_job_dir}")
+
+        if self.stdout_path:
+            try:
+                stdout = self.get_stdout()
+                stdout_tail = self._tail_text(stdout)
+                parts.append(
+                    "--- Remote Stdout (tail) ---\n" + (stdout_tail or "[empty]")
+                )
+            except Exception as exc:
+                parts.append(f"--- Remote Stdout Unavailable: {exc} ---")
+
+        if self.stderr_path:
+            try:
+                stderr = self.get_stderr()
+                stderr_tail = self._tail_text(stderr)
+                parts.append(
+                    "--- Remote Stderr (tail) ---\n" + (stderr_tail or "[empty]")
+                )
+            except Exception as exc:
+                parts.append(f"--- Remote Stderr Unavailable: {exc} ---")
+
+        return "\n".join(parts)
+
     def get_result(self, timeout: Optional[float] = None) -> T:
         """Retrieve the return value from the completed job.
 
@@ -356,33 +413,33 @@ class Job(Generic[T]):
             then loads it. For local backends, it reads the file directly.
         """
         if not self.is_completed():
-            success = self.wait(timeout=timeout)
-            if not success:
+            self.wait(timeout=timeout)
+            if not self.is_completed():
                 from .errors import DownloadError
 
-                raise DownloadError(
-                    f"Job {self.id} did not complete successfully within timeout.\n"
-                    f"State: {self.get_status().get('JobState')}\n"
-                    + (
-                        f"Check job output in: {self.target_job_dir}"
-                        if self.target_job_dir
-                        else ""
-                    )
+                status = self.get_status()
+                state = status.get("JobState")
+                diagnostics = self._format_failure_diagnostics()
+                message = (
+                    f"Job {self.id} did not reach a terminal state within timeout.\n"
+                    f"State: {state}\n"
                 )
+                if diagnostics:
+                    message += diagnostics
+                raise DownloadError(message)
 
         status = self.get_status()
         if not self.is_successful():
             from .errors import DownloadError
 
+            diagnostics = self._format_failure_diagnostics()
+            reason = status.get("Reason")
             raise DownloadError(
                 f"Job {self.id} did not succeed.\n"
                 f"State: {status.get('JobState')}\n"
                 f"Exit Code: {status.get('ExitCode')}\n"
-                + (
-                    f"Check job output in: {self.target_job_dir}"
-                    if self.target_job_dir
-                    else ""
-                )
+                + (f"Reason: {reason}\n" if reason else "")
+                + (diagnostics if diagnostics else "")
             )
 
         try:

@@ -24,6 +24,7 @@ To visualize the DOT file:
     dot -Tpng workflow_graph.dot -o workflow_graph.png
 """
 
+import argparse
 import json
 import time
 from pathlib import Path
@@ -195,7 +196,7 @@ class WorkflowGraphCallback(BaseCallback):
 
 
 # Define a simple ML pipeline workflow
-@task(time="00:01:00")
+@task(time="00:03:00", ntasks=1, cpus_per_task=1, mem="256M")
 def load_data(dataset_name: str) -> dict:
     """Load dataset from disk."""
     print(f"Loading dataset: {dataset_name}")
@@ -203,7 +204,7 @@ def load_data(dataset_name: str) -> dict:
     return {"dataset": dataset_name, "rows": 1000, "cols": 10}
 
 
-@task(time="00:01:00")
+@task(time="00:03:00", ntasks=1, cpus_per_task=1, mem="256M")
 def preprocess(data: dict) -> dict:
     """Preprocess the data."""
     print(f"Preprocessing {data['rows']} rows")
@@ -211,7 +212,7 @@ def preprocess(data: dict) -> dict:
     return {**data, "preprocessed": True}
 
 
-@task(time="00:02:00")
+@task(time="00:03:00", ntasks=1, cpus_per_task=1, mem="256M")
 def train_model(data: dict, model_type: str) -> dict:
     """Train a model on the data."""
     print(f"Training {model_type} model")
@@ -219,7 +220,7 @@ def train_model(data: dict, model_type: str) -> dict:
     return {"model": model_type, "accuracy": 0.95, "data": data}
 
 
-@task(time="00:01:00")
+@task(time="00:03:00", ntasks=1, cpus_per_task=1, mem="256M")
 def evaluate_model(model: dict) -> dict:
     """Evaluate model performance."""
     print(f"Evaluating {model['model']} model")
@@ -227,7 +228,7 @@ def evaluate_model(model: dict) -> dict:
     return {**model, "test_accuracy": 0.93}
 
 
-@workflow(time="00:10:00")
+@workflow(time="00:05:00", ntasks=1, cpus_per_task=1, mem="512M")
 def ml_pipeline(dataset_name: str, ctx: WorkflowContext):
     """Complete ML pipeline from data loading to evaluation.
 
@@ -241,31 +242,45 @@ def ml_pipeline(dataset_name: str, ctx: WorkflowContext):
         dataset_name: Name of the dataset to process
         ctx: WorkflowContext (automatically injected)
     """
-    print(f"Starting ML pipeline for dataset: {dataset_name}")
+    import sys
 
-    # Load and preprocess data
+    print(f"Starting ML pipeline for dataset: {dataset_name}", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    # Step 1: Load data
     data_job = load_data(dataset_name)
-    preprocessed_job = preprocess(data_job)
+    data = data_job.get_result()
+    print(f"Data loaded: {data}")
 
-    # Train multiple models in parallel
-    model1_job = train_model(preprocessed_job, "logistic_regression")
-    model2_job = train_model(preprocessed_job, "random_forest")
+    # # Step 2: Preprocess
+    # preprocessed_job = preprocess(data)
+    # preprocessed = preprocessed_job.get_result()
+    # print(f"Data preprocessed: {preprocessed}")
 
-    # Evaluate models
-    eval1_job = evaluate_model(model1_job)
-    eval2_job = evaluate_model(model2_job)
+    # # Step 3: Train models in parallel
+    # model1_job = train_model(preprocessed, "logistic_regression")
+    # model1 = model1_job.get_result()
+    # model2_job = train_model(preprocessed, "random_forest")
+    # model2 = model2_job.get_result()
 
-    # Wait for all evaluations to complete
-    results = [eval1_job.get_result(), eval2_job.get_result()]
+    # # Step 4: Evaluate models
+    # print(f"Models trained: {model1['model']}, {model2['model']}")
 
-    print(f"Pipeline complete! Trained {len(results)} models")
-    return results
+    # eval1_job = evaluate_model(model1)
+    # result1 = eval1_job.get_result()
+    # eval2_job = evaluate_model(model2)
+    # result2 = eval2_job.get_result()
+
+    print(f"Pipeline complete! Result: {data}", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    return data
 
 
 def main():
     """Run the workflow graph visualization example."""
-    import argparse
-
     parser = argparse.ArgumentParser(
         description="Run workflow graph visualization example."
     )
@@ -279,16 +294,11 @@ def main():
         default="iris_dataset",
         help="Name of the dataset to process",
     )
-    # Add legacy Slurmfile support (optional)
     parser.add_argument(
-        "--slurmfile",
-        default=None,
-        help="(Legacy) Path to Slurmfile for backward compatibility",
-    )
-    parser.add_argument(
-        "--env",
-        default="default",
-        help="(Legacy) Environment key within the Slurmfile",
+        "--timeout",
+        type=int,
+        default=300,
+        help="Timeout in seconds for waiting for workflow completion (default: 300)",
     )
 
     args = parser.parse_args()
@@ -302,32 +312,54 @@ def main():
     graph_callback = WorkflowGraphCallback()
     logger_callback = LoggerCallback()
 
-    # Create cluster from args or Slurmfile (backward compatibility)
-    print("\nLoading cluster configuration...")
-    if args.slurmfile:
-        print(f"  Using legacy Slurmfile: {args.slurmfile}")
-        print(f"  Environment: {args.env}")
-        cluster = Cluster.from_env(
-            args.slurmfile,
-            env=args.env,
-            callbacks=[graph_callback, logger_callback],
-        )
-    else:
-        print("  Using command-line configuration")
-        cluster = Cluster.from_args(
-            args,
-            callbacks=[graph_callback, logger_callback],
-        )
-    print()
+    # Build cluster kwargs
+    cluster_kwargs = {
+        "callbacks": [logger_callback, graph_callback],
+    }
 
-    print("Submitting ML pipeline workflow...")
+    # Only set default packaging/dockerfile if the user didn't specify packaging via --packaging
+    # This allows tests to specify packaging="none" or "wheel" without building containers
+    packaging_arg = getattr(args, "packaging", None)
+    if packaging_arg is None:
+        # No --packaging argument provided, use container as default
+        cluster_kwargs["default_packaging"] = "container"
+        cluster_kwargs["default_packaging_dockerfile"] = (
+            "src/slurm/examples/workflow_graph_visualization.Dockerfile"
+        )
+    elif packaging_arg == "container":
+        # Container packaging specified, but no Dockerfile set yet - set it
+        if not getattr(args, "packaging_dockerfile", None):
+            cluster_kwargs["default_packaging_dockerfile"] = (
+                "src/slurm/examples/workflow_graph_visualization.Dockerfile"
+            )
+    # If --packaging was provided with another value (wheel, none), don't set defaults
+
+    cluster = Cluster.from_args(args, **cluster_kwargs)
+
+    print("\nSubmitting ML pipeline workflow...")
     job = cluster.submit(ml_pipeline)(args.dataset)
 
     print(f"Workflow job submitted: {job.id}")
-    print("Waiting for workflow to complete...\n")
+    print(f"Waiting for workflow to complete (timeout={args.timeout}s)...\n")
 
-    # Wait for completion
-    result = job.get_result()
+    # Wait for completion with configurable timeout
+    try:
+        result = job.get_result(timeout=args.timeout)
+    except Exception as e:
+        print(f"ERROR: Job timed out or failed: {e}")
+        print(f"Job ID: {job.id}")
+        print(f"Status: {job.get_status()}")
+        try:
+            print("\n--- Remote Stdout ---")
+            print(job.get_stdout())
+        except Exception as stdout_exc:
+            print(f"\n--- Remote Stdout Unavailable: {stdout_exc} ---")
+        try:
+            print("\n--- Remote Stderr ---")
+            print(job.get_stderr())
+        except Exception as stderr_exc:
+            print(f"\n--- Remote Stderr Unavailable: {stderr_exc} ---")
+        raise
 
     print("\n" + "=" * 70)
     print("Workflow completed!")

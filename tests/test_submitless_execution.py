@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 
 from slurm.cluster import Cluster
-from slurm.decorators import task, workflow
+from slurm.decorators import task
 from slurm.context import set_active_context, reset_active_context, clear_active_context
 from slurm.workflow import WorkflowContext
 from slurm.job import Job

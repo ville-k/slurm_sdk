@@ -16,7 +16,7 @@ import sys
 import time
 import traceback
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from slurm.callbacks.callbacks import (
     BaseCallback,
@@ -249,6 +249,11 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=args.loglevel)
+    logger.info("=" * 70)
+    logger.info("RUNNER STARTING")
+    logger.info(f"Module: {args.module}, Function: {args.function}")
+    logger.info(f"Job Dir: {args.job_dir}")
+    logger.info("=" * 70)
 
     # Determine if this is an array job
     is_array_job = args.array_index is not None
@@ -521,25 +526,120 @@ def main():
             # Try to load from environment variables set by the job script
             slurmfile_path = os.environ.get("SLURM_SDK_SLURMFILE")
             env_name = os.environ.get("SLURM_SDK_ENV")
+            packaging_config_b64 = os.environ.get("SLURM_SDK_PACKAGING_CONFIG")
+            container_image_env = os.environ.get("CONTAINER_IMAGE")
+
+            # Decode parent packaging configuration if available
+            parent_packaging_config: Optional[Dict[str, Any]] = None
+            if packaging_config_b64:
+                try:
+                    import base64
+
+                    config_json = base64.b64decode(packaging_config_b64).decode()
+                    parent_packaging_config = json.loads(config_json)
+                    logger.debug(
+                        f"Loaded parent packaging config from env: {parent_packaging_config}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to decode parent packaging config: {e}")
+
+            # Fallback: when running inside a containerized workflow job, the sbatch
+            # script exports CONTAINER_IMAGE. Prefer it to avoid losing the registry
+            # prefix for nested submissions.
+            if container_image_env:
+                if parent_packaging_config is None:
+                    parent_packaging_config = {
+                        "type": "container",
+                        "image": container_image_env,
+                        "push": False,
+                    }
+                elif parent_packaging_config.get(
+                    "type"
+                ) == "container" and not parent_packaging_config.get("image"):
+                    parent_packaging_config = dict(parent_packaging_config)
+                    parent_packaging_config["image"] = container_image_env
+                    parent_packaging_config["push"] = False
+
+            # Decode pre-built dependency images if available
+            prebuilt_images: Optional[Dict[str, str]] = None
+            prebuilt_images_b64 = os.environ.get("SLURM_SDK_PREBUILT_IMAGES")
+            if prebuilt_images_b64:
+                try:
+                    import base64
+
+                    images_json = base64.b64decode(prebuilt_images_b64).decode()
+                    prebuilt_images = json.loads(images_json)
+                    logger.debug(
+                        f"Loaded pre-built dependency images from env: {prebuilt_images}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to decode pre-built images: {e}")
 
             cluster = None
             parent_packaging_type: Optional[str] = None
             if slurmfile_path:
                 try:
-                    logger.debug(
+                    logger.info(
                         f"Loading cluster from SLURM_SDK_SLURMFILE={slurmfile_path}, env={env_name}"
                     )
-                    cluster = Cluster.from_env(slurmfile_path, env=env_name)
-                    if cluster.packaging_defaults:
-                        parent_packaging_type = cluster.packaging_defaults.get("type")
+                    # Check if Slurmfile actually exists before trying to load it
+                    if not os.path.exists(slurmfile_path):
+                        logger.warning(f"Slurmfile does not exist at: {slurmfile_path}")
+                        logger.info("Checking SLURM_SDK_SLURMFILE env var...")
+                        slurmfile_path = os.environ.get("SLURM_SDK_SLURMFILE")
+                        if slurmfile_path and os.path.exists(slurmfile_path):
+                            logger.info(
+                                f"Found Slurmfile at SLURM_SDK_SLURMFILE: {slurmfile_path}"
+                            )
+                        else:
+                            logger.warning(
+                                "Could not find Slurmfile, skipping cluster creation"
+                            )
+                            slurmfile_path = None
+
+                    if slurmfile_path:
+                        logger.info("Calling Cluster.from_env()...")
+                        # Use a timeout for cluster initialization
+                        import signal
+
+                        def timeout_handler(signum, frame):
+                            raise TimeoutError(
+                                "Cluster.from_env() timed out after 30 seconds"
+                            )
+
+                        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                        signal.alarm(30)  # 30 second timeout
+                        try:
+                            cluster = Cluster.from_env(slurmfile_path, env=env_name)
+                            signal.alarm(0)  # Cancel alarm
+                            logger.info("Cluster loaded successfully")
+                        except TimeoutError as e:
+                            logger.error(f"Cluster initialization timed out: {e}")
+                            cluster = None
+                        except Exception as e:
+                            logger.error(
+                                f"Error initializing cluster from {slurmfile_path}: {e}",
+                                exc_info=True,
+                            )
+                            cluster = None
+                        finally:
+                            signal.signal(signal.SIGALRM, old_handler)
+
+                    # Use parent packaging config from env var if available,
+                    # otherwise fall back to cluster.packaging_defaults
+                    effective_packaging_config = (
+                        parent_packaging_config or cluster.packaging_defaults
+                    )
+                    if effective_packaging_config:
+                        parent_packaging_type = effective_packaging_config.get("type")
 
                     # For nested workflow tasks, reuse the parent workflow's container image
                     # Remove dockerfile/context to prevent rebuilding; set explicit image reference
                     if (
-                        cluster.packaging_defaults
-                        and cluster.packaging_defaults.get("type") == "container"
+                        effective_packaging_config
+                        and effective_packaging_config.get("type") == "container"
                     ):
-                        pkg = dict(cluster.packaging_defaults)
+                        pkg = dict(effective_packaging_config)
 
                         # Construct the full image reference if not already present
                         if not pkg.get("image"):
@@ -559,19 +659,20 @@ def main():
                                 logger.debug(
                                     f"Constructed image reference: {image_ref}"
                                 )
+                            elif container_image_env:
+                                pkg["image"] = container_image_env
+                                logger.debug(
+                                    "Using CONTAINER_IMAGE for nested tasks: %s",
+                                    container_image_env,
+                                )
 
-                        # Remove dockerfile, context, and the fields used to construct the image
-                        # This prevents _resolve_image_reference from adding the registry prefix again
-                        pkg.pop("dockerfile", None)
-                        pkg.pop("context", None)
-                        pkg.pop("registry", None)
-                        pkg.pop("name", None)
-                        pkg.pop("tag", None)
-                        # Disable push since image already exists in registry
+                        # Remove build-time fields so child tasks use the image directly
+                        for key in ["dockerfile", "context", "registry", "name", "tag"]:
+                            pkg.pop(key, None)
                         pkg["push"] = False
                         cluster.packaging_defaults = pkg
                         logger.debug(
-                            "Configured nested tasks to reuse parent container image (no build/push)"
+                            "Configured nested tasks to reuse parent container image"
                         )
                     else:
                         # If not using containers, use 'inherit' packaging
@@ -582,6 +683,13 @@ def main():
                         }
                         logger.info(
                             f"Configured child tasks to inherit environment from {job_dir}"
+                        )
+
+                    # Store pre-built dependency images on cluster
+                    if prebuilt_images:
+                        cluster._prebuilt_dependency_images = prebuilt_images
+                        logger.debug(
+                            f"Stored {len(prebuilt_images)} pre-built dependency images on cluster"
                         )
                 except Exception as e:
                     logger.warning(f"Could not load cluster from {slurmfile_path}: {e}")
@@ -619,22 +727,23 @@ def main():
                                 logger.debug(
                                     f"Constructed image reference: {image_ref}"
                                 )
+                            elif container_image_env:
+                                pkg["image"] = container_image_env
+                                logger.debug(
+                                    "Using CONTAINER_IMAGE for nested tasks: %s",
+                                    container_image_env,
+                                )
 
-                        # Remove dockerfile, context, and the fields used to construct the image
-                        # This prevents _resolve_image_reference from adding the registry prefix again
-                        pkg.pop("dockerfile", None)
-                        pkg.pop("context", None)
-                        pkg.pop("registry", None)
-                        pkg.pop("name", None)
-                        pkg.pop("tag", None)
+                        # Remove build-time fields so child tasks use the image directly
+                        for key in ["dockerfile", "context", "registry", "name", "tag"]:
+                            pkg.pop(key, None)
                         pkg["push"] = False
                         cluster.packaging_defaults = pkg
                         logger.debug(
-                            "Configured nested tasks to reuse parent container image (no build/push)"
+                            "Configured nested tasks to reuse parent container image"
                         )
                     else:
-                        # If not using containers, use 'inherit' packaging
-                        # Child tasks will read .slurm_environment.json to activate parent's venv
+                        # Non-container packaging: use inherit strategy
                         cluster.packaging_defaults = {
                             "type": "inherit",
                             "parent_job_dir": job_dir,
@@ -646,13 +755,14 @@ def main():
                     logger.warning(f"Could not load cluster from Slurmfile: {e}")
 
             if cluster is None:
-                logger.error("Workflow requires cluster but could not create one")
-                raise RuntimeError(
-                    "Workflow execution requires a Cluster instance but none could be created. "
-                    "Set SLURM_SDK_SLURMFILE and SLURM_SDK_ENV environment variables, or ensure "
-                    "a Slurmfile exists in the job directory."
+                logger.error(
+                    "CRITICAL: Could not create Cluster instance for workflow. "
+                    "This is required for workflows that submit child tasks. "
+                    "Possible causes: Slurmfile not found, connection timeout, or invalid environment. "
+                    "Workflow execution will fail if it attempts to submit any tasks."
                 )
 
+            logger.info("Creating WorkflowContext...")
             workflow_context = WorkflowContext(
                 cluster=cluster,
                 workflow_job_id=job_id_env or "unknown",
@@ -660,10 +770,13 @@ def main():
                 shared_dir=shared_dir,
                 local_mode=False,
             )
+            logger.info("WorkflowContext created successfully")
 
+            logger.info("Binding workflow context to function...")
             task_args, task_kwargs, injected = _bind_workflow_context(
                 func, task_args, task_kwargs, workflow_context
             )
+            logger.info(f"Workflow context bound (injected={injected})")
             if injected:
                 logger.debug(
                     "Injected WorkflowContext into %s.%s",
@@ -681,6 +794,7 @@ def main():
             # This must happen BEFORE child tasks are submitted
             # The packaging_type should reflect the PARENT's actual environment (wheel/container),
             # not what children will use (inherit)
+            logger.info("Determining parent packaging type...")
             if parent_packaging_type not in {"wheel", "container"}:
                 parent_packaging_type = (
                     "wheel"
@@ -690,6 +804,8 @@ def main():
                     or os.environ.get("SLURM_CONTAINER_IMAGE")
                     else "none"
                 )
+            logger.info(f"Parent packaging type: {parent_packaging_type}")
+            logger.info("Writing environment metadata...")
             _write_environment_metadata(
                 job_dir=str(workflow_job_dir),
                 packaging_type=parent_packaging_type,
@@ -697,6 +813,7 @@ def main():
                 workflow_name=args.function,
                 pre_submission_id=args.pre_submission_id,
             )
+            logger.info("Environment metadata written")
 
             # Activate the cluster context for the workflow execution
             # This allows tasks called within the workflow to submit jobs
@@ -723,15 +840,20 @@ def main():
                 logger.warning(f"Error calling workflow begin callbacks: {e}")
 
         logger.info("Executing task")
+        logger.info(f"Task args: {task_args}")
+        logger.info(f"Task kwargs: {task_kwargs}")
 
         # Execute and track result/exception for workflow end event
         task_result = None
         task_exception = None
         try:
+            logger.info("About to execute function...")
             result = func(*task_args, **task_kwargs)
+            logger.info(f"Function returned: {result}")
             task_result = result
         except Exception as e:
             task_exception = e
+            logger.error(f"Function raised exception: {e}", exc_info=True)
             raise
         finally:
             # Emit workflow end event if we activated workflow context
@@ -760,6 +882,61 @@ def main():
 
                 reset_active_context(workflow_context_token)
                 logger.debug("Deactivated cluster context after workflow execution")
+
+                # Explicitly close SSH connections to prevent hanging
+                # The cluster's SSH backend holds connections that can prevent process exit
+                # Use a timeout to prevent the close operation from hanging indefinitely
+                if cluster is not None and hasattr(cluster, "backend"):
+                    try:
+                        # Manually trigger SSH backend cleanup with timeout
+                        if (
+                            hasattr(cluster.backend, "client")
+                            and cluster.backend.client
+                        ):
+                            logger.debug(
+                                "Closing SSH connections from workflow cluster"
+                            )
+                            # Close SFTP connection with timeout
+                            if (
+                                hasattr(cluster.backend, "sftp")
+                                and cluster.backend.sftp
+                            ):
+                                try:
+                                    import threading
+
+                                    def close_sftp():
+                                        try:
+                                            cluster.backend.sftp.close()
+                                        except Exception:
+                                            pass
+
+                                    sftp_thread = threading.Thread(
+                                        target=close_sftp, daemon=True
+                                    )
+                                    sftp_thread.start()
+                                    sftp_thread.join(timeout=2.0)  # 2 second timeout
+                                except Exception as e:
+                                    logger.debug(f"Error closing SFTP: {e}")
+                            # Close SSH client with timeout
+                            try:
+                                import threading
+
+                                def close_ssh():
+                                    try:
+                                        cluster.backend.client.close()
+                                    except Exception:
+                                        pass
+
+                                ssh_thread = threading.Thread(
+                                    target=close_ssh, daemon=True
+                                )
+                                ssh_thread.start()
+                                ssh_thread.join(timeout=2.0)  # 2 second timeout
+                            except Exception as e:
+                                logger.debug(f"Error closing SSH client: {e}")
+                            logger.debug("SSH connections closed (or timeout)")
+                    except Exception as e:
+                        logger.warning(f"Error cleaning up cluster backend: {e}")
         logger.info("Task execution complete")
 
         end_time = time.time()
@@ -895,6 +1072,9 @@ def main():
             )
         except Exception as e:
             logger.warning(f"Callback on_completed_ctx (success) failed: {e}")
+        logger.info("=" * 70)
+        logger.info("RUNNER EXITING SUCCESSFULLY")
+        logger.info("=" * 70)
         sys.exit(0)
     except Exception as e:
         logger.error("Error during task execution: %s", e)
@@ -968,6 +1148,9 @@ def main():
         except Exception as exc:
             logger.warning(f"Callback on_completed_ctx (failure) failed: {exc}")
 
+        logger.error("=" * 70)
+        logger.error("RUNNER EXITING WITH FAILURE")
+        logger.error("=" * 70)
         sys.exit(1)
 
 

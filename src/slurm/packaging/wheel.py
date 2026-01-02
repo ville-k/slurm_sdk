@@ -248,7 +248,7 @@ class WheelPackagingStrategy(PackagingStrategy):
         commands.append("# Detect array job execution")
         commands.append('if [ -n "$SLURM_ARRAY_TASK_ID" ]; then')
         commands.append(
-            f'  echo "Array task ID: $SLURM_ARRAY_TASK_ID (using file locking)"'
+            '  echo "Array task ID: $SLURM_ARRAY_TASK_ID (using file locking)"'
         )
         commands.append("  ARRAY_JOB=1")
         commands.append("else")
@@ -307,7 +307,7 @@ class WheelPackagingStrategy(PackagingStrategy):
 
         # Move uploaded wheel into JOB_DIR if we uploaded via SSH (with safety check)
         if remote_upload_path:
-            commands.append(f"    # Move wheel file (with concurrent access safety)")
+            commands.append("    # Move wheel file (with concurrent access safety)")
             commands.append(f"    if [ -f {shlex.quote(remote_upload_path)} ]; then")
             commands.append(
                 f'      echo "Moving uploaded wheel {remote_upload_path} to {target_wheel_path}"'
@@ -317,29 +317,29 @@ class WheelPackagingStrategy(PackagingStrategy):
             )
             commands.append(f'    elif [ ! -f "{target_wheel_path}" ]; then')
             commands.append(
-                f'      echo "ERROR: Wheel file not found at source or target" >&2'
+                '      echo "ERROR: Wheel file not found at source or target" >&2'
             )
-            commands.append(f"      flock -u 200")
-            commands.append(f"      exit 1")
-            commands.append(f"    else")
-            commands.append(f'      echo "Wheel already at target location"')
-            commands.append(f"    fi")
+            commands.append("      flock -u 200")
+            commands.append("      exit 1")
+            commands.append("    else")
+            commands.append('      echo "Wheel already at target location"')
+            commands.append("    fi")
             install_wheel_path = f'"{target_wheel_path}"'
         else:
             # Local install directly from the built wheel path
             install_wheel_path = shlex.quote(self.last_prepare_result["wheel_path"])  # type: ignore[index]
 
         # Venv creation and activation (use explicit interpreter)
-        commands.append(f'    echo "Creating venv at $VENV_PATH"')
+        commands.append('    echo "Creating venv at $VENV_PATH"')
         commands.append(
-            f'    "$PY_EXEC" -m venv "$VENV_PATH" || {{ echo "ERROR: Failed to create venv" >&2; flock -u 200; exit 1; }}'
+            '    "$PY_EXEC" -m venv "$VENV_PATH" || { echo "ERROR: Failed to create venv" >&2; flock -u 200; exit 1; }'
         )
-        commands.append(f'    echo "Activating venv: $VENV_PATH/bin/activate"')
+        commands.append('    echo "Activating venv: $VENV_PATH/bin/activate"')
         commands.append(
-            f'    source "$VENV_PATH/bin/activate" || {{ echo "ERROR: Failed to activate venv" >&2; flock -u 200; exit 1; }}'
+            '    source "$VENV_PATH/bin/activate" || { echo "ERROR: Failed to activate venv" >&2; flock -u 200; exit 1; }'
         )
-        commands.append(f'    PY_EXEC="$VENV_PATH/bin/python"')
-        commands.append(f'    echo "Updated PY_EXEC to venv python: $PY_EXEC"')
+        commands.append('    PY_EXEC="$VENV_PATH/bin/python"')
+        commands.append('    echo "Updated PY_EXEC to venv python: $PY_EXEC"')
         commands.append("")
 
         # Installation (use --quiet to avoid output size limits in SLURM)

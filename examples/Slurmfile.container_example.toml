@@ -1,0 +1,39 @@
+# Example Slurmfile that demonstrates the container packaging strategy.
+#
+# Update the SSH backend details and registry information to match your
+# environment before running the example script. Set the secret environment
+# variables referenced below (UV_INDEX_FOO_USERNAME / UV_INDEX_FOO_PASSWORD)
+# before building to avoid hard-coding credentials.
+
+[default.cluster]
+backend = "ssh"
+job_base_dir = "~/slurm_jobs"
+
+[default.cluster.backend_config]
+hostname = "login.example.com"
+username = "slurm-user"
+banner_timeout = 30
+
+[default.packaging]
+type = "container"
+runtime = "docker"
+dockerfile = "src/slurm/examples/container_image/Dockerfile"
+context = "."
+name = "slurm-sdk/hello-container"
+tag = "latest"
+python_executable = "python3"
+push = true
+registry = "registry.example.com/team"
+srun_args = ["--mpi=none"]
+platform = "linux/amd64"
+mounts = [
+  { host_path = "/datasets/shared", container_path = "/workspace/data", mode = "ro" }
+]
+build_secrets = [
+  { id = "uv_index_username", env = "UV_INDEX_FOO_USERNAME" },
+  { id = "uv_index_password", env = "UV_INDEX_FOO_PASSWORD" },
+]
+
+[default.submit]
+account = "research"
+partition = "cpu"

@@ -87,6 +87,20 @@ RUN chmod +x /tmp/install-pyxis.sh \
     && /tmp/install-pyxis.sh \
     && rm /tmp/install-pyxis.sh
 
+# Configure enroot utilities to run with elevated privileges via sudo
+# This is required in nested container environments (e.g., podman-in-podman)
+# where CAP_SETFCAP is not available to unprivileged users. The enroot
+# utilities need to preserve file capabilities when extracting container
+# image layers.
+RUN for util in enroot-aufs2ovlfs enroot-mksquashovlfs; do \
+        if [ -f "/usr/bin/${util}" ]; then \
+            mv "/usr/bin/${util}" "/usr/bin/${util}.real" \
+            && printf '#!/bin/bash\nexec sudo "/usr/bin/%s.real" "$@"\n' "${util}" > "/usr/bin/${util}" \
+            && chmod +x "/usr/bin/${util}" \
+            && echo "${SLURM_USER} ALL=(root) NOPASSWD: /usr/bin/${util}.real *" >> /etc/sudoers; \
+        fi; \
+    done
+
 # Install podman for building container images
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

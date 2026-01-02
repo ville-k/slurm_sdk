@@ -8,7 +8,7 @@ from slurm.decorators import task
 from slurm.runtime import JobContext
 
 
-@task()
+@task(time="00:01:00", mem="100M")
 def simple_integration_task() -> str:
     """A simple task that returns a success message for integration testing."""
     return "integration-ok"
@@ -65,37 +65,37 @@ def get_output_dir_task(job: JobContext) -> dict:
 
 
 # Array job test tasks
-@task(time="00:01:00")
+@task(time="00:01:00", mem="100M")
 def process_string_item(item: str) -> str:
     """Process a single string item and return uppercase."""
     return item.upper()
 
 
-@task(time="00:01:00")
+@task(time="00:01:00", mem="100M")
 def add_two_numbers(x: int, y: int) -> int:
     """Add two numbers."""
     return x + y
 
 
-@task(time="00:01:00")
+@task(time="00:01:00", mem="100M")
 def multiply_with_default(x: int, y: int = 2) -> int:
     """Multiply x by y (default 2)."""
     return x * y
 
 
-@task(time="00:01:00")
+@task(time="00:01:00", mem="100M")
 def prepare_data() -> str:
     """Prepare initial data."""
     return "prepared"
 
 
-@task(time="00:01:00")
+@task(time="00:01:00", mem="100M")
 def process_item_simple(item: int) -> str:
     """Process an item."""
     return f"processed_{item}"
 
 
-@task(time="00:01:00")
+@task(time="00:01:00", mem="100M")
 def slow_multiply_task(x: int) -> int:
     """Slow task that returns x * 2."""
     import time

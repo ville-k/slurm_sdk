@@ -310,6 +310,12 @@ def _parse_packaging_config(
         config["type"] = "none"
     elif packaging == "inherit":
         config["type"] = "inherit"
+    elif packaging == "container":
+        # Container packaging selected, but the image reference (if any) must come
+        # from packaging_* kwargs (e.g. dockerfile/registry) or an explicit
+        # container:image reference. Treating "container" as an image name is
+        # almost always a mistake and breaks nested workflows.
+        config["type"] = "container"
     elif packaging.startswith("container:"):
         config["type"] = "container"
         # Parse "container:image:tag" or "container:image"

@@ -1,6 +1,5 @@
 """Unit tests for context management (contextvars-based)."""
 
-import pytest
 from slurm.context import (
     get_active_context,
     set_active_context,
@@ -9,7 +8,6 @@ from slurm.context import (
 )
 from slurm.cluster import Cluster
 from slurm.workflow import WorkflowContext
-from pathlib import Path
 
 
 def test_no_active_context():

@@ -29,8 +29,8 @@ from slurm.decorators import task
 
 
 @task(
-    time="00:01:00",
-    mem="1G",
+    time="00:03:00",
+    mem="256M",
 )
 def split_dataset(dataset_path: str, num_chunks: int) -> List[Dict[str, Any]]:
     """Split a dataset into chunks for parallel processing.
@@ -60,9 +60,9 @@ def split_dataset(dataset_path: str, num_chunks: int) -> List[Dict[str, Any]]:
 
 
 @task(
-    time="00:02:00",
-    mem="2G",
-    cpus_per_task=2,
+    time="00:03:00",
+    mem="256M",
+    cpus_per_task=1,
 )
 def process_chunk(
     chunk_id: int, start_idx: int, end_idx: int, source: str
@@ -101,8 +101,8 @@ def process_chunk(
 
 
 @task(
-    time="00:02:00",
-    mem="4G",
+    time="00:03:00",
+    mem="256M",
 )
 def merge_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Merge results from all chunks.
@@ -142,8 +142,9 @@ def merge_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 @task(
-    time="00:01:00",
-    mem="1G",
+    time="00:03:00",
+    mem="256M",
+    cpus_per_task=1,
 )
 def stage1_preprocess(raw_data: str) -> str:
     """Stage 1: Preprocess raw data.
@@ -159,8 +160,9 @@ def stage1_preprocess(raw_data: str) -> str:
 
 
 @task(
-    time="00:01:00",
-    mem="2G",
+    time="00:03:00",
+    mem="256M",
+    cpus_per_task=1,
 )
 def stage2_transform(data: str, transform_type: str) -> str:
     """Stage 2: Apply transformation.
@@ -177,8 +179,9 @@ def stage2_transform(data: str, transform_type: str) -> str:
 
 
 @task(
-    time="00:01:00",
-    mem="1G",
+    time="00:03:00",
+    mem="256M",
+    cpus_per_task=1,
 )
 def stage3_finalize(transformed: str) -> str:
     """Stage 3: Finalize processing.
@@ -199,9 +202,9 @@ def stage3_finalize(transformed: str) -> str:
 
 
 @task(
-    time="00:02:00",
-    mem="2G",
-    cpus_per_task=4,
+    time="00:03:00",
+    mem="256M",
+    cpus_per_task=1,
 )
 def train_model(lr: float, batch_size: int, epochs: int, seed: int) -> Dict[str, Any]:
     """Train a model with specific hyperparameters.
@@ -240,8 +243,8 @@ def train_model(lr: float, batch_size: int, epochs: int, seed: int) -> Dict[str,
 
 
 @task(
-    time="00:01:00",
-    mem="1G",
+    time="00:03:00",
+    mem="256M",
 )
 def select_best_model(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Select the best model from hyperparameter sweep.
@@ -495,11 +498,9 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    # Create cluster with default container packaging configuration
     cluster = Cluster.from_args(
         args,
         callbacks=[RichLoggerCallback()],
-        # Set default packaging options for all tasks
         default_packaging="container",
         default_packaging_dockerfile="src/slurm/examples/map_reduce.Dockerfile",
     )

@@ -1,0 +1,84 @@
+site_name: Slurm SDK
+site_description: Python SDK for containerized Slurm workflows and task orchestration.
+repo_url: https://github.com/ville-k/slurm
+repo_name: ville-k/slurm
+site_url: https://ville-k.github.io/slurm
+
+nav:
+  - Home: index.md
+  - Tutorials:
+      - tutorials/index.md
+      - Getting Started: tutorials/getting_started_hello_world.md
+      - Container Basics: tutorials/container_basics_hello_container.md
+      - Workflow Graph Visualization: tutorials/workflow_graph_visualization.md
+      - Parallel Train + Eval Workflow: tutorials/parallel-train-eval-workflow.md
+  - Guides:
+      - guides/index.md
+      - Container Dependencies (Map-Reduce): guides/container_dependencies.md
+      - Parallelization Patterns: guides/parallelization_patterns.md
+      - GPU Hello Torch: guides/hello_torch.md
+  - Reference:
+      - reference/index.md
+      - API Reference:
+          - reference/api/index.md
+          - Cluster: reference/api/cluster.md
+          - Tasks and Workflows: reference/api/tasks_workflows.md
+          - Jobs and Arrays: reference/api/jobs_arrays.md
+          - Callbacks: reference/api/callbacks.md
+          - Packaging (Container): reference/api/packaging_container.md
+          - Errors: reference/api/errors.md
+      - Architecture:
+          - reference/architecture/index.md
+          - System Overview: reference/architecture/system_overview.md
+          - Container Packaging: reference/architecture/container_packaging.md
+          - Workflow Execution: reference/architecture/workflow_execution.md
+          - Rendering and Runner: reference/architecture/rendering_and_runner.md
+          - Callbacks and Events: reference/architecture/callbacks_and_events.md
+
+theme:
+  name: material
+  language: en
+  icon:
+    logo: material/library-shelves
+  features:
+    - navigation.indexes
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - toc.follow
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths:
+            - src
+          options:
+            show_source: false
+            members_order: alphabetical
+            filters:
+              - '!^_'
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tasklist:
+      custom_checkbox: true

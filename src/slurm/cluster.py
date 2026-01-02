@@ -14,7 +14,6 @@ import time
 import threading
 import json
 from datetime import datetime
-import shlex
 
 from .job import Job
 from .api import create_backend
@@ -176,6 +175,138 @@ def _sanitize_task_name(name: str) -> str:
     return name or "task"
 
 
+class SubmittableWorkflow:
+    """Wrapper for workflow submissions that supports pre-building dependent task containers.
+
+    This class is returned by `cluster.submit()` when submitting a workflow, allowing
+    users to specify dependent tasks that need their containers built before the workflow runs.
+    """
+
+    def __init__(
+        self,
+        cluster: "Cluster",
+        submitter: Callable[..., Job],
+        task_func: "SlurmTask",
+        packaging_config: Optional[Dict[str, Any]],
+        container_dependencies: Optional[List["SlurmTask"]] = None,
+    ):
+        self._cluster = cluster
+        self._submitter = submitter
+        self._task_func = task_func
+        self._packaging_config = packaging_config
+        self._dependent_tasks: List["SlurmTask"] = container_dependencies or []
+        self._prebuilt_images: Dict[str, str] = {}
+
+    def with_dependencies(self, tasks: List["SlurmTask"]) -> "SubmittableWorkflow":
+        """Specify dependent tasks that need their containers pre-built.
+
+        When the workflow is submitted, containers for these tasks will be built
+        and pushed before the workflow starts. The workflow's child tasks can then
+        use these pre-built images instead of inheriting the parent's container.
+
+        Args:
+            tasks: List of SlurmTask instances that will be submitted by the workflow.
+                   These can include tasks with overrides (e.g., task.with_options(...)).
+
+        Returns:
+            Self for method chaining.
+
+        Example:
+            >>> job = cluster.submit(my_workflow).with_dependencies([
+            ...     task_a,
+            ...     task_b.with_options(packaging_container_tag="v2"),
+            ... ])(input_data)
+        """
+        self._dependent_tasks = list(tasks)
+        return self
+
+    def _build_dependency_containers(self) -> Dict[str, str]:
+        """Build containers for all dependent tasks.
+
+        Returns:
+            Dict mapping task function qualified names to their pre-built image references.
+        """
+        prebuilt_images: Dict[str, str] = {}
+
+        logger.info(
+            f"Building dependency containers for {len(self._dependent_tasks)} tasks"
+        )
+
+        for task in self._dependent_tasks:
+            if not isinstance(task, SlurmTask):
+                logger.warning(f"Skipping non-SlurmTask dependency: {type(task)}")
+                continue
+
+            # Get the task's packaging config
+            task_packaging = getattr(task, "packaging", None)
+            logger.debug(f"Task packaging config: {task_packaging}")
+            if not task_packaging:
+                task_packaging = {}
+
+            # Merge with any overrides from with_options
+            effective_packaging = dict(task_packaging)
+
+            # Determine the packaging type
+            pkg_type = effective_packaging.get("type", "auto")
+            logger.debug(f"Packaging type: {pkg_type}")
+
+            # For auto or inherit, use cluster defaults
+            if pkg_type in ("auto", "inherit", None):
+                if self._cluster.packaging_defaults:
+                    effective_packaging = dict(self._cluster.packaging_defaults)
+                    effective_packaging.update(task_packaging)
+
+            # Only build containers
+            if effective_packaging.get("type") != "container":
+                logger.debug(
+                    f"Skipping non-container packaging: {effective_packaging.get('type')}"
+                )
+                continue
+
+            # Get task identifier
+            func = task.func
+            task_name = f"{func.__module__}.{func.__qualname__}"
+
+            logger.info(f"Building container for dependent task: {task_name}")
+            logger.debug(f"Effective packaging: {effective_packaging}")
+
+            # Prepare the packaging strategy
+            packaging_strategy = self._cluster._prepare_packaging_strategy(
+                task, effective_packaging
+            )
+
+            if packaging_strategy and hasattr(packaging_strategy, "_image_reference"):
+                image_ref = packaging_strategy._image_reference
+                if image_ref:
+                    prebuilt_images[task_name] = image_ref
+                    logger.info(f"Pre-built image for {task_name}: {image_ref}")
+                else:
+                    logger.warning(f"No image reference set for {task_name}")
+            else:
+                logger.warning("Packaging strategy has no _image_reference attribute")
+
+        logger.info(
+            f"Built {len(prebuilt_images)} pre-built images: {list(prebuilt_images.keys())}"
+        )
+        return prebuilt_images
+
+    def __call__(self, *args, **kwargs) -> Job:
+        """Submit the workflow, building dependency containers first if specified."""
+        # Build containers for dependencies
+        if self._dependent_tasks:
+            self._prebuilt_images = self._build_dependency_containers()
+
+        # If we have pre-built images, pass them to the workflow via environment
+        if self._prebuilt_images:
+            # Store pre-built images in cluster's environment for rendering
+            if not hasattr(self._cluster, "_prebuilt_dependency_images"):
+                self._cluster._prebuilt_dependency_images = {}
+            self._cluster._prebuilt_dependency_images.update(self._prebuilt_images)
+
+        # Call the original submitter
+        return self._submitter(*args, **kwargs)
+
+
 class Cluster:
     """Represents a connection to a Slurm cluster for job submission and management.
 
@@ -298,8 +429,78 @@ class Cluster:
         if job_base_dir is not None:
             backend_only_kwargs["job_base_dir"] = job_base_dir
 
+        self._backend_kwargs = dict(backend_only_kwargs)
         self.backend = create_backend(backend_type, **backend_only_kwargs)
         self._job_pollers: Dict[str, _JobStatusPoller] = {}
+
+    def _render_workflow_slurmfile(self, env_name: str) -> str:
+        """Render a minimal Slurmfile for nested workflow execution.
+
+        This is used as a fallback when the Cluster was created without a Slurmfile
+        (e.g. via `Cluster.from_args()`), but workflow jobs still need to recreate a
+        Cluster instance on the runner side.
+        """
+        env_name = env_name or "default"
+        backend_config = dict(self._backend_kwargs)
+        job_base_dir = backend_config.pop("job_base_dir", None)
+        if job_base_dir is None:
+            job_base_dir = getattr(self.backend, "job_base_dir", None) or "~/slurm_jobs"
+
+        lines: list[str] = []
+        lines.append(f"[{env_name}.cluster]")
+        lines.append(f'backend = "{self.backend_type}"')
+        lines.append(f'job_base_dir = "{job_base_dir}"')
+        lines.append("")
+
+        if self.backend_type == "ssh":
+            lines.append(f"[{env_name}.cluster.backend_config]")
+            for key in sorted(backend_config.keys()):
+                value = backend_config[key]
+                if value is None:
+                    continue
+                if isinstance(value, bool):
+                    rendered = "true" if value else "false"
+                elif isinstance(value, (int, float)):
+                    rendered = str(value)
+                else:
+                    rendered = str(value).replace('"', '\\"')
+                    rendered = f'"{rendered}"'
+                lines.append(f"{key} = {rendered}")
+            lines.append("")
+
+        from .decorators import _parse_packaging_config
+
+        packaging_config = _parse_packaging_config(self.default_packaging or "auto", {})
+        packaging_config = packaging_config or {}
+        packaging_config.update(self.default_packaging_kwargs)
+        if packaging_config:
+            lines.append(f"[{env_name}.packaging]")
+            for key, value in sorted(packaging_config.items()):
+                if value is None:
+                    continue
+                if isinstance(value, bool):
+                    rendered = "true" if value else "false"
+                elif isinstance(value, (int, float)):
+                    rendered = str(value)
+                else:
+                    rendered = str(value).replace('"', '\\"')
+                    rendered = f'"{rendered}"'
+                lines.append(f"{key} = {rendered}")
+            lines.append("")
+
+        submit_defaults: dict[str, Any] = {}
+        if self.default_account:
+            submit_defaults["account"] = self.default_account
+        if self.default_partition:
+            submit_defaults["partition"] = self.default_partition
+        if submit_defaults:
+            lines.append(f"[{env_name}.submit]")
+            for key, value in sorted(submit_defaults.items()):
+                rendered = str(value).replace('"', '\\"')
+                lines.append(f'{key} = "{rendered}"')
+            lines.append("")
+
+        return "\n".join(lines).rstrip() + "\n"
 
     @classmethod
     def from_env(
@@ -581,6 +782,12 @@ class Cluster:
             "--hostname", help="Hostname of the SLURM cluster (for SSH backend)"
         )
         parser.add_argument(
+            "--port",
+            type=int,
+            default=22,
+            help="SSH port for the SLURM cluster (default: 22)",
+        )
+        parser.add_argument(
             "--banner-timeout",
             type=int,
             default=30,
@@ -590,6 +797,10 @@ class Cluster:
             "--username",
             default=os.getenv("USER"),
             help="Username for SSH connection (default: $USER)",
+        )
+        parser.add_argument(
+            "--password",
+            help="Password for SSH connection (if key-based auth is not used)",
         )
         parser.add_argument(
             "--backend",
@@ -620,6 +831,12 @@ class Cluster:
             "--packaging-platform",
             default="linux/amd64",
             help="Container platform for building images (default: linux/amd64)",
+        )
+        parser.add_argument(
+            "--packaging-tls-verify",
+            default=True,
+            type=lambda x: str(x).lower() in {"1", "true", "yes"},
+            help="Whether to verify TLS when pushing/pulling containers (default: true)",
         )
 
     @classmethod
@@ -660,8 +877,12 @@ class Cluster:
             kwargs["backend_type"] = args.backend
         if hasattr(args, "hostname") and args.hostname:
             kwargs["hostname"] = args.hostname
+        if hasattr(args, "port") and args.port:
+            kwargs["port"] = args.port
         if hasattr(args, "username") and args.username:
             kwargs["username"] = args.username
+        if hasattr(args, "password") and args.password:
+            kwargs["password"] = args.password
         if hasattr(args, "job_base_dir") and args.job_base_dir:
             kwargs["job_base_dir"] = args.job_base_dir
 
@@ -672,6 +893,8 @@ class Cluster:
             kwargs["default_packaging_registry"] = args.packaging_registry
         if hasattr(args, "packaging_platform") and args.packaging_platform:
             kwargs["default_packaging_platform"] = args.packaging_platform
+        if hasattr(args, "packaging_tls_verify"):
+            kwargs["default_packaging_tls_verify"] = args.packaging_tls_verify
         if hasattr(args, "account") and args.account:
             kwargs["default_account"] = args.account
         if hasattr(args, "partition") and args.partition:
@@ -706,14 +929,37 @@ class Cluster:
 
         effective_packaging_config: Optional[Dict[str, Any]] = packaging_config
 
+        # Check if there's a pre-built image for this task (takes priority over all other packaging)
+        prebuilt_images = getattr(self, "_prebuilt_dependency_images", None)
+        if prebuilt_images:
+            func = task_func.func
+            task_name = f"{func.__module__}.{func.__qualname__}"
+            logger.debug(
+                f"Checking pre-built images for {task_name}. Available: {list(prebuilt_images.keys())}"
+            )
+            if task_name in prebuilt_images:
+                prebuilt_image = prebuilt_images[task_name]
+                logger.info(f"Using pre-built image for {task_name}: {prebuilt_image}")
+                effective_packaging_config = {
+                    "type": "container",
+                    "image": prebuilt_image,
+                    "push": False,
+                }
+            else:
+                logger.debug(f"No pre-built image found for {task_name}")
+
         # Use provided packaging_config, else task's packaging, else cluster defaults
         if effective_packaging_config is None:
             # Check if task has packaging configuration
             task_packaging = task_func.packaging
-            # Skip task packaging if it's "auto" to allow cluster defaults to take precedence
-            # This allows workflows to override child task packaging with "inherit"
+            # Skip task packaging if it's "auto" or "inherit" to allow cluster defaults to take precedence
+            # This allows workflows to override child task packaging:
+            # - "auto": use whatever the cluster/workflow default is
+            # - "inherit": for container workflows, reuse parent's container image
+            #              for wheel workflows, use inherit strategy with parent_job_dir
             if task_packaging and task_packaging.get("type") not in (
                 "auto",
+                "inherit",
                 None,
             ):
                 effective_packaging_config = task_packaging
@@ -1204,155 +1450,90 @@ class Cluster:
                 slurmfile_path,
                 os.path.exists(slurmfile_path) if slurmfile_path else False,
             )
-            if slurmfile_path and os.path.exists(slurmfile_path):
-                try:
-                    with open(slurmfile_path, "r") as f:
+
+            env_name = getattr(self, "env_name", None) or "default"
+            try:
+                if slurmfile_path and os.path.exists(slurmfile_path):
+                    with open(slurmfile_path, "r", encoding="utf-8") as f:
                         slurmfile_content = f.read()
+                else:
+                    slurmfile_content = self._render_workflow_slurmfile(env_name)
 
-                    # Modify Slurmfile for workflow execution inside cluster
-                    # Replace external hostname/port with internal cluster hostname and standard SSH port
-                    import re
+                # Determine the hostname to use inside the cluster.
+                try:
+                    result = self.backend.execute_command("hostname")
+                    internal_hostname = result.strip() or "localhost"
+                except Exception:
+                    internal_hostname = "localhost"
 
-                    # Get environment name to modify the correct section
-                    env_name = getattr(self, "env_name", "default")
+                section_header = f"[{env_name}.cluster.backend_config]"
+                lines = slurmfile_content.splitlines()
+                new_lines: List[str] = []
+                in_section = False
+                hostname_set = False
+                port_set = False
 
-                    # Determine the hostname to use inside the cluster
-                    # Query the actual cluster to get its hostname
-                    try:
-                        result = self.backend.execute_command("hostname")
-                        internal_hostname = result.strip()
-                        if not internal_hostname:
-                            internal_hostname = "localhost"
-                    except:
-                        internal_hostname = "localhost"
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped.startswith("[") and stripped.endswith("]"):
+                        if in_section:
+                            if not hostname_set:
+                                new_lines.append(f'hostname = "{internal_hostname}"')
+                            if not port_set:
+                                new_lines.append("port = 22")
+                        in_section = stripped == section_header
+                        hostname_set = False
+                        port_set = False
+                        new_lines.append(line)
+                        continue
 
-                    # Create a workflow-specific Slurmfile with internal SSH config
-                    modified_content = slurmfile_content
-
-                    # Replace hostname value for SSH backend
-                    modified_content = re.sub(
-                        r'(hostname\s*=\s*)"[^"]*"',
-                        f'\\1"{internal_hostname}"',
-                        modified_content,
-                    )
-
-                    # Replace port with standard SSH port 22
-                    modified_content = re.sub(
-                        r"(\bport\s*=\s*)\d+", r"\g<1>22", modified_content
-                    )
-
-                    # Remove password authentication, use key-based
-                    modified_content = re.sub(
-                        r'password\s*=\s*"[^"]*"\s*\n', "", modified_content
-                    )
-
-                    # Enable key-based authentication
-                    modified_content = re.sub(
-                        r"look_for_keys\s*=\s*false",
-                        "look_for_keys = true",
-                        modified_content,
-                    )
-
-                    # Stage SSH keys inside the workflow job directory for nested submissions
-                    ssh_dir = os.path.join(target_job_dir, ".ssh")
-                    private_key_path = os.path.join(ssh_dir, "id_rsa")
-                    public_key_path = os.path.join(ssh_dir, "id_rsa.pub")
-                    try:
-                        copy_commands = [
-                            f"mkdir -p {shlex.quote(ssh_dir)}",
-                            f"cp ~/.ssh/id_rsa {shlex.quote(private_key_path)}",
-                            f"cp ~/.ssh/id_rsa.pub {shlex.quote(public_key_path)}",
-                            f"chmod 600 {shlex.quote(private_key_path)}",
-                            f"chmod 644 {shlex.quote(public_key_path)}",
-                        ]
-                        self.backend.execute_command(" && ".join(copy_commands))
-                        logger.debug(
-                            "[%s] Staged SSH keys for workflow job in %s",
-                            pre_submission_id,
-                            ssh_dir,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "[%s] Failed to stage SSH keys for workflow job: %s",
-                            pre_submission_id,
-                            exc,
-                        )
-
-                    # Ensure backend config references the staged private key
-                    section_header = f"[{env_name}.cluster.backend_config]"
-                    key_field_name = "key_filename"
-                    lines = modified_content.splitlines()
-                    new_lines: List[str] = []
-                    in_section = False
-                    key_filename_set = False
-
-                    for line in lines:
-                        stripped = line.strip()
-                        if stripped.startswith("[") and stripped.endswith("]"):
-                            if in_section and not key_filename_set:
-                                new_lines.append(
-                                    f'{key_field_name} = "{private_key_path}"'
-                                )
-                            in_section = stripped == section_header
-                            key_filename_set = False
-                            new_lines.append(line)
+                    if in_section:
+                        if stripped.startswith("hostname"):
+                            new_lines.append(f'hostname = "{internal_hostname}"')
+                            hostname_set = True
+                            continue
+                        if stripped.startswith("port"):
+                            new_lines.append("port = 22")
+                            port_set = True
                             continue
 
-                        if in_section:
-                            if stripped.startswith("private_key"):
-                                # Drop legacy private_key entries in favor of key_filename
-                                continue
-                            if stripped.startswith(key_field_name):
-                                new_lines.append(
-                                    f'{key_field_name} = "{private_key_path}"'
-                                )
-                                key_filename_set = True
-                                continue
+                    new_lines.append(line)
 
-                        new_lines.append(line)
+                if in_section:
+                    if not hostname_set:
+                        new_lines.append(f'hostname = "{internal_hostname}"')
+                    if not port_set:
+                        new_lines.append("port = 22")
 
-                    if in_section and not key_filename_set:
-                        new_lines.append(f'{key_field_name} = "{private_key_path}"')
+                newline_suffix = "\n" if slurmfile_content.endswith("\n") else ""
+                modified_content = "\n".join(new_lines) + newline_suffix
 
-                    if lines:
-                        newline_suffix = "\n" if modified_content.endswith("\n") else ""
-                        modified_content = "\n".join(new_lines) + newline_suffix
-                    else:
-                        modified_content = "\n".join(new_lines)
-
-                    logger.debug(
-                        "[%s] Modified Slurmfile for workflow: hostname=%s, port=22, key-based auth",
-                        pre_submission_id,
-                        internal_hostname,
-                    )
-
-                    remote_slurmfile_path = os.path.join(
-                        target_job_dir, "Slurmfile.toml"
-                    )
-                    if hasattr(self.backend, "_upload_string_to_file"):
-                        self.backend._upload_string_to_file(
-                            modified_content, remote_slurmfile_path
-                        )
-                        logger.debug(
-                            "[%s] Uploaded modified Slurmfile to %s",
-                            pre_submission_id,
-                            remote_slurmfile_path,
-                        )
-                    else:
-                        logger.warning(
-                            "[%s] Backend does not have _upload_string_to_file method",
-                            pre_submission_id,
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "[%s] Failed to upload Slurmfile: %s",
-                        pre_submission_id,
-                        exc,
-                    )
-            else:
                 logger.debug(
-                    "[%s] Skipping Slurmfile upload: path missing or doesn't exist",
+                    "[%s] Prepared Slurmfile for workflow: hostname=%s, port=22",
                     pre_submission_id,
+                    internal_hostname,
+                )
+
+                remote_slurmfile_path = os.path.join(target_job_dir, "Slurmfile.toml")
+                if hasattr(self.backend, "_upload_string_to_file"):
+                    self.backend._upload_string_to_file(
+                        modified_content, remote_slurmfile_path
+                    )
+                    logger.debug(
+                        "[%s] Uploaded workflow Slurmfile to %s",
+                        pre_submission_id,
+                        remote_slurmfile_path,
+                    )
+                else:
+                    logger.warning(
+                        "[%s] Backend does not have _upload_string_to_file method",
+                        pre_submission_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Failed to upload workflow Slurmfile: %s",
+                    pre_submission_id,
+                    exc,
                 )
 
     def _finalize_job_submission(
@@ -1407,7 +1588,7 @@ class Cluster:
         packaging_config: Optional[Dict[str, Any]] = None,
         after: Optional[Union[Job, List[Job]]] = None,
         **sbatch_options,
-    ) -> Callable[..., Job]:
+    ) -> Union[Callable[..., Job], SubmittableWorkflow]:
         """Prepare a task for submission to the cluster.
 
         This method implements a two-phase submission pattern: it returns a callable
@@ -1488,7 +1669,6 @@ class Cluster:
             You can store it and use it multiple times to submit related jobs with the
             same resource configuration but different runtime arguments.
         """
-        from .rendering import render_job_script
 
         func_to_render: Callable
         task_defaults: Dict[str, Any] = {}
@@ -1590,6 +1770,26 @@ class Cluster:
                 pre_submission_id,
                 target_job_dir,
                 effective_sbatch_options,
+            )
+
+        # For workflows, return SubmittableWorkflow to enable with_dependencies()
+        is_workflow = (
+            getattr(task_func, "_is_workflow", False)
+            or getattr(task_func, "is_workflow", False)
+            or (
+                hasattr(task_func, "sbatch_options")
+                and task_func.sbatch_options.get("is_workflow", False)
+            )
+        )
+        if is_workflow:
+            # Get container dependencies from the task (set via .with_dependencies())
+            container_deps = getattr(task_func, "_container_dependencies", [])
+            return SubmittableWorkflow(
+                cluster=self,
+                submitter=submitter,
+                task_func=task_func,
+                packaging_config=packaging_config,
+                container_dependencies=container_deps,
             )
 
         return submitter
