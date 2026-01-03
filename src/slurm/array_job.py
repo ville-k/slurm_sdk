@@ -19,7 +19,7 @@ class ArrayJob(Generic[T]):
     submissions. All tasks in the array share a single directory.
 
     **Eager Execution**: Array jobs submit immediately when created. For
-    dependencies, use the reversed fluent API: task.after(deps).map(items)
+    dependencies, specify them before mapping: task.after(deps).map(items)
 
     Directory structure:
         {task_name}/{timestamp}_{id}/
@@ -374,6 +374,3 @@ class ArrayJob(Generic[T]):
                 return False
 
         return True
-
-
-__all__ = ["ArrayJob"]

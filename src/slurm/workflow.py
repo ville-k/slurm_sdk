@@ -182,6 +182,3 @@ class WorkflowContext:
 
         with open(result_file, "rb") as f:
             return pickle.load(f)
-
-
-__all__ = ["WorkflowContext"]

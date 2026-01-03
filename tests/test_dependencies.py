@@ -5,7 +5,11 @@ from pathlib import Path
 
 from slurm.cluster import Cluster
 from slurm.decorators import task
-from slurm.context import set_active_context, reset_active_context, clear_active_context
+from slurm.context import (
+    _set_active_context,
+    _reset_active_context,
+    _clear_active_context,
+)
 from slurm.job import Job
 
 # Allow importing test helpers
@@ -51,10 +55,10 @@ def task_c(result_b: int) -> int:
 
 def test_job_passed_as_argument_creates_dependency(tmp_path):
     """Test that passing Job as argument creates automatic dependency."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create pipeline with automatic dependencies
@@ -66,12 +70,12 @@ def test_job_passed_as_argument_creates_dependency(tmp_path):
         # Dependencies should be tracked (implementation may vary)
         # The key is that when job_b is submitted, it should wait for job_a
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_multiple_job_dependencies(tmp_path):
     """Test task depending on multiple jobs."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def merge_task(a: int, b: int, c: int) -> int:
@@ -79,7 +83,7 @@ def test_multiple_job_dependencies(tmp_path):
         return a + b + c
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create multiple independent jobs
@@ -92,12 +96,12 @@ def test_multiple_job_dependencies(tmp_path):
 
         assert isinstance(merge_job, Job)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_job_in_kwargs_creates_dependency(tmp_path):
     """Test that Job passed in kwargs also creates dependency."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def task_with_kwarg(x: int, result=None) -> int:
@@ -107,7 +111,7 @@ def test_job_in_kwargs_creates_dependency(tmp_path):
         return x
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         job1 = task_a(5)
@@ -115,15 +119,15 @@ def test_job_in_kwargs_creates_dependency(tmp_path):
 
         assert isinstance(job2, Job)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_nested_job_dependencies(tmp_path):
     """Test chaining multiple jobs in sequence."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create dependency chain: a -> b -> c
@@ -140,15 +144,15 @@ def test_nested_job_dependencies(tmp_path):
         # job_c should depend on job_b
         # When submitted, they should execute in order
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_parallel_jobs_no_dependencies(tmp_path):
     """Test that parallel jobs don't create dependencies."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create parallel jobs (no Job arguments)
@@ -163,7 +167,7 @@ def test_parallel_jobs_no_dependencies(tmp_path):
 
         # These should be able to run in parallel
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_explicit_after_dependency(tmp_path):
@@ -174,7 +178,7 @@ def test_explicit_after_dependency(tmp_path):
     This test documents the expected future behavior when lazy submission
     is implemented (Phase 1 from design doc).
     """
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def independent_task(x: int) -> int:
@@ -182,7 +186,7 @@ def test_explicit_after_dependency(tmp_path):
         return x
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         job1 = task_a(1)
@@ -196,7 +200,7 @@ def test_explicit_after_dependency(tmp_path):
 
         # job3 = independent_task(10).after(job1, job2)  # Would work with lazy submission
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_mixed_automatic_and_explicit_dependencies(tmp_path):
@@ -206,7 +210,7 @@ def test_mixed_automatic_and_explicit_dependencies(tmp_path):
     so explicit .after() dependencies are not supported yet.
     This test verifies automatic dependency tracking via Job arguments.
     """
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def final_task(result: int, extra: int) -> int:
@@ -214,7 +218,7 @@ def test_mixed_automatic_and_explicit_dependencies(tmp_path):
         return result + extra
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create some jobs
@@ -228,16 +232,15 @@ def test_mixed_automatic_and_explicit_dependencies(tmp_path):
         assert isinstance(final_job, Job)
         # Automatic dependency tracking is supported in current implementation
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_job_result_placeholder_serialization(tmp_path):
     """Test that Jobs are converted to result placeholders for serialization."""
-    clear_active_context()
-
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         job1 = task_a(5)
@@ -247,7 +250,7 @@ def test_job_result_placeholder_serialization(tmp_path):
         assert isinstance(job1, Job)
         assert hasattr(job1, "id")  # Will be set after submission
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_dependency_detection_in_nested_structures(tmp_path):
@@ -258,7 +261,7 @@ def test_dependency_detection_in_nested_structures(tmp_path):
     with lazy submission (Phase 1) when Jobs are converted to placeholders
     before serialization.
     """
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def list_task(items: list) -> int:
@@ -271,7 +274,7 @@ def test_dependency_detection_in_nested_structures(tmp_path):
         return data.get("value", 0)
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         job1 = task_a(1)
@@ -286,4 +289,4 @@ def test_dependency_detection_in_nested_structures(tmp_path):
         assert isinstance(job1, Job)
         assert isinstance(job2, Job)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)

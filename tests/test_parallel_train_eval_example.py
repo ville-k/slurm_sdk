@@ -3,7 +3,11 @@ import sys
 from pathlib import Path
 
 from slurm.cluster import Cluster
-from slurm.context import clear_active_context, reset_active_context, set_active_context
+from slurm.context import (
+    _clear_active_context,
+    _reset_active_context,
+    _set_active_context,
+)
 from slurm.workflow import WorkflowContext
 
 from slurm.examples.parallel_train_eval.workflow import parallel_train_eval_workflow
@@ -32,7 +36,7 @@ def create_mock_cluster(tmp_path: Path) -> Cluster:
 
 def run_workflow(tmp_path: Path, epochs: int, epoch_steps: int, cap: int) -> Path:
     """Run the workflow in a local/dry-run context and return the state path."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
     workflow_dir = tmp_path / "workflow"
@@ -47,7 +51,7 @@ def run_workflow(tmp_path: Path, epochs: int, epoch_steps: int, cap: int) -> Pat
         local_mode=False,
     )
 
-    token = set_active_context(ctx)
+    token = _set_active_context(ctx)
     try:
         state_path = parallel_train_eval_workflow.unwrapped(
             epochs=epochs,
@@ -58,7 +62,7 @@ def run_workflow(tmp_path: Path, epochs: int, epoch_steps: int, cap: int) -> Pat
             ctx=ctx,
         )
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
     state_path = Path(state_path)
     assert state_path.parent == shared_dir
@@ -109,4 +113,6 @@ def test_parallel_train_eval_workflow_artifacts(tmp_path: Path) -> None:
         assert next_state["epoch_started_order"] is not None
         assert prev_state["eval_submitted_order"] < next_state["epoch_started_order"]
         if prev_state["eval_completed_order"] is not None:
-            assert next_state["epoch_started_order"] < prev_state["eval_completed_order"]
+            assert (
+                next_state["epoch_started_order"] < prev_state["eval_completed_order"]
+            )

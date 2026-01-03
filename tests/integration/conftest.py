@@ -271,7 +271,7 @@ def _wait_for_port(host: str, port: int, timeout: int = 30) -> bool:
     return False
 
 
-COMPOSE_FILE = Path(__file__).parent / "docker-compose.yml"
+COMPOSE_FILE = Path(__file__).parent.parent.parent / "containers" / "docker-compose.yml"
 
 
 def _compose_cmd() -> list[str] | None:
@@ -370,7 +370,7 @@ def _assert_port_available(host: str, port: int, description: str) -> None:
     except OSError:
         pytest.fail(
             f"Port {port} is already in use ({description}). "
-            "Stop the conflicting service or change the port mappings in tests/integration/docker-compose.yml."
+            "Stop the conflicting service or change the port mappings in containers/docker-compose.yml."
         )
     finally:
         sock.close()

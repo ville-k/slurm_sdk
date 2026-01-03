@@ -1,4 +1,12 @@
-"""Utilities for loading and resolving project Slurmfile configuration."""
+"""Utilities for loading and resolving project Slurmfile configuration.
+
+Note: This module is an internal/private API. The Slurmfile configuration
+mechanism is considered implementation detail and may be removed or changed
+in future releases. It is not part of the public API and should not be
+imported directly by users.
+
+See slurmfile_remaining_usage.md for documentation of Slurmfile usage.
+"""
 
 from __future__ import annotations
 
@@ -264,14 +272,3 @@ def _split_target(target: str) -> Tuple[str, str]:
             f"Invalid callback target '{target}'. Expected 'module:Class'."
         )
     return module_name, attr_name
-
-
-__all__ = [
-    "DEFAULT_SLURMFILE_NAMES",
-    "SLURM_ENV_VAR",
-    "SLURMFILE_ENV_VAR",
-    "SlurmfileEnvironment",
-    "discover_slurmfile",
-    "load_environment",
-    "resolve_slurmfile_path",
-]

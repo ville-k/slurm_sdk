@@ -36,14 +36,9 @@ def evaluate_epoch(epoch: int, checkpoint_path: str, workdir: str) -> Dict[str, 
         "loss": round(1.0 / (1 + epoch + 1), 4),
     }
 
-    metrics_path = (
-        Path(workdir).expanduser() / "metrics" / f"epoch_{epoch:03d}.json"
-    )
+    metrics_path = Path(workdir).expanduser() / "metrics" / f"epoch_{epoch:03d}.json"
     write_json(metrics_path, metrics_payload)
 
     logger.info("Epoch %s eval metrics written to %s", epoch, metrics_path)
 
     return {"metrics_path": str(metrics_path)}
-
-
-__all__ = ["evaluate_epoch"]

@@ -1,11 +1,14 @@
-"""
-Task and workflow definitions for container packaging integration testing.
+"""Container packaging integration test tasks and workflows.
 
-These tasks are defined with basic @task decorators. Container packaging
-configuration is applied via cluster defaults in the integration tests.
+This module contains task and workflow definitions used by container
+packaging integration tests. Container packaging configuration is applied
+via cluster defaults in the integration tests.
 
-This module is included in the slurm package wheel so it can be imported
-when workflows run on the remote cluster.
+It is included in the slurm package wheel so tasks and workflows can be
+imported when running remotely on Slurm clusters.
+
+Note: This is NOT a user-facing example. It exists here (rather than in
+tests/) because it must be importable on remote clusters.
 """
 
 from slurm.decorators import task, workflow

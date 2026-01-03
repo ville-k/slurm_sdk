@@ -56,7 +56,11 @@ def train_epoch_segment(
     write_json(checkpoint_path, checkpoint_payload)
 
     logger.info(
-        "Epoch %s train job %s completed steps %s-%s", epoch, job_index, start_step, end_step
+        "Epoch %s train job %s completed steps %s-%s",
+        epoch,
+        job_index,
+        start_step,
+        end_step,
     )
     logger.info("Checkpoint written to %s", checkpoint_path)
 
@@ -65,6 +69,3 @@ def train_epoch_segment(
         "steps_completed": end_step,
         "checkpoint_path": str(checkpoint_path),
     }
-
-
-__all__ = ["train_epoch_segment"]

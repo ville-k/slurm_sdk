@@ -18,11 +18,6 @@ from .task import SlurmTask
 from .runtime import JobContext
 from .workflow import WorkflowContext
 from .array_job import ArrayJob
-from .context import (
-    get_active_context,
-    set_active_context,
-    reset_active_context,
-)
 from .callbacks import (
     BaseCallback,
     LoggerCallback,
@@ -49,10 +44,6 @@ __all__ = [
     "SlurmTask",
     "JobContext",
     "WorkflowContext",
-    # Context management
-    "get_active_context",
-    "set_active_context",
-    "reset_active_context",
     # Callbacks
     "BaseCallback",
     "LoggerCallback",

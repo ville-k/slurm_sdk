@@ -1,7 +1,12 @@
-"""Context management for submitless execution.
+"""Context management for cluster and workflow execution.
 
 This module provides context tracking using Python's contextvars for
-async-safe, thread-safe execution context management.
+async-safe, thread-safe execution context management. It enables tasks
+and workflows to automatically detect the active cluster or workflow
+context when called.
+
+Note: This is an internal module. The APIs are prefixed with underscore
+to indicate they are not part of the public API.
 """
 
 import contextvars
@@ -19,7 +24,7 @@ _cluster_context: contextvars.ContextVar[
 ] = contextvars.ContextVar("cluster_context", default=None)
 
 
-def get_active_context() -> Optional[Union["Cluster", "WorkflowContext"]]:
+def _get_active_context() -> Optional[Union["Cluster", "WorkflowContext"]]:
     """Get the currently active cluster or workflow context.
 
     Works correctly with:
@@ -34,7 +39,7 @@ def get_active_context() -> Optional[Union["Cluster", "WorkflowContext"]]:
     return _cluster_context.get()
 
 
-def set_active_context(
+def _set_active_context(
     context: Optional[Union["Cluster", "WorkflowContext"]],
 ) -> contextvars.Token:
     """Set the active context and return a token for resetting.
@@ -43,32 +48,24 @@ def set_active_context(
         context: The Cluster or WorkflowContext to set as active.
 
     Returns:
-        A token that can be used with reset_active_context() to restore
+        A token that can be used with _reset_active_context() to restore
         the previous context state.
     """
     return _cluster_context.set(context)
 
 
-def reset_active_context(token: contextvars.Token) -> None:
+def _reset_active_context(token: contextvars.Token) -> None:
     """Reset the context to its previous state using a token.
 
     Args:
-        token: The token returned from set_active_context().
+        token: The token returned from _set_active_context().
     """
     _cluster_context.reset(token)
 
 
-def clear_active_context() -> None:
+def _clear_active_context() -> None:
     """Clear the active context completely (set to None).
 
     This is primarily useful for testing to ensure a clean state.
     """
     _cluster_context.set(None)
-
-
-__all__ = [
-    "get_active_context",
-    "set_active_context",
-    "reset_active_context",
-    "clear_active_context",
-]

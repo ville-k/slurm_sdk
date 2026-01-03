@@ -1,4 +1,4 @@
-"""Unit tests for submitless execution (task calling returns Jobs)."""
+"""Unit tests for context-based task execution (task calling returns Jobs)."""
 
 import sys
 import pytest
@@ -6,7 +6,11 @@ from pathlib import Path
 
 from slurm.cluster import Cluster
 from slurm.decorators import task
-from slurm.context import set_active_context, reset_active_context, clear_active_context
+from slurm.context import (
+    _set_active_context,
+    _reset_active_context,
+    _clear_active_context,
+)
 from slurm.workflow import WorkflowContext
 from slurm.job import Job
 
@@ -53,7 +57,7 @@ def task_with_kwargs(x: int, y: int = 10) -> int:
 
 def test_task_outside_context_raises():
     """Test that calling task outside context raises RuntimeError."""
-    clear_active_context()
+    _clear_active_context()
 
     with pytest.raises(RuntimeError) as exc_info:
         simple_task(5)
@@ -65,10 +69,10 @@ def test_task_outside_context_raises():
 
 def test_task_with_cluster_context_returns_job(tmp_path):
     """Test that calling task within cluster context returns Job."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Call task - should return Job (immediately submitted in current implementation)
@@ -77,12 +81,12 @@ def test_task_with_cluster_context_returns_job(tmp_path):
         # Current implementation submits immediately, so job has an ID
         assert hasattr(result, "id")
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_task_unwrapped_works_without_context():
     """Test that .unwrapped allows local execution without context."""
-    clear_active_context()
+    _clear_active_context()
 
     # Call unwrapped - should execute immediately
     result = simple_task.unwrapped(5)
@@ -91,10 +95,10 @@ def test_task_unwrapped_works_without_context():
 
 def test_task_with_multiple_args(tmp_path):
     """Test task with multiple positional arguments."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         job = task_with_args(3, 4)
@@ -102,15 +106,15 @@ def test_task_with_multiple_args(tmp_path):
         assert job.args == (3, 4)
         assert job.kwargs == {}
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_task_with_kwargs(tmp_path):
     """Test task with keyword arguments."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # With default kwargs
@@ -125,12 +129,12 @@ def test_task_with_kwargs(tmp_path):
         assert job2.args == (5,)
         assert job2.kwargs == {"y": 20}
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_task_with_workflow_context(tmp_path):
     """Test that task works within workflow context."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
     workflow_ctx = WorkflowContext(
@@ -141,7 +145,7 @@ def test_task_with_workflow_context(tmp_path):
         local_mode=False,
     )
 
-    token = set_active_context(workflow_ctx)
+    token = _set_active_context(workflow_ctx)
 
     try:
         # Call task - should use cluster from workflow context
@@ -149,15 +153,15 @@ def test_task_with_workflow_context(tmp_path):
         assert isinstance(job, Job)
         assert job.cluster is cluster
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_task_with_options_override(tmp_path):
     """Test .with_options() for runtime parameter override."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create task with overridden options
@@ -175,15 +179,15 @@ def test_task_with_options_override(tmp_path):
         job2 = simple_task(5)
         assert isinstance(job2, Job)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_multiple_tasks_in_sequence(tmp_path):
     """Test calling multiple tasks in sequence."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Call multiple tasks
@@ -201,12 +205,12 @@ def test_multiple_tasks_in_sequence(tmp_path):
         assert job2.cluster is cluster
         assert job3.cluster is cluster
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_cluster_context_manager(tmp_path):
     """Test using Cluster as context manager for submitless execution."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
 
@@ -214,12 +218,12 @@ def test_cluster_context_manager(tmp_path):
     cluster._context_token = None
 
     def __enter__(self):
-        self._context_token = set_active_context(self)
+        self._context_token = _set_active_context(self)
         return self
 
     def __exit__(self, *args):
         if self._context_token:
-            reset_active_context(self._context_token)
+            _reset_active_context(self._context_token)
         return False
 
     cluster.__enter__ = __enter__.__get__(cluster, Cluster)
@@ -255,6 +259,6 @@ def test_task_callable_protocol():
 
 def get_active_context():
     """Helper to get active context for testing."""
-    from slurm.context import get_active_context as _get
+    from slurm.context import _get_active_context as _get
 
     return _get()

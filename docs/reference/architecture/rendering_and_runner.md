@@ -4,7 +4,7 @@ The renderer produces the sbatch script that configures the job environment, and
 
 ## Rendering (`slurm.rendering`)
 - Combines SBATCH directives, packaging setup commands, and runner invocation.
-- Exports cluster metadata such as the Slurmfile path and packaging config.
+- Exports cluster metadata such as packaging config for nested workflow execution.
 - Writes job artifacts into a per-job directory for logs and results.
 
 ## Runner (`slurm.runner`)

@@ -253,30 +253,30 @@ def ml_pipeline(dataset_name: str, ctx: WorkflowContext):
     data = data_job.get_result()
     print(f"Data loaded: {data}")
 
-    # # Step 2: Preprocess
-    # preprocessed_job = preprocess(data)
-    # preprocessed = preprocessed_job.get_result()
-    # print(f"Data preprocessed: {preprocessed}")
+    # Step 2: Preprocess
+    preprocessed_job = preprocess(data)
+    preprocessed = preprocessed_job.get_result()
+    print(f"Data preprocessed: {preprocessed}")
 
-    # # Step 3: Train models in parallel
-    # model1_job = train_model(preprocessed, "logistic_regression")
-    # model1 = model1_job.get_result()
-    # model2_job = train_model(preprocessed, "random_forest")
-    # model2 = model2_job.get_result()
+    # Step 3: Train models in parallel
+    model1_job = train_model(preprocessed, "logistic_regression")
+    model1 = model1_job.get_result()
+    model2_job = train_model(preprocessed, "random_forest")
+    model2 = model2_job.get_result()
 
-    # # Step 4: Evaluate models
-    # print(f"Models trained: {model1['model']}, {model2['model']}")
+    # Step 4: Evaluate models
+    print(f"Models trained: {model1['model']}, {model2['model']}")
 
-    # eval1_job = evaluate_model(model1)
-    # result1 = eval1_job.get_result()
-    # eval2_job = evaluate_model(model2)
-    # result2 = eval2_job.get_result()
+    eval1_job = evaluate_model(model1)
+    result1 = eval1_job.get_result()
+    eval2_job = evaluate_model(model2)
+    result2 = eval2_job.get_result()
 
-    print(f"Pipeline complete! Result: {data}", flush=True)
+    print(f"Pipeline complete! Results: {result1}, {result2}", flush=True)
     sys.stdout.flush()
     sys.stderr.flush()
 
-    return data
+    return {"model1": result1, "model2": result2}
 
 
 def main():

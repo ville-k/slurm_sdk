@@ -9,7 +9,7 @@ from slurm.cluster import Cluster
 from slurm.decorators import task, workflow
 from slurm.workflow import WorkflowContext
 from slurm.runtime import JobContext
-from slurm.context import clear_active_context
+from slurm.context import _clear_active_context
 
 # Allow importing test helpers
 HELPERS_DIR = Path(__file__).parent / "helpers"
@@ -109,7 +109,7 @@ def test_workflow_has_context_parameter():
 
 def test_workflow_outside_context_raises():
     """Test that calling workflow outside context raises."""
-    clear_active_context()
+    _clear_active_context()
 
     with pytest.raises(RuntimeError) as exc_info:
         simple_workflow(["file1.csv"])
@@ -121,7 +121,7 @@ def test_workflow_outside_context_raises():
 
 def test_workflow_unwrapped_works():
     """Test that workflow.unwrapped can be tested locally."""
-    clear_active_context()
+    _clear_active_context()
 
     # Create mock cluster and context
     cluster = object.__new__(Cluster)
@@ -143,7 +143,7 @@ def test_workflow_unwrapped_works():
 
 def test_workflow_creates_task_directories(tmp_path):
     """Test that workflow creates proper directory structure for tasks."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
 
@@ -193,9 +193,9 @@ def test_workflow_context_shared_directory(tmp_path):
 
 def test_nested_task_calls_within_workflow(tmp_path):
     """Test that tasks can be called within workflow context."""
-    clear_active_context()
+    _clear_active_context()
 
-    from slurm.context import set_active_context, reset_active_context
+    from slurm.context import _set_active_context, _reset_active_context
 
     cluster = create_mock_cluster(tmp_path)
 
@@ -211,7 +211,7 @@ def test_nested_task_calls_within_workflow(tmp_path):
     )
 
     # Set workflow context as active
-    token = set_active_context(workflow_ctx)
+    token = _set_active_context(workflow_ctx)
 
     try:
         # Tasks should be callable within workflow context
@@ -221,12 +221,12 @@ def test_nested_task_calls_within_workflow(tmp_path):
         assert isinstance(job, Job)
         assert job.cluster is cluster
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_workflow_with_explicit_dependencies(tmp_path):
     """Test workflow with explicit .after() dependencies."""
-    clear_active_context()
+    _clear_active_context()
 
     @workflow(time="01:00:00")
     def workflow_with_after(files: list[str], ctx: WorkflowContext) -> int:
@@ -312,7 +312,7 @@ def test_workflow_decorator_preserves_metadata():
 
 def test_workflow_with_conditional_logic(tmp_path):
     """Test workflow with conditional task execution."""
-    clear_active_context()
+    _clear_active_context()
 
     @workflow(time="01:00:00")
     def conditional_workflow(threshold: int, ctx: WorkflowContext) -> str:

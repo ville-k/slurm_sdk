@@ -1,4 +1,3 @@
-
 import pytest
 
 from slurm.errors import PackagingError

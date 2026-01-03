@@ -1,6 +1,11 @@
-"""
-Workflow tasks for integration testing.
-This module is included in the slurm package wheel.
+"""Integration test workflows.
+
+This module contains workflow definitions used by integration tests.
+It is included in the slurm package wheel so workflows can be imported when
+running remotely on Slurm clusters.
+
+Note: This is NOT a user-facing example. It exists here (rather than in
+tests/) because it must be importable on remote clusters.
 """
 
 from slurm import task

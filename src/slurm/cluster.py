@@ -1083,10 +1083,10 @@ class Cluster:
                 logger.debug(f"Failed to create job base directory: {e}")
 
         # Check if we're in a workflow context for nested structure
-        from .context import get_active_context
+        from .context import _get_active_context
         from .workflow import WorkflowContext
 
-        ctx = get_active_context()
+        ctx = _get_active_context()
         if isinstance(ctx, WorkflowContext):
             # Nested in workflow: {workflow_dir}/tasks/{task_name}/{timestamp}_{unique_id}/
             target_job_dir = os.path.join(
@@ -1358,10 +1358,10 @@ class Cluster:
         }
 
         # Check if we're in a workflow context (for parent_workflow tracking)
-        from .context import get_active_context
+        from .context import _get_active_context
         from .workflow import WorkflowContext
 
-        ctx = get_active_context()
+        ctx = _get_active_context()
         if isinstance(ctx, WorkflowContext):
             metadata["parent_workflow"] = ctx.workflow_job_id
 
@@ -1986,7 +1986,7 @@ class Cluster:
         return self.backend.get_cluster_info()
 
     def __enter__(self) -> "Cluster":
-        """Enter cluster context - enables submitless execution.
+        """Enter cluster context for task execution.
 
         When used as a context manager, tasks and workflows can be called
         directly without explicit .submit() calls. The context is tracked
@@ -2000,9 +2000,9 @@ class Cluster:
             ...     job = my_task("arg")  # Automatically submits
             ...     result = job.get_result()
         """
-        from .context import set_active_context
+        from .context import _set_active_context
 
-        self._context_token = set_active_context(self)
+        self._context_token = _set_active_context(self)
         return self
 
     def __exit__(self, *args) -> bool:
@@ -2015,10 +2015,10 @@ class Cluster:
         Returns:
             False to propagate any exception that occurred.
         """
-        from .context import reset_active_context
+        from .context import _reset_active_context
 
         if hasattr(self, "_context_token"):
-            reset_active_context(self._context_token)
+            _reset_active_context(self._context_token)
             delattr(self, "_context_token")
         return False
 

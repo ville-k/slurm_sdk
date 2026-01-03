@@ -5,7 +5,11 @@ from pathlib import Path
 
 from slurm.cluster import Cluster
 from slurm.decorators import task, workflow
-from slurm.context import set_active_context, reset_active_context, clear_active_context
+from slurm.context import (
+    _set_active_context,
+    _reset_active_context,
+    _clear_active_context,
+)
 from slurm.workflow import WorkflowContext
 
 # Allow importing test helpers
@@ -51,7 +55,7 @@ def merge_task(output: str) -> str:
 
 def test_after_returns_new_task():
     """Test that .after() returns a new SlurmTaskWithDependencies instance."""
-    clear_active_context()
+    _clear_active_context()
 
     # Call .after() should return a SlurmTaskWithDependencies
     bound_task = task_a.after()
@@ -65,10 +69,10 @@ def test_after_returns_new_task():
 
 def test_after_with_single_job(tmp_path):
     """Test .after() with a single job dependency."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create first job
@@ -85,15 +89,15 @@ def test_after_with_single_job(tmp_path):
 
         # job2 should have dependency on job1 (checked in cluster.submit)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_after_with_multiple_jobs(tmp_path):
     """Test .after() with multiple job dependencies."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create two independent jobs
@@ -108,12 +112,12 @@ def test_after_with_multiple_jobs(tmp_path):
         assert isinstance(merge_job, Job)
         # Dependencies should be tracked
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_after_with_hybrid_dependencies(tmp_path):
     """Test .after() combines with automatic dependencies from args."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00")
     def process(data: int, extra: int) -> int:
@@ -121,7 +125,7 @@ def test_after_with_hybrid_dependencies(tmp_path):
         return data + extra
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create three jobs
@@ -138,15 +142,15 @@ def test_after_with_hybrid_dependencies(tmp_path):
         assert isinstance(result_job, Job)
         # Should have 3 total dependencies: job1, job3 (explicit) + job2 (automatic)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_after_composition_with_with_options(tmp_path):
     """Test that .after() composes with .with_options()."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         job1 = task_a(5)
@@ -158,15 +162,15 @@ def test_after_composition_with_with_options(tmp_path):
 
         assert isinstance(job2, Job)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_after_composition_with_map(tmp_path):
     """Test that .after() composes with .map() for array jobs."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         prep_job = task_a(1)
@@ -179,7 +183,7 @@ def test_after_composition_with_map(tmp_path):
         assert isinstance(array_job, ArrayJob)
         # Each task in the array should depend on prep_job
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_after_preserves_task_attributes():
@@ -194,10 +198,10 @@ def test_after_preserves_task_attributes():
 
 def test_after_is_stateless(tmp_path):
     """Test that .after() doesn't modify the original task (stateless)."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         job1 = task_a(1)
@@ -212,12 +216,12 @@ def test_after_is_stateless(tmp_path):
         assert len(bound_task._pending_dependencies) == 1
         assert bound_task._pending_dependencies[0] is job1
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_after_chaining():
     """Test that .after() can be chained multiple times."""
-    clear_active_context()
+    _clear_active_context()
 
     # Create a chain of .after() calls
     bound1 = task_a.after()
@@ -233,7 +237,7 @@ def test_after_chaining():
 
 def test_after_with_workflow_context(tmp_path):
     """Test .after() works correctly in workflow context."""
-    clear_active_context()
+    _clear_active_context()
 
     @workflow(time="00:10:00")
     def test_workflow(ctx: WorkflowContext) -> str:
@@ -248,7 +252,7 @@ def test_after_with_workflow_context(tmp_path):
         return merge_job
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         workflow_job = test_workflow()
@@ -257,7 +261,7 @@ def test_after_with_workflow_context(tmp_path):
 
         assert isinstance(workflow_job, Job)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_after_raises_on_non_job_argument():
@@ -299,10 +303,10 @@ def test_after_preserves_packaging():
 
 def test_after_multiple_dependencies_accumulated(tmp_path):
     """Test that multiple .after() calls accumulate dependencies."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         job1 = task_a(1)
@@ -326,7 +330,7 @@ def test_after_multiple_dependencies_accumulated(tmp_path):
 
         assert isinstance(final_job, Job)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_after_with_unwrapped():
@@ -342,12 +346,12 @@ def test_after_with_unwrapped():
     assert result == 6  # task_a adds 1
 
 
-def test_after_pattern_fluent_api(tmp_path):
-    """Test the full fluent API pattern: task.after().with_options().map()."""
-    clear_active_context()
+def test_after_pattern_with_map(tmp_path):
+    """Test the full method chain: task.after().with_options().map()."""
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         prep_job = task_a(1)
@@ -360,4 +364,4 @@ def test_after_pattern_fluent_api(tmp_path):
         assert isinstance(array_job, ArrayJob)
         assert len(array_job) == 3
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)

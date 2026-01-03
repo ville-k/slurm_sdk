@@ -2,7 +2,7 @@
 
 This example shows:
 - Map-reduce pattern with array jobs
-- Eager execution with reversed fluent API (task.after(prep).map(items))
+- Eager execution with dependencies: task.after(prep).map(items)
 - Container packaging for reproducible execution
 - Cluster-level packaging defaults to avoid repetition
 - Processing data in parallel and aggregating results
@@ -182,8 +182,7 @@ def main() -> None:
         print(f"✓ Created {len(chunks)} chunks\\n")
 
         # MAP: Process chunks in parallel using array job
-        # NOTE: Using reversed fluent API for eager execution
-        # Deps BEFORE .map() for proper dependency ordering
+        # NOTE: Dependencies are specified before .map() for proper ordering
         print(f"[2/3] Mapping: Processing {len(chunks)} chunks in parallel...")
         print("    Pattern: map_process_chunk.after(prep_job).map(chunks)")
 

@@ -5,7 +5,11 @@ from pathlib import Path
 
 from slurm.cluster import Cluster
 from slurm.decorators import task, workflow
-from slurm.context import set_active_context, reset_active_context, clear_active_context
+from slurm.context import (
+    _set_active_context,
+    _reset_active_context,
+    _clear_active_context,
+)
 from slurm.workflow import WorkflowContext
 
 # Allow importing test helpers
@@ -51,7 +55,7 @@ def test_task_decorator_returns_job_type():
 
 def test_task_returns_job_at_runtime(tmp_path):
     """Test that calling @task decorated function returns Job[T]."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def compute(x: int) -> int:
@@ -59,7 +63,7 @@ def test_task_returns_job_at_runtime(tmp_path):
         return x * 2
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Call task - should return Job
@@ -78,7 +82,7 @@ def test_task_returns_job_at_runtime(tmp_path):
         # At runtime, we can verify the result type matches
         # (Note: We can't actually call get_result in this test without a real backend)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_workflow_decorator_returns_job_type():
@@ -99,7 +103,7 @@ def test_workflow_decorator_returns_job_type():
 
 def test_workflow_returns_job_at_runtime(tmp_path):
     """Test that calling @workflow returns Job[T]."""
-    clear_active_context()
+    _clear_active_context()
 
     @workflow(time="01:00:00")
     def simple_workflow(x: int, ctx: WorkflowContext) -> str:
@@ -107,7 +111,7 @@ def test_workflow_returns_job_at_runtime(tmp_path):
         return f"workflow_{x}"
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Call workflow - should return Job
@@ -120,7 +124,7 @@ def test_workflow_returns_job_at_runtime(tmp_path):
 
         # Type checker would know: job: Job[str]
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_job_generic_type_parameter():
@@ -149,7 +153,7 @@ def test_array_job_generic_type():
 
 def test_map_returns_array_job_generic(tmp_path):
     """Test that .map() returns ArrayJob[T] with correct type."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00")
     def process(x: int) -> str:
@@ -157,7 +161,7 @@ def test_map_returns_array_job_generic(tmp_path):
         return str(x)
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Call .map() - should return ArrayJob[str]
@@ -172,7 +176,7 @@ def test_map_returns_array_job_generic(tmp_path):
         assert hasattr(array_job, "get_results")
         assert len(array_job) == 3
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_task_without_args_type():
@@ -219,7 +223,7 @@ def test_complex_return_type():
 
 def test_get_result_type_matches_task_return(tmp_path):
     """Test that Job.get_result() returns the correct type T."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00")
     def typed_task(x: int) -> list[str]:
@@ -227,7 +231,7 @@ def test_get_result_type_matches_task_return(tmp_path):
         return [str(x), str(x * 2)]
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         job = typed_task(5)
@@ -248,4 +252,4 @@ def test_get_result_type_matches_task_return(tmp_path):
         # Return annotation should be T (TypeVar)
         assert sig.return_annotation is not inspect.Signature.empty
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)

@@ -59,8 +59,8 @@ def normalize_sbatch_options(options: Dict[str, Any] | None) -> Dict[str, Any]:
 class SlurmTaskWithDependencies:
     """Wrapper for a SlurmTask with pre-specified dependencies.
 
-    This class is returned by SlurmTask.after() and enables the reversed
-    fluent API for array jobs with eager execution. It supports both:
+    This class is returned by SlurmTask.after() and enables dependency
+    specification before task submission. It supports both:
     - Calling directly: task.after(deps)(args) -> Job
     - Mapping: task.after(deps).map(items) -> ArrayJob
 
@@ -134,11 +134,11 @@ class SlurmTaskWithDependencies:
         Returns:
             Job object for the submitted task.
         """
-        from .context import get_active_context
+        from .context import _get_active_context
         from .job import Job
 
         # Check if we're in a cluster or workflow context
-        ctx = get_active_context()
+        ctx = _get_active_context()
         if ctx is None:
             raise RuntimeError(
                 f"@task decorated function '{self.task.func.__name__}' must be "
@@ -217,10 +217,10 @@ class SlurmTaskWithDependencies:
             >>> array_job = process.after(prep).map(items)
             >>> results = array_job.get_results()
         """
-        from .context import get_active_context
+        from .context import _get_active_context
         from .array_job import ArrayJob
 
-        ctx = get_active_context()
+        ctx = _get_active_context()
         if ctx is None:
             raise RuntimeError(
                 "Task.map() must be called within a Cluster context or @workflow."
@@ -405,11 +405,11 @@ class SlurmTask:
             RuntimeError: If called outside of a cluster or workflow context.
                 Use `.unwrapped(*args, **kwargs)` for local execution.
         """
-        from .context import get_active_context
+        from .context import _get_active_context
         from .job import Job
 
         # Check if we're in a cluster or workflow context
-        ctx = get_active_context()
+        ctx = _get_active_context()
         if ctx is None:
             raise RuntimeError(
                 f"@task decorated function '{self.func.__name__}' must be "
@@ -502,9 +502,9 @@ class SlurmTask:
     def map(self, items: List[Any], max_concurrent: Optional[int] = None):
         """Map task over items, creating an array job.
 
-        This method provides a fluent API for submitting array jobs. Each item
-        in the list becomes one task in the array. Items can be single values,
-        tuples (unpacked as positional args), or dicts (unpacked as kwargs).
+        This method creates an array job where each item in the list becomes
+        one task in the array. Items can be single values, tuples (unpacked
+        as positional args), or dicts (unpacked as keyword args).
 
         Args:
             items: List of items to process. Each item can be:
@@ -564,10 +564,10 @@ class SlurmTask:
                 >>> items = [(job, config) for job, config in zip(data_jobs, configs)]
                 >>> results = train.map(items).get_results()
         """
-        from .context import get_active_context
+        from .context import _get_active_context
         from .array_job import ArrayJob
 
-        ctx = get_active_context()
+        ctx = _get_active_context()
         if ctx is None:
             raise RuntimeError(
                 "Task.map() must be called within a Cluster context or @workflow.\n"

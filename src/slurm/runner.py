@@ -817,10 +817,10 @@ def main():
 
             # Activate the cluster context for the workflow execution
             # This allows tasks called within the workflow to submit jobs
-            from slurm.context import set_active_context
+            from slurm.context import _set_active_context
 
             logger.debug("Activating cluster context for workflow execution")
-            workflow_context_token = set_active_context(workflow_context)
+            workflow_context_token = _set_active_context(workflow_context)
 
             # Emit workflow begin event after context is set up
             logger.debug("Calling on_workflow_begin callbacks...")
@@ -878,9 +878,9 @@ def main():
 
             # Deactivate cluster context if it was activated for a workflow
             if workflow_context_token is not None:
-                from slurm.context import reset_active_context
+                from slurm.context import _reset_active_context
 
-                reset_active_context(workflow_context_token)
+                _reset_active_context(workflow_context_token)
                 logger.debug("Deactivated cluster context after workflow execution")
 
                 # Explicitly close SSH connections to prevent hanging

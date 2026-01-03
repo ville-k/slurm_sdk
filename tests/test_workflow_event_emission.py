@@ -43,14 +43,14 @@ class WorkflowEventRecorder(BaseCallback):
 def test_workflow_lifecycle_events_in_runner(tmp_path):
     """Test that workflow begin/end events are emitted when workflow runs."""
 
-    # Create a simple workflow that we can execute in submitless mode
+    # Create a simple workflow that we can execute in local mode
     @task(time="00:01:00")
     def simple_task(x: int) -> int:
         return x + 1
 
     @workflow(time="00:05:00")
     def simple_workflow(ctx: WorkflowContext, x: int) -> int:
-        # In submitless mode, this just calls the unwrapped function
+        # In local mode, this just calls the unwrapped function
         job = simple_task.unwrapped(x)
         return job
 

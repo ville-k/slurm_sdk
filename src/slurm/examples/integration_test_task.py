@@ -1,6 +1,11 @@
-"""
-Simple task for integration testing.
-This module is included in the slurm package wheel.
+"""Integration test tasks.
+
+This module contains simple task definitions used by integration tests.
+It is included in the slurm package wheel so tasks can be imported when
+running remotely on Slurm clusters.
+
+Note: This is NOT a user-facing example. It exists here (rather than in
+tests/) because it must be importable on remote clusters.
 """
 
 from pathlib import Path

@@ -6,7 +6,11 @@ from pathlib import Path
 
 from slurm.cluster import Cluster
 from slurm.decorators import task
-from slurm.context import set_active_context, reset_active_context, clear_active_context
+from slurm.context import (
+    _set_active_context,
+    _reset_active_context,
+    _clear_active_context,
+)
 from slurm.array_job import ArrayJob
 
 # Allow importing test helpers
@@ -52,7 +56,7 @@ def process_with_kwargs(x: int, y: int = 10) -> int:
 
 def test_map_without_context_raises():
     """Test that .map() outside context raises RuntimeError."""
-    clear_active_context()
+    _clear_active_context()
 
     items = ["a", "b", "c"]
 
@@ -64,10 +68,10 @@ def test_map_without_context_raises():
 
 def test_map_with_single_values(tmp_path):
     """Test .map() with single values (passed as first arg)."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = ["a", "b", "c"]
@@ -77,15 +81,15 @@ def test_map_with_single_values(tmp_path):
         assert len(array_job) == 3
         assert array_job.task is process_item
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_map_with_tuples(tmp_path):
     """Test .map() with tuples (unpacked as positional args)."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = [(1, 2), (3, 4), (5, 6)]
@@ -94,15 +98,15 @@ def test_map_with_tuples(tmp_path):
         assert isinstance(array_job, ArrayJob)
         assert len(array_job) == 3
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_map_with_dicts(tmp_path):
     """Test .map() with dicts (unpacked as keyword args)."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = [
@@ -115,15 +119,15 @@ def test_map_with_dicts(tmp_path):
         assert isinstance(array_job, ArrayJob)
         assert len(array_job) == 3
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_length(tmp_path):
     """Test ArrayJob __len__ method."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = list(range(100))
@@ -131,15 +135,15 @@ def test_array_job_length(tmp_path):
 
         assert len(array_job) == 100
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_getitem(tmp_path):
     """Test ArrayJob __getitem__ method."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = ["a", "b", "c"]
@@ -157,15 +161,15 @@ def test_array_job_getitem(tmp_path):
         assert isinstance(job1, Job)
         assert isinstance(job2, Job)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_after_dependency(tmp_path):
     """Test array job with dependencies using reversed API."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create prerequisite job
@@ -178,15 +182,15 @@ def test_array_job_after_dependency(tmp_path):
         assert isinstance(array_job, ArrayJob)
         # Should have dependency tracked
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_with_max_concurrent(tmp_path):
     """Test ArrayJob with max_concurrent parameter."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = list(range(100))
@@ -195,7 +199,7 @@ def test_array_job_with_max_concurrent(tmp_path):
         assert isinstance(array_job, ArrayJob)
         assert len(array_job) == 100
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_get_results_dir(tmp_path):
@@ -204,10 +208,10 @@ def test_array_job_get_results_dir(tmp_path):
     NOTE: ArrayJobs submit eagerly in __init__, so the array is
     already submitted when get_results_dir() is called.
     """
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = ["a", "b", "c"]
@@ -224,7 +228,7 @@ def test_array_job_get_results_dir(tmp_path):
         assert results_dir is not None
         assert "results" in str(results_dir)
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_directory_structure(tmp_path):
@@ -232,10 +236,10 @@ def test_array_job_directory_structure(tmp_path):
 
     NOTE: ArrayJobs submit eagerly, so array_dir is set immediately.
     """
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = ["a", "b", "c"]
@@ -250,15 +254,15 @@ def test_array_job_directory_structure(tmp_path):
         assert len(array_job) == 3
         assert array_job._submitted
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_map_empty_list(tmp_path):
     """Test .map() with empty list."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = []
@@ -267,15 +271,15 @@ def test_map_empty_list(tmp_path):
         assert isinstance(array_job, ArrayJob)
         assert len(array_job) == 0
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_map_preserves_order(tmp_path):
     """Test that .map() preserves item order."""
-    clear_active_context()
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         items = ["first", "second", "third", "fourth"]
@@ -285,26 +289,26 @@ def test_map_preserves_order(tmp_path):
         assert hasattr(array_job, "items")
         assert array_job.items == items
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
-def test_array_job_fluent_api(tmp_path):
-    """Test fluent API with array jobs (reversed for eager execution)."""
-    clear_active_context()
+def test_array_job_with_dependencies(tmp_path):
+    """Test array jobs with dependencies specified before mapping."""
+    _clear_active_context()
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         prep_job = process_item("setup")
 
-        # Fluent API (reversed): dependencies before map for eager execution
+        # Dependencies before map for eager execution
         array_job = process_item.after(prep_job).map(["a", "b", "c"])
 
         assert isinstance(array_job, ArrayJob)
         assert array_job._submitted  # Eagerly submitted
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_with_job_dependencies(tmp_path):
@@ -314,14 +318,14 @@ def test_array_job_with_job_dependencies(tmp_path):
     instances and resolved at runtime. Jobs found in items are also automatically
     added as dependencies.
     """
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def merge_task(a: int, b: str) -> str:
         return f"{a}_{b}"
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create some jobs
@@ -346,19 +350,19 @@ def test_array_job_with_job_dependencies(tmp_path):
         assert job2 in array_job.dependencies
         assert job3 in array_job.dependencies
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_with_jobs_in_dicts(tmp_path):
     """Test array items as dicts containing Job objects."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def analyze_task(data: int, param: int) -> str:
         return f"data={data}, param={param}"
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create data jobs
@@ -379,19 +383,19 @@ def test_array_job_with_jobs_in_dicts(tmp_path):
         assert job1 in array_job.dependencies
         assert job2 in array_job.dependencies
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_with_nested_jobs(tmp_path):
     """Test deeply nested Job objects in array items."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def nested_task(config: dict) -> str:
         return f"model={config['model']}, data={config['data']}"
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create nested jobs
@@ -411,19 +415,19 @@ def test_array_job_with_nested_jobs(tmp_path):
         assert model_job in array_job.dependencies
         assert data_job in array_job.dependencies
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_mixed_items_with_jobs(tmp_path):
     """Test array with mix of regular items and items containing Jobs."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def process_mixed(value: str) -> str:
         return f"processed_{value}"
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create one job
@@ -444,19 +448,19 @@ def test_array_job_mixed_items_with_jobs(tmp_path):
         assert job1 in array_job.dependencies
         assert len(array_job.dependencies) == 1
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_single_job_item(tmp_path):
     """Test array with single Job as item (simplest case)."""
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def postprocess(result: str) -> str:
         return f"post_{result}"
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create jobs
@@ -476,7 +480,7 @@ def test_array_job_single_job_item(tmp_path):
         assert job2 in array_job.dependencies
         assert job3 in array_job.dependencies
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
 
 
 def test_array_job_as_dependency(tmp_path):
@@ -485,14 +489,14 @@ def test_array_job_as_dependency(tmp_path):
     This verifies that ArrayJob objects are automatically expanded to their
     constituent Jobs when used as dependencies, preventing pickle errors.
     """
-    clear_active_context()
+    _clear_active_context()
 
     @task(time="00:01:00", mem="1G")
     def aggregate(results: list) -> str:
         return f"aggregated_{len(results)}"
 
     cluster = create_mock_cluster(tmp_path)
-    token = set_active_context(cluster)
+    token = _set_active_context(cluster)
 
     try:
         # Create an array job
@@ -518,4 +522,4 @@ def test_array_job_as_dependency(tmp_path):
         assert final_job.id is not None
 
     finally:
-        reset_active_context(token)
+        _reset_active_context(token)
