@@ -20,10 +20,12 @@ flowchart LR
 ```
 
 ## Prerequisites
+
 - A Slurm cluster reachable by the SDK (SSH or local backend).
 - A Python environment with `slurm-sdk` installed.
 
 ## Concept: task vs workflow
+
 - **Task**: a single unit of work that runs as a Slurm job (e.g., a training
   segment or an eval pass). Tasks return values and can write artifacts.
 - **Workflow**: an orchestrator that runs on Slurm and submits tasks, controls
@@ -33,12 +35,14 @@ In this tutorial, training and evaluation are **tasks**, while the controller
 that sequences epochs and submits eval in parallel is a **workflow**.
 
 ## What you will build
+
 - A training task that runs a capped number of steps and writes a checkpoint.
 - An eval task that consumes a checkpoint and writes metrics.
 - A workflow that loops over epochs, submits multiple training jobs, and fires
   eval without blocking the next epoch.
 
 ## 1) Create a tiny state helper
+
 We will store simple JSON artifacts so you can inspect progress later.
 Create `src/slurm/examples/parallel_train_eval/state.py`:
 ```python
@@ -65,10 +69,12 @@ Why? In production you often need a durable handoff between jobs. JSON on a
 shared filesystem is the simplest reliable option.
 
 ## 2) Add a capped training task
+
 This task advances the epoch by at most `steps_per_job_cap` and writes the
 checkpoint with the cumulative step count.
 
 Create `src/slurm/examples/parallel_train_eval/train_task.py`:
+
 ```python
 from __future__ import annotations
 
@@ -123,9 +129,11 @@ What this teaches: a single Slurm job can move the training state forward and
 persist a checkpoint so the next job can continue.
 
 ## 3) Add the eval task
+
 Eval consumes the checkpoint and writes metrics without blocking training.
 
 Create `src/slurm/examples/parallel_train_eval/eval_task.py`:
+
 ```python
 from __future__ import annotations
 
@@ -166,14 +174,17 @@ def evaluate_epoch(epoch: int, checkpoint_path: str, workdir: str) -> Dict[str, 
 ```
 
 ## 4) Build the workflow
+
 The workflow owns the orchestration and uses its shared directory for all
 artifacts (`WorkflowContext.shared_dir`). The key behavior is:
+
 - Repeat train jobs until the epoch reaches `epoch_steps`.
 - Submit eval after each epoch, but do **not** wait for it before starting the
   next epoch.
 
 Create `src/slurm/examples/parallel_train_eval/workflow.py` and focus on this
 core loop:
+
 ```python
 from pathlib import Path
 from typing import Any, List, Optional
@@ -239,11 +250,13 @@ def parallel_train_eval_workflow(
 ```
 
 Why this matters for production pipelines:
+
 - The training state is advanced in small, resumable segments.
 - Eval is decoupled so training can keep moving even under scheduling pressure.
 - All artifacts are collected under a single workflow-run directory.
 
 ## 5) Run the workflow
+
 ```bash
 uv run python -m slurm.examples.parallel_train_eval.workflow \
   --hostname your-slurm-host \
@@ -255,6 +268,7 @@ uv run python -m slurm.examples.parallel_train_eval.workflow \
 ```
 
 Optional partition overrides:
+
 ```bash
 uv run python -m slurm.examples.parallel_train_eval.workflow \
   --hostname your-slurm-host \
@@ -269,11 +283,13 @@ uv run python -m slurm.examples.parallel_train_eval.workflow \
 ```
 
 ## 6) Inspect the artifacts
+
 The workflow writes to its shared directory (`WorkflowContext.shared_dir`). The
 final state path is printed in the workflow output. Use that path to inspect the
 files.
 
 Example commands:
+
 ```bash
 cat /path/from/output/state.json
 ls -la /path/from/output/checkpoints
@@ -283,6 +299,7 @@ cat /path/from/output/metrics/epoch_000.json
 ```
 
 ## What you learned
+
 - How to design a workflow that survives preemption by splitting epochs into
   multiple jobs.
 - How to launch evaluation in parallel without blocking training.
