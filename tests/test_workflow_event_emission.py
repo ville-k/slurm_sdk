@@ -1,7 +1,5 @@
 """Integration tests for workflow callback event emission (Phase 2)."""
 
-import sys
-from pathlib import Path
 from typing import List
 
 from slurm.callbacks.callbacks import (
@@ -11,11 +9,6 @@ from slurm.callbacks.callbacks import (
 )
 from slurm.decorators import task, workflow
 from slurm.workflow import WorkflowContext
-
-# Allow importing test helpers
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
 
 
 class WorkflowEventRecorder(BaseCallback):
@@ -89,8 +82,8 @@ def test_workflow_task_submission_events(tmp_path):
         job = child_task(x)
         return job.get_result()
 
-    # Set up callback recorder
-    recorder = WorkflowEventRecorder()
+    # Set up callback recorder (for future integration test expansion)
+    _recorder = WorkflowEventRecorder()
 
     # NOTE: Full integration test would require actual submission to backend.
     # This test verifies the infrastructure is in place.

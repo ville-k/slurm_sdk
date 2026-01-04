@@ -1,6 +1,5 @@
 """Integration tests for workflow orchestration with nested tasks."""
 
-import sys
 import pytest
 from pathlib import Path
 from typing import Optional
@@ -10,11 +9,6 @@ from slurm.decorators import task, workflow
 from slurm.workflow import WorkflowContext
 from slurm.runtime import JobContext
 from slurm.context import _clear_active_context
-
-# Allow importing test helpers
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
 from local_backend import LocalBackend  # type: ignore
 
 
@@ -127,7 +121,7 @@ def test_workflow_unwrapped_works():
     cluster = object.__new__(Cluster)
     cluster.job_base_dir = "/tmp/test"
 
-    workflow_ctx = WorkflowContext(
+    _workflow_ctx = WorkflowContext(  # Tests WorkflowContext instantiation
         cluster=cluster,
         workflow_job_id="test_123",
         workflow_job_dir=Path("/tmp/workflow"),
@@ -322,7 +316,7 @@ def test_workflow_with_conditional_logic(tmp_path):
 
         # Conditional execution
         if prep_result["rows"] > threshold:
-            process_job = process_data(prep_result)
+            _process_job = process_data(prep_result)  # Job submitted for effect
             return "processed"
         else:
             return "skipped"

@@ -1,6 +1,5 @@
 """Unit tests for automatic dependency tracking via Job passing."""
 
-import sys
 from pathlib import Path
 
 from slurm.cluster import Cluster
@@ -11,11 +10,6 @@ from slurm.context import (
     _clear_active_context,
 )
 from slurm.job import Job
-
-# Allow importing test helpers
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
 from local_backend import LocalBackend  # type: ignore
 
 
@@ -223,7 +217,7 @@ def test_mixed_automatic_and_explicit_dependencies(tmp_path):
     try:
         # Create some jobs
         prep_job = task_a(1)
-        data_job = task_a(2)
+        _data_job = task_a(2)  # Created to test parallel job creation
         model_job = task_b(prep_job, 3)  # Automatic dependency
 
         # Final job: automatic dependency on model_job via argument

@@ -1,6 +1,5 @@
 """Tests for BenchmarkCallback workflow features."""
 
-import sys
 from pathlib import Path
 
 from slurm.callbacks import (
@@ -9,18 +8,7 @@ from slurm.callbacks import (
     WorkflowTaskSubmitContext,
     CompletedContext,
 )
-
-# Allow importing example
-EXAMPLES_DIR = Path(__file__).parent.parent / "src" / "slurm" / "examples"
-if str(EXAMPLES_DIR) not in sys.path:
-    sys.path.insert(0, str(EXAMPLES_DIR))
-
-from workflow_graph_visualization import WorkflowGraphCallback
-
-# Allow importing test helpers
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
+from slurm.examples.workflow_graph_visualization import WorkflowGraphCallback
 
 
 def test_benchmark_callback_workflow_tracking():

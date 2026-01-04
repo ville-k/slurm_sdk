@@ -1,6 +1,5 @@
 """Tests for workflow-specific callback methods (Phase 1)."""
 
-import sys
 from pathlib import Path
 
 from slurm.callbacks.callbacks import (
@@ -9,11 +8,6 @@ from slurm.callbacks.callbacks import (
     WorkflowTaskSubmitContext,
     ExecutionLocus,
 )
-
-# Allow importing test helpers
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
 
 
 def test_workflow_callback_context_creation():

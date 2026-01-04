@@ -1,6 +1,5 @@
 import sys
 from textwrap import dedent
-from pathlib import Path
 
 from types import SimpleNamespace
 
@@ -17,11 +16,6 @@ from slurm.callbacks import (
 )
 from slurm.cluster import Cluster
 from slurm.decorators import task
-
-# Allow importing test helpers as a simple module
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
 from local_backend import LocalBackend  # type: ignore
 
 

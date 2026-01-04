@@ -1,6 +1,5 @@
 """Unit tests for context-based task execution (task calling returns Jobs)."""
 
-import sys
 import pytest
 from pathlib import Path
 
@@ -13,11 +12,6 @@ from slurm.context import (
 )
 from slurm.workflow import WorkflowContext
 from slurm.job import Job
-
-# Allow importing test helpers
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
 from local_backend import LocalBackend  # type: ignore
 
 

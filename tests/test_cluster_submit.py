@@ -1,15 +1,7 @@
-import sys
-from pathlib import Path
-
 from slurm.callbacks import BaseCallback
 from slurm.cluster import Cluster
 from slurm.decorators import task
 from slurm.packaging.base import PackagingStrategy
-
-# Allow importing test helpers as a simple module
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
 from local_backend import LocalBackend  # type: ignore
 
 

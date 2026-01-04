@@ -1,6 +1,5 @@
 """Unit tests for array jobs and .map() method."""
 
-import sys
 import pytest
 from pathlib import Path
 
@@ -12,11 +11,6 @@ from slurm.context import (
     _clear_active_context,
 )
 from slurm.array_job import ArrayJob
-
-# Allow importing test helpers
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
 from local_backend import LocalBackend  # type: ignore
 
 
