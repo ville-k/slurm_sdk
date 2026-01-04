@@ -116,7 +116,7 @@ docker compose -f containers/docker-compose.yml down -v
 
 Container packaging tests verify end-to-end container build, push, and execution via Pyxis/enroot.
 
-**One-time setup (host only):**
+**One-time setup (when running tests from host machine):**
 
 Add registry hostname to `/etc/hosts`:
 
@@ -124,7 +124,9 @@ Add registry hostname to `/etc/hosts`:
 echo '127.0.0.1 registry' | sudo tee -a /etc/hosts
 ```
 
-This is not needed inside the devcontainer (DNS resolution handles it).
+**Why is this needed?** When you push an image as `registry:5000/myimage`, both the host (pushing) and the Slurm container (pulling) must resolve `registry` to reach the same registry service. The `/etc/hosts` entry makes `registry` resolve to `localhost` on your machine, where docker-compose exposes the registry on port 5000.
+
+**Not needed inside devcontainer:** If you run tests from inside the devcontainer, Docker's internal DNS automatically resolves `registry` to the registry container. No `/etc/hosts` modification required.
 
 **Running the tests:**
 
@@ -196,7 +198,9 @@ uv run pytest --run-integration -v -m "not container_packaging"
 ### Registry Issues
 
 **"registry:5000" not found (host only)**
+- This only happens when running tests from your host machine, not inside devcontainer
 - Add to `/etc/hosts`: `echo '127.0.0.1 registry' | sudo tee -a /etc/hosts`
+- Alternatively, run tests inside the devcontainer where Docker DNS handles resolution
 
 **Push fails with connection refused**
 - Ensure registry is running: `docker compose -f containers/docker-compose.yml ps registry`

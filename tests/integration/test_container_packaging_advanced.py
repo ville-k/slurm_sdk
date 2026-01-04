@@ -16,7 +16,7 @@ from tests.integration import container_test_tasks
 @pytest.mark.integration_test
 def test_array_job_with_containers(
     slurm_pyxis_cluster,
-    local_registry,  # registry:5000 - requires /etc/hosts entry: "127.0.0.1 registry"
+    local_registry,  # registry:5000 (requires /etc/hosts on host, not in devcontainer)
     tmp_path,
 ):
     """Test array jobs using container packaging."""
@@ -56,7 +56,7 @@ ENV PYTHONPATH=/workspace:$PYTHONPATH
 @pytest.mark.integration_test
 def test_container_with_mounts(
     slurm_pyxis_cluster,
-    local_registry,  # registry:5000 - requires /etc/hosts entry: "127.0.0.1 registry"
+    local_registry,  # registry:5000 (requires /etc/hosts on host, not in devcontainer)
     tmp_path,
 ):
     """Test container with volume mounts."""
