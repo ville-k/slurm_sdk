@@ -25,6 +25,7 @@ class BackendBase(abc.ABC):
         pre_submission_id: str,
         account: Optional[str] = None,
         partition: Optional[str] = None,
+        array_spec: Optional[str] = None,
     ) -> str:
         """
         Submit a job script to the SLURM cluster.
@@ -35,9 +36,14 @@ class BackendBase(abc.ABC):
             pre_submission_id: Unique ID used for filenames/paths for this submission.
             account: Optional SLURM account to use.
             partition: Optional SLURM partition to use.
+            array_spec: Optional array specification for native SLURM arrays.
+                Format: "0-N" or "0-N%M" where M is max concurrent tasks.
+                Example: "0-99" or "0-99%10" (max 10 concurrent).
+                If provided, submits as native SLURM array job using --array flag.
 
         Returns:
-            str: The job ID of the submitted job.
+            str: The job ID of the submitted job. For array jobs, returns the
+                base job ID in SLURM array format (e.g., "12345_[0-99]").
 
         Raises:
             Exception: If the job submission fails.
@@ -99,5 +105,20 @@ class BackendBase(abc.ABC):
 
         Raises:
             Exception: If the cluster info query fails.
+        """
+        pass
+
+    @abc.abstractmethod
+    def is_remote(self) -> bool:
+        """
+        Return True if this backend requires remote file operations.
+
+        This is used to determine whether files need to be transferred
+        between local and remote systems (SSH backend) or can be accessed
+        directly (local backend).
+
+        Returns:
+            bool: True if backend is remote (requires file transfer),
+                  False if backend is local (direct file access).
         """
         pass

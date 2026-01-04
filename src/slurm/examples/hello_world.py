@@ -1,34 +1,38 @@
-import logging
-import argparse
-import os
-import socket
-import time
+"""Simple hello world example demonstrating basic slurm-sdk usage.
 
-from slurm.callbacks.callbacks import BenchmarkCallback, LoggerCallback
+This example shows:
+- Creating a cluster with argparse helpers
+- Using container packaging with a Dockerfile
+- Submitting a task and retrieving results
+"""
+
+import argparse
+import logging
+
+from slurm.callbacks.callbacks import LoggerCallback
 from slurm.cluster import Cluster
 from slurm.decorators import task
-from slurm.logging import configure_logging
+from slurm.job import Job
 
 
 @task(
-    name="hello_world",
-    partition="cpu",
     time="00:05:00",
     mem="1G",
     cpus_per_task=1,
 )
-def hello_world():
+def hello_world() -> str:
     """
     A simple hello world task.
 
     Returns:
         A greeting message
     """
+    import socket
+    import time
+
     hostname = socket.gethostname()
     current_time = time.strftime("%Y-%m-%d %H:%M:%S")
     message = f"Hello from {hostname} at {current_time}!"
-    print(message)
-
     return message
 
 
@@ -36,52 +40,36 @@ def main():
     """
     Main entry point for the example script.
     """
-    parser = argparse.ArgumentParser(description="Submit jobs to a SLURM cluster")
-    parser.add_argument("--hostname", required=True, help="Hostname for SSH backend")
-    parser.add_argument(
-        "--username",
-        default=os.environ.get("USER"),
-        help="Username for SSH backend. Defaults to current user's username.",
+    parser = argparse.ArgumentParser(
+        description="Submit a simple hello world job",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--account", help="SLURM account")
-    parser.add_argument("--partition", help="SLURM partition")
-    parser.add_argument(
-        "--banner-timeout",
-        type=int,
-        default=30,
-        help="Timeout for waiting for SSH banner (seconds)",
-    )
-    parser.add_argument("--loglevel", type=str, default="INFO", help="Logging level")
+
+    # Add standard cluster configuration arguments
+    Cluster.add_argparse_args(parser)
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO)
 
-    configure_logging(level=getattr(logging, args.loglevel.upper(), logging.INFO))
-    backend_kwargs = {}
-    backend_kwargs["hostname"] = args.hostname
-    backend_kwargs["username"] = args.username
-    backend_kwargs["banner_timeout"] = args.banner_timeout
-
-    cluster = Cluster(
-        backend_type="ssh",
-        callbacks=[
-            LoggerCallback(),
-            BenchmarkCallback(),
-        ],
-        **backend_kwargs,
+    cluster = Cluster.from_args(
+        args,
+        callbacks=[LoggerCallback()],
+        default_packaging="container",
+        default_packaging_dockerfile="src/slurm/examples/hello_world.Dockerfile",
     )
 
-    job = hello_world.submit(
-        cluster=cluster,
-        account=args.account,
-        partition=args.partition,
-        packaging={
-            "type": "wheel",
-            "python_version": "3.9",
-        },
-    )()
+    # Submit job (uses cluster defaults for packaging, account, partition)
+    job: Job[str] = cluster.submit(hello_world)()
 
-    job.wait()
-    result = job.get_result()
-    print(f"Result: {result}")
+    success = job.wait()
+    if success:
+        result: str = job.get_result()
+        print(f"Result: {result}")
+    else:
+        print("Job failed!")
+        print("Job std out:")
+        print(job.get_stdout())
+        print("Job std err:")
+        print(job.get_stderr())
 
 
 if __name__ == "__main__":

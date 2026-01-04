@@ -6,6 +6,7 @@ through various backends.
 from typing import Any, Dict
 from .base import BackendBase
 from .ssh import SSHCommandBackend
+from .local import LocalBackend
 
 
 def create_backend(backend_type: str, **kwargs: Any) -> BackendBase:
@@ -13,7 +14,7 @@ def create_backend(backend_type: str, **kwargs: Any) -> BackendBase:
     Create a SLURM API backend of the specified type.
 
     Args:
-        backend_type: The type of backend to create ("ssh").
+        backend_type: The type of backend to create ("ssh", "local").
         **kwargs: Additional arguments to pass to the backend constructor.
 
     Returns:
@@ -26,6 +27,10 @@ def create_backend(backend_type: str, **kwargs: Any) -> BackendBase:
         # Filter out None values to avoid passing None to the backend
         ssh_kwargs = {k: v for k, v in kwargs.items() if v is not None}
         return SSHCommandBackend(**ssh_kwargs)
+    elif backend_type == "local":
+        # Filter out None values to avoid passing None to the backend
+        local_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        return LocalBackend(**local_kwargs)
     else:
         raise ValueError(f"Unsupported backend type: {backend_type}")
 

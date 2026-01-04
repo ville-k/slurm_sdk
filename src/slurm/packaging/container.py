@@ -97,17 +97,29 @@ class ContainerPackagingStrategy(PackagingStrategy):
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(config)
+        # Track whether context was explicitly provided; default to "." for display
+        # without forcing builds when unset.
+        self._context_provided: bool = "context" in self.config
         self.runtime: Optional[str] = self.config.get("runtime")
         self.dockerfile: Optional[str] = self.config.get("dockerfile")
-        self.context: Optional[str] = self.config.get("context")
+        if self._context_provided:
+            self.context: Optional[str] = self.config.get("context")
+        else:
+            self.context = "."
         self.image: Optional[str] = self.config.get("image")
         self.image_name: Optional[str] = self.config.get("name")
-        self.tag: str = self.config.get("tag", "latest")
+        # Generate unique UUID-based tag if not provided for reproducibility
+        if "tag" in self.config:
+            self.tag: str = self.config["tag"]
+        else:
+            self.tag: str = f"build-{uuid.uuid4().hex[:12]}"
         self.registry: Optional[str] = self.config.get("registry")
-        self.platform: Optional[str] = self.config.get("platform")
+        self.platform: str = self.config.get("platform", "linux/amd64")
         self.build_args: Dict[str, Any] = self.config.get("build_args", {})
-        self.push: bool = bool(self.config.get("push", False))
+        self.push: bool = bool(self.config.get("push", True))
+        self.use_digest: bool = bool(self.config.get("use_digest", False))
         self.no_cache: bool = bool(self.config.get("no_cache", False))
+        self.tls_verify: bool = bool(self.config.get("tls_verify", True))
         self.python_executable: str = self.config.get("python_executable", "python")
         self.modules: List[str] = list(self._as_list(self.config.get("modules", [])))
         self.srun_args: List[str] = list(
@@ -131,14 +143,60 @@ class ContainerPackagingStrategy(PackagingStrategy):
     def prepare(
         self, task: Union["SlurmTask", Callable], cluster: "Cluster"
     ) -> Dict[str, Any]:
-        runtime = self._detect_runtime()
         console = getattr(cluster, "console", None)
+
+        # Check for RichLoggerCallback to determine verbosity
+        self._packaging_callback = None
+        self._verbose_packaging = True  # Default to verbose
+        callbacks = getattr(cluster, "callbacks", [])
+        if callbacks:
+            from ..callbacks import RichLoggerCallback
+
+            for callback in callbacks:
+                if isinstance(callback, RichLoggerCallback):
+                    self._packaging_callback = callback
+                    self._verbose_packaging = getattr(callback, "_verbose", True)
+                    break
+
+        if self.use_digest:
+            logger.debug(
+                "Using auto-generated tag %s (will resolve to digest)", self.tag
+            )
+        else:
+            logger.debug("Using auto-generated tag: %s", self.tag)
+
         image_ref = self._resolve_image_reference(task)
 
         built_image = False
         push_performed = False
 
         dockerfile_path, context_path = self._resolve_build_paths()
+
+        # Fast path: if we have a pre-built image and don't need to build/push,
+        # skip runtime detection entirely (for nested tasks inside containers)
+        needs_runtime = bool(
+            dockerfile_path or context_path or self.push or self.use_digest
+        )
+        if not needs_runtime and self.image:
+            # Pre-built image, no runtime needed
+            self._image_reference = self._convert_to_enroot_format(image_ref)
+            logger.debug(
+                "Using pre-built image reference (no runtime needed): %s",
+                self._image_reference,
+            )
+            self._runtime_cmd = None
+            prepare_result = {
+                "status": "success",
+                "image": image_ref,
+                "image_digest": self._image_reference,
+                "built": False,
+                "pushed": False,
+            }
+            self.last_prepare_result = prepare_result
+            return prepare_result
+
+        # Need runtime for build/push/pull operations
+        runtime = self._detect_runtime()
 
         if dockerfile_path or context_path:
             self._build_container_image(
@@ -153,6 +211,24 @@ class ContainerPackagingStrategy(PackagingStrategy):
             raise PackagingError(
                 "Container packaging requires either 'image' or 'dockerfile' in the configuration."
             )
+        else:
+            # Using pre-existing image
+            # Only pull if we need the digest for digest-based references
+            if self.use_digest:
+                try:
+                    pull_cmd = [runtime, "pull", image_ref]
+                    logger.debug(
+                        "Pulling pre-existing image to get digest: %s", image_ref
+                    )
+                    subprocess.run(
+                        pull_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    logger.warning("Failed to pull image %s: %s", image_ref, e.stderr)
+                    # Continue anyway - image might already be available locally
 
         if self.push:
             self._push_container_image(
@@ -160,12 +236,34 @@ class ContainerPackagingStrategy(PackagingStrategy):
             )
             push_performed = True
 
-        self._image_reference = image_ref
+        # Optionally resolve image digest for reproducibility
+        # Note: Some Pyxis/enroot versions may not properly support digest-based auth
+        if self.use_digest:
+            digest_ref = self._get_image_digest(runtime, image_ref)
+            if digest_ref:
+                self._image_reference = digest_ref
+                logger.debug("Using digest-based image reference: %s", digest_ref)
+            else:
+                # Fallback to tag-based reference if digest cannot be determined
+                self._image_reference = image_ref
+                logger.warning(
+                    "Could not resolve image digest, using tag-based reference: %s",
+                    image_ref,
+                )
+        else:
+            # Use tag-based reference (default for compatibility)
+            self._image_reference = image_ref
+            logger.debug("Using tag-based image reference: %s", image_ref)
+
+        # Convert to enroot format for Pyxis compatibility
+        self._image_reference = self._convert_to_enroot_format(self._image_reference)
+
         self._runtime_cmd = runtime
 
         prepare_result = {
             "status": "success",
             "image": image_ref,
+            "image_digest": self._image_reference,  # Digest-based reference used in job
             "built": built_image,
             "pushed": push_performed,
             "runtime": runtime,
@@ -195,6 +293,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
             "command -v srun >/dev/null 2>&1 || { echo 'ERROR: srun not found on PATH' >&2; exit 1; }",
             f"CONTAINER_IMAGE={shlex.quote(self._image_reference)}",
             "export CONTAINER_IMAGE",
+            f"echo 'Resolved container image reference: {shlex.quote(self._image_reference)}'",
         ]
 
         # Set PY_EXEC as a bash array if it contains multiple words, otherwise as a simple variable
@@ -245,7 +344,11 @@ class ContainerPackagingStrategy(PackagingStrategy):
             for spec in self._mount_specs
         ]
         if self.mount_job_dir and job_dir_expr:
-            mounts.append(f"{job_dir_expr}:{job_dir_expr}:rw")
+            # Mount the job base directory (parent of parent of job_dir) to allow
+            # the runner to find result files from dependent jobs when resolving
+            # JobResultPlaceholders. The job_dir structure is: {base}/{task}/{id}/
+            job_base_dir_expr = f"$(dirname $(dirname {job_dir_expr}))"
+            mounts.append(f"{job_base_dir_expr}:{job_base_dir_expr}:rw")
 
         srun_parts: List[str] = ["srun"]
         srun_parts.extend(self.srun_args)
@@ -267,7 +370,11 @@ class ContainerPackagingStrategy(PackagingStrategy):
         # must be set as a bash array: PY_EXEC=(uv run python)
         # This ensures proper word splitting when ${PY_EXEC[@]} is expanded.
         wrapped_command = f"{' '.join(srun_parts)} {command}"
-        logger.debug("Wrapped execution command for container: %s", wrapped_command)
+        logger.debug(
+            "Wrapped execution command for container (image: %s): %s",
+            self._image_reference,
+            wrapped_command,
+        )
         return wrapped_command
 
     @staticmethod
@@ -475,10 +582,37 @@ class ContainerPackagingStrategy(PackagingStrategy):
             return self.runtime
         for candidate in ("docker", "podman"):
             if shutil.which(candidate):
+                # Check if this is podman masquerading as docker
+                # (common on macOS with Podman Desktop which provides a docker shim)
+                try:
+                    result = subprocess.run(
+                        [candidate, "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0 and "podman" in result.stdout.lower():
+                        # Use podman directly if available, since we now know it's podman
+                        if shutil.which("podman"):
+                            logger.debug(
+                                "Detected container runtime: podman (via %s shim)",
+                                candidate,
+                            )
+                            return "podman"
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
                 logger.debug("Detected container runtime: %s", candidate)
                 return candidate
         raise PackagingError(
-            "Unable to find a container runtime. Set 'runtime' to the docker/podman binary."
+            "Container runtime not found.\n\n"
+            "The slurm-sdk needs Docker or Podman to build and run container images.\n"
+            "Neither 'docker' nor 'podman' was found in your PATH.\n\n"
+            "To fix this:\n"
+            "  1. Install Docker Desktop: https://www.docker.com/products/docker-desktop\n"
+            "  2. Or install Podman: https://podman.io/getting-started/installation\n"
+            "  3. Ensure the command is in your PATH (try: which docker)\n"
+            "  4. Or specify explicitly: packaging='container', packaging_runtime='/path/to/docker'\n\n"
+            "If you don't need container packaging, use: packaging='wheel' or packaging='none'"
         )
 
     def _resolve_project_root(self) -> pathlib.Path:
@@ -497,21 +631,58 @@ class ContainerPackagingStrategy(PackagingStrategy):
             if not dockerfile_path.is_absolute():
                 dockerfile_path = (project_root / dockerfile_path).resolve()
             if not dockerfile_path.exists():
-                raise PackagingError(f"Dockerfile not found at {dockerfile_path}")
+                raise PackagingError(
+                    f"Dockerfile not found.\n\n"
+                    f"Expected location: {dockerfile_path}\n"
+                    f"Specified path: {self.dockerfile}\n"
+                    f"Project root: {project_root}\n\n"
+                    "Common causes:\n"
+                    "  1. Dockerfile path is incorrect or misspelled\n"
+                    "  2. Dockerfile is in a different directory\n"
+                    "  3. Relative path is relative to wrong directory\n\n"
+                    "To fix:\n"
+                    "  1. Verify Dockerfile exists at the specified path\n"
+                    "  2. Use absolute path: packaging_dockerfile='/absolute/path/to/Dockerfile'\n"
+                    "  3. Or use path relative to project root\n"
+                    f"  4. Check working directory: {pathlib.Path.cwd()}"
+                )
 
-        if self.context:
-            context_path = pathlib.Path(self.context).expanduser()
+        context_value = self.context if self._context_provided else None
+
+        if context_value:
+            context_path = pathlib.Path(context_value).expanduser()
             if not context_path.is_absolute():
                 context_path = (project_root / context_path).resolve()
             if not context_path.exists():
-                raise PackagingError(f"Context directory not found: {context_path}")
+                raise PackagingError(
+                    f"Build context directory not found.\n\n"
+                    f"Expected location: {context_path}\n"
+                    f"Specified path: {context_value}\n"
+                    f"Project root: {project_root}\n\n"
+                    "The build context is the directory containing files needed for the Docker build.\n\n"
+                    "To fix:\n"
+                    "  1. Verify the context directory exists\n"
+                    "  2. Use absolute path: packaging_context='/absolute/path/to/context'\n"
+                    "  3. Or use path relative to project root\n"
+                    f"  4. Check working directory: {pathlib.Path.cwd()}"
+                )
             if not context_path.is_dir():
                 raise PackagingError(
-                    f"Context path must be a directory: {context_path}"
+                    f"Build context must be a directory.\n\n"
+                    f"Path: {context_path}\n"
+                    f"Type: {('file' if context_path.is_file() else 'unknown')}\n\n"
+                    "The build context directory contains your Dockerfile and application files.\n\n"
+                    "To fix:\n"
+                    "  1. Ensure the path points to a directory, not a file\n"
+                    "  2. Create the directory if it doesn't exist\n"
+                    "  3. Verify permissions allow reading the directory"
                 )
 
         if dockerfile_path and not context_path:
-            context_path = dockerfile_path.parent
+            # Default to project root when no explicit context is provided.
+            # This ensures build-time assets like pyproject.toml are available
+            # even if the Dockerfile lives outside the repository root.
+            context_path = project_root
 
         return dockerfile_path, context_path
 
@@ -537,6 +708,30 @@ class ContainerPackagingStrategy(PackagingStrategy):
             image_ref = f"{registry_prefix}/{image_ref.lstrip('/')}"
 
         logger.debug("Resolved container image reference: %s", image_ref)
+        return image_ref
+
+    def _convert_to_enroot_format(self, image_ref: str) -> str:
+        """Convert image reference to enroot format.
+
+        Enroot requires registry:port#path format instead of registry:port/path.
+
+        Args:
+            image_ref: Docker-style image reference (e.g., registry:5000/path/image:tag)
+
+        Returns:
+            Enroot-compatible image reference (e.g., registry:5000#path/image:tag)
+        """
+        match = re.match(r"^([^/]+:\d+)/(.*)", image_ref)
+        if match:
+            registry_with_port = match.group(1)
+            image_path = match.group(2)
+            converted = f"{registry_with_port}#{image_path}"
+            logger.info(
+                "Converted image reference to enroot format: %s → %s",
+                image_ref,
+                converted,
+            )
+            return converted
         return image_ref
 
     def _build_container_image(
@@ -576,7 +771,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
 
         cmd.append(str(context_path))
 
-        logger.info("Building container image with command: %s", " ".join(cmd))
+        logger.debug("Building container image with command: %s", " ".join(cmd))
 
         run_env = os.environ.copy()
         if env_overrides:
@@ -593,8 +788,18 @@ class ContainerPackagingStrategy(PackagingStrategy):
             )
 
     def _push_container_image(self, runtime: str, image_ref: str, console=None) -> None:
-        cmd = [runtime, "push", image_ref]
-        logger.info("Pushing container image with command: %s", " ".join(cmd))
+        cmd = [runtime, "push"]
+
+        # Podman-specific flags (not supported by Docker)
+        if runtime == "podman":
+            if not self.tls_verify:
+                cmd.extend(["--tls-verify=false"])
+            # Use Docker v2 format for enroot compatibility (doesn't support OCI)
+            cmd.extend(["--format", "v2s2"])
+
+        cmd.append(image_ref)
+
+        logger.debug("Pushing container image with command: %s", " ".join(cmd))
         with progress_task(console, "Container push", total=None) as (
             progress,
             task_id,
@@ -606,6 +811,71 @@ class ContainerPackagingStrategy(PackagingStrategy):
                 task_id=task_id,
                 progress_mode="push",
             )
+
+    def _get_image_digest(self, runtime: str, image_ref: str) -> Optional[str]:
+        """Get the digest (SHA256) of an image after build/push.
+
+        Args:
+            runtime: Container runtime (docker/podman)
+            image_ref: Image reference (with tag)
+
+        Returns:
+            Image digest in format: registry/image@sha256:abc123...
+            Returns None if digest cannot be determined
+        """
+        try:
+            # Use inspect to get the repo digest
+            cmd = [
+                runtime,
+                "inspect",
+                "--format",
+                "{{index .RepoDigests 0}}",
+                image_ref,
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            digest_ref = result.stdout.strip()
+
+            # RepoDigests contain the full reference with digest
+            # Format: registry/image@sha256:abc123...
+            if digest_ref and "@sha256:" in digest_ref:
+                logger.info("Resolved image digest: %s", digest_ref)
+                return digest_ref
+
+            # If RepoDigests is empty (image not pushed yet), try to get local digest
+            cmd = [runtime, "inspect", "--format", "{{.Id}}", image_ref]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            local_id = result.stdout.strip()
+
+            if local_id and local_id.startswith("sha256:"):
+                # For local images, construct reference using the local ID
+                # Remove tag from image_ref and append digest
+                if ":" in image_ref:
+                    base_ref = image_ref.rsplit(":", 1)[0]
+                else:
+                    base_ref = image_ref
+                digest_ref = f"{base_ref}@{local_id}"
+                logger.info("Using local image digest: %s", digest_ref)
+                return digest_ref
+
+            logger.warning("Could not determine digest for image: %s", image_ref)
+            return None
+
+        except subprocess.CalledProcessError as e:
+            logger.warning("Failed to get image digest for %s: %s", image_ref, e.stderr)
+            return None
+        except Exception as e:
+            logger.warning("Error getting image digest: %s", e)
+            return None
 
     def _run_container_command(
         self,
@@ -645,7 +915,16 @@ class ContainerPackagingStrategy(PackagingStrategy):
                     if progress and hasattr(progress, "log"):
                         progress.log(line)
                     else:
-                        logger.info("[%s] %s", description, line)
+                        # Check if we should suppress verbose logging
+                        verbose_packaging = getattr(self, "_verbose_packaging", True)
+                        packaging_callback = getattr(self, "_packaging_callback", None)
+
+                        if not verbose_packaging and packaging_callback:
+                            # In non-verbose mode, send output to callback
+                            packaging_callback.update_packaging_output(line)
+                        else:
+                            # In verbose mode or no callback, use standard logging
+                            logger.info("[%s] %s", description, line)
 
             return_code = process.wait()
         finally:
@@ -663,7 +942,44 @@ class ContainerPackagingStrategy(PackagingStrategy):
                 return_code,
                 combined_output,
             )
-            raise PackagingError(f"Failed to {description} container image")
+
+            # Build helpful error message
+            error_msg = f"Container {description} failed.\n\n"
+            error_msg += f"Command: {' '.join(cmd)}\n"
+            error_msg += f"Exit code: {return_code}\n\n"
+            error_msg += f"Output (last 50 lines):\n{combined_output}\n\n"
+
+            if description == "build":
+                error_msg += (
+                    "Common causes:\n"
+                    "  1. Syntax error in Dockerfile\n"
+                    "  2. Base image not found or network issues\n"
+                    "  3. Build command failed (RUN, COPY, etc.)\n"
+                    "  4. Insufficient disk space or permissions\n\n"
+                    "To fix:\n"
+                    "  1. Check Dockerfile syntax and fix any errors\n"
+                    "  2. Verify base image exists: docker pull <base-image>\n"
+                    "  3. Try building manually to see full output:\n"
+                    f"     {' '.join(cmd)}\n"
+                    "  4. Check Docker daemon logs: docker system df\n"
+                    "  5. Ensure you have sufficient disk space"
+                )
+            elif description == "push":
+                error_msg += (
+                    "Common causes:\n"
+                    "  1. Not authenticated to registry (docker login required)\n"
+                    "  2. No permission to push to this repository\n"
+                    "  3. Network connectivity issues\n"
+                    "  4. Registry is unavailable or rate-limited\n\n"
+                    "To fix:\n"
+                    "  1. Login to registry: docker login <registry>\n"
+                    "  2. Verify you have push access to the repository\n"
+                    "  3. Check network connectivity\n"
+                    "  4. Try pushing manually to see full output:\n"
+                    f"     {' '.join(cmd)}"
+                )
+
+            raise PackagingError(error_msg)
 
     @staticmethod
     def _handle_build_progress(progress, task_id: int, line: str) -> bool:

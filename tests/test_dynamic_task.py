@@ -21,32 +21,37 @@ def test_task_as_function_creates_slurm_task():
     assert my_task.sbatch_options["mem"] == "2G"
     assert my_task.sbatch_options["job_name"] == "my_function"
 
-    # Verify the wrapped function works
-    assert my_task(5, 3) == 8
+    # Verify the unwrapped function works
+    assert my_task.unwrapped(5, 3) == 8
 
 
 def test_dynamic_task_with_container_file():
-    """Test dynamic task creation with container_file parameter."""
+    """Test dynamic task creation with packaging_dockerfile parameter (new API)."""
 
     def process_data(data: str) -> str:
         return data.upper()
 
-    # Create task with container_file
+    # Create task with packaging string and packaging_dockerfile kwarg
     container_task = task(
-        process_data, time="00:30:00", mem="4G", container_file="path/to/Dockerfile"
+        process_data,
+        time="00:30:00",
+        mem="4G",
+        packaging="container",
+        packaging_dockerfile="path/to/Dockerfile",
     )
 
     # Verify packaging config
     assert container_task.packaging is not None
     assert container_task.packaging["type"] == "container"
     assert container_task.packaging["dockerfile"] == "path/to/Dockerfile"
+    assert "image" not in container_task.packaging
 
     # Verify SBATCH options
     assert container_task.sbatch_options["time"] == "00:30:00"
     assert container_task.sbatch_options["mem"] == "4G"
 
-    # Verify function works
-    assert container_task("hello") == "HELLO"
+    # Verify unwrapped function works
+    assert container_task.unwrapped("hello") == "HELLO"
 
 
 def test_multiple_tasks_from_same_function():
@@ -72,9 +77,9 @@ def test_multiple_tasks_from_same_function():
     assert heavy_compute.sbatch_options["mem"] == "32G"
     assert heavy_compute.sbatch_options["job_name"] == "heavy"
 
-    # Both should execute the same function
-    assert quick_compute(5) == 25
-    assert heavy_compute(5) == 25
+    # Both should execute the same function (using unwrapped for local execution)
+    assert quick_compute.unwrapped(5) == 25
+    assert heavy_compute.unwrapped(5) == 25
 
 
 def test_task_function_equals_decorator():
@@ -103,9 +108,9 @@ def test_task_function_equals_decorator():
         == dynamic_func.sbatch_options["cpus_per_task"]
     )
 
-    # Both should execute correctly
-    assert decorated_func(10) == 20
-    assert dynamic_func(10) == 20
+    # Both should execute correctly (using unwrapped for local execution)
+    assert decorated_func.unwrapped(10) == 20
+    assert dynamic_func.unwrapped(10) == 20
 
 
 def test_dynamic_task_with_custom_job_name():
@@ -119,20 +124,23 @@ def test_dynamic_task_with_custom_job_name():
     assert custom_task.sbatch_options["job_name"] == "custom_process_job"
 
 
-def test_dynamic_task_packaging_precedence():
-    """Test that explicit packaging takes precedence over container_file."""
+def test_dynamic_task_packaging_with_kwargs():
+    """Test that packaging string works correctly with packaging_* kwargs."""
 
     def my_func(x: int) -> int:
         return x
 
-    # Both packaging and container_file specified
+    # String packaging with packaging_* kwargs
     my_task = task(
         my_func,
         time="00:10:00",
-        packaging={"type": "wheel"},
-        container_file="ignored.Dockerfile",
+        packaging="container",  # String packaging
+        packaging_dockerfile="path/to/Dockerfile",  # Packaging kwargs
+        packaging_push=True,
     )
 
-    # packaging should take precedence
-    assert my_task.packaging["type"] == "wheel"
-    assert "dockerfile" not in my_task.packaging
+    # Packaging should combine string and kwargs
+    assert my_task.packaging["type"] == "container"
+    assert my_task.packaging["dockerfile"] == "path/to/Dockerfile"
+    assert my_task.packaging["push"] is True
+    assert "image" not in my_task.packaging

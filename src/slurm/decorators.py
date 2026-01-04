@@ -1,13 +1,125 @@
-from typing import Any, Callable, Dict, Optional
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Optional,
+    TypeVar,
+    TYPE_CHECKING,
+    overload,
+)
+
+# ParamSpec was added in Python 3.10, use typing_extensions for 3.9
+try:
+    from typing import ParamSpec
+except ImportError:
+    from typing_extensions import ParamSpec
 
 from .task import SlurmTask, normalize_sbatch_options
+
+# Type variables for generic signatures
+P = ParamSpec("P")  # For parameter types
+R = TypeVar("R")  # For return types
+
+if TYPE_CHECKING:
+    from .job import Job
+
+
+# TYPE_CHECKING overloads for proper type hints
+if TYPE_CHECKING:
+    # Overload for @workflow without arguments
+    @overload
+    def workflow(func: Callable[P, R]) -> Callable[P, "Job[R]"]: ...
+
+    # Overload for @workflow(time=..., ...)
+    @overload
+    def workflow(
+        func: None = None,
+        *,
+        time: str = "01:00:00",
+        **sbatch_kwargs: Any,
+    ) -> Callable[[Callable[P, R]], Callable[P, "Job[R]"]]: ...
+
+
+def workflow(
+    func: Optional[Callable[..., Any]] = None,
+    *,
+    time: str = "01:00:00",
+    **sbatch_kwargs: Any,
+):
+    """Decorator for workflow orchestrator tasks.
+
+    Workflows are special tasks that can submit other tasks. They automatically
+    receive a WorkflowContext parameter that provides access to the cluster,
+    shared directory, and task management utilities.
+
+    The @workflow decorator is essentially @task with workflow-specific defaults
+    and a flag marking it as a workflow orchestrator.
+
+    Args:
+        func: The function to decorate. Typically not specified directly.
+        time: Default time limit for the orchestrator (default: "01:00:00").
+        **sbatch_kwargs: SBATCH directive parameters (same as @task).
+
+    Returns:
+        SlurmTask instance marked as a workflow.
+
+    Examples:
+        Basic workflow with context injection:
+
+            >>> from slurm.workflow import WorkflowContext
+            >>> @workflow(time="02:00:00")
+            ... def my_workflow(data: list[str], ctx: WorkflowContext):
+            ...     # Context is automatically injected by runner
+            ...     jobs = [process(item) for item in data]
+            ...     return [job.get_result() for job in jobs]
+
+        Workflow using shared directory:
+
+            >>> @workflow(time="04:00:00", mem="8G")
+            ... def training_workflow(config: dict, ctx: WorkflowContext):
+            ...     # Save config to shared directory
+            ...     config_path = ctx.shared_dir / "config.pkl"
+            ...     with open(config_path, "wb") as f:
+            ...         pickle.dump(config, f)
+            ...
+            ...     # Submit tasks that can access shared directory
+            ...     jobs = train.map([{"lr": lr} for lr in config["learning_rates"]])
+            ...     return jobs.get_results()
+    """
+
+    # Use the @task decorator with workflow-specific settings
+    def decorator(inner: Callable[..., Any]) -> SlurmTask:
+        task_instance = task(inner, time=time, **sbatch_kwargs)
+        # Mark this task as a workflow
+        task_instance._is_workflow = True
+        return task_instance
+
+    if callable(func):
+        return decorator(func)
+
+    return decorator
+
+
+# TYPE_CHECKING overloads for task decorator
+if TYPE_CHECKING:
+    # Overload for @task without arguments
+    @overload
+    def task(func: Callable[P, R]) -> Callable[P, "Job[R]"]: ...
+
+    # Overload for @task(time=..., ...)
+    @overload
+    def task(
+        func: None = None,
+        *,
+        packaging: str = "auto",
+        **sbatch_kwargs: Any,
+    ) -> Callable[[Callable[P, R]], Callable[P, "Job[R]"]]: ...
 
 
 def task(
     func: Optional[Callable[..., Any]] = None,
     *,
-    packaging: Optional[Dict[str, Any]] = None,
-    container_file: Optional[str] = None,
+    packaging: str = "auto",
     **sbatch_kwargs: Any,
 ):
     """Decorator for defining a Python function as a Slurm task.
@@ -19,7 +131,7 @@ def task(
     Can be used as a decorator (@task) or called as a function (task(func, ...))
     for dynamic task creation.
 
-    All keyword arguments (except `packaging` and `container_file`) map directly to
+    All keyword arguments (except `packaging` and `packaging_*`) map directly to
     SBATCH directives. Parameter names use underscores (Python style) which are
     automatically converted to dashes (SBATCH style): e.g., `cpus_per_task=4`
     becomes `--cpus-per-task=4`.
@@ -27,16 +139,15 @@ def task(
     Args:
         func: The function to decorate. Typically not specified directly (decorator
             syntax handles this).
-        packaging: Packaging configuration dictionary. Specifies how to package and
-            deploy your code to the cluster. Common options:
-            - `{"type": "wheel"}` - Build and install a Python wheel (default)
-            - `{"type": "container", "image": "myimage:tag"}` - Run in a container
-            - `{"type": "none"}` - Assume code is already available
-        container_file: Path to a Dockerfile for container-based packaging. This is
-            a convenience parameter equivalent to
-            `packaging={"type": "container", "dockerfile": "path"}`. If both
-            `container_file` and `packaging` are specified, `packaging` takes precedence.
-        **sbatch_kwargs: SBATCH directive parameters. Common directives include:
+        packaging: Packaging strategy. Specifies how to package and deploy your code
+            to the cluster. Common options:
+            - `"auto"` (default) - Auto-detect: wheel if pyproject.toml exists, else none
+            - `"wheel"` - Build and install a Python wheel
+            - `"none"` - Assume code is already available on the cluster
+            - `"container:IMAGE:TAG"` - Use existing container image
+            - `"container:IMAGE"` - Use existing container (latest tag)
+            For building from Dockerfile, use packaging_dockerfile parameter.
+        **sbatch_kwargs: SBATCH directive parameters and packaging options. Common directives include:
             - `time`: Wall time limit (e.g., "01:30:00" for 1.5 hours)
             - `cpus_per_task`: CPU cores per task
             - `mem` or `memory`: Memory limit (e.g., "4G")
@@ -45,54 +156,61 @@ def task(
             - `account`: Billing account
             - `job_name`: Job name (defaults to function name)
 
+            Packaging options (all optional, prefixed with `packaging_`):
+            - `packaging_python_version`: Python version for wheel packaging (e.g., "3.11")
+            - `packaging_build_tool`: Build tool to use (e.g., "uv", "pip")
+            - `packaging_dockerfile`: Path to Dockerfile for building container
+            - `packaging_context`: Docker build context directory (default: ".")
+            - `packaging_registry`: Container registry URL
+            - `packaging_push`: Whether to push container to registry (bool)
+            - `packaging_runtime`: Container runtime (e.g., "docker", "podman")
+            - `packaging_platform`: Target platform (e.g., "linux/amd64")
+            - `packaging_mounts`: List of volume mounts for container
+            - `packaging_srun_args`: Additional srun arguments for container
+
     Returns:
         SlurmTask instance that wraps the original function. The SlurmTask can be:
         - Called directly like the original function (runs locally)
         - Submitted via `cluster.submit(task)` to run remotely
 
     Examples:
-        Basic task with resource requirements:
+        Auto-detect packaging (most common):
 
             >>> @task(time="02:00:00", cpus_per_task=8, mem="16G")
             ... def train_model(data_path: str, epochs: int) -> dict:
             ...     model = load_model()
             ...     return train(model, data_path, epochs)
 
-        GPU task with custom job name:
+        Explicit wheel packaging:
 
-            >>> @task(
-            ...     time="24:00:00",
-            ...     gpus=4,
-            ...     partition="gpu",
-            ...     job_name="big_training_run"
-            ... )
-            ... def train_large_model(config: dict):
-            ...     return train_with_gpus(config)
-
-        Container-based task with container_file parameter:
-
-            >>> @task(
-            ...     time="01:00:00",
-            ...     container_file="path/to/train.Dockerfile"
-            ... )
-            ... def train_model(dataset_path: str):
-            ...     return train(dataset_path)
-
-        Container-based task with packaging dict (alternative):
-
-            >>> @task(
-            ...     time="01:00:00",
-            ...     packaging={"type": "container", "image": "pytorch:latest"}
-            ... )
+            >>> @task(time="01:00:00", packaging="wheel")
             ... def process_data(input_file: str):
             ...     return process(input_file)
 
-        No-packaging task (code already on cluster):
+        Container from existing image:
 
             >>> @task(
-            ...     time="00:30:00",
-            ...     packaging={"type": "none"}
+            ...     time="01:00:00",
+            ...     packaging="container:pytorch/pytorch:2.0-cuda11.7"
             ... )
+            ... def gpu_task(config: dict):
+            ...     return train_with_gpus(config)
+
+        Build container from Dockerfile:
+
+            >>> @task(
+            ...     time="01:00:00",
+            ...     packaging="container:my-image:latest",
+            ...     packaging_dockerfile="path/to/Dockerfile",
+            ...     packaging_push=True,
+            ...     packaging_registry="registry.example.com"
+            ... )
+            ... def custom_container_task(data: str):
+            ...     return process(data)
+
+        No packaging (code already on cluster):
+
+            >>> @task(time="00:30:00", packaging="none")
             ... def analysis(results_path: str):
             ...     return analyze(results_path)
 
@@ -130,13 +248,20 @@ def task(
         - `name` is aliased to `job_name`
     """
 
-    normalized_kwargs = normalize_sbatch_options(sbatch_kwargs)
+    # Extract packaging_* kwargs from sbatch_kwargs
+    packaging_kwargs = {}
+    sbatch_only = {}
+    for key, value in sbatch_kwargs.items():
+        if key.startswith("packaging_"):
+            # Remove the "packaging_" prefix for the packaging dict
+            packaging_kwargs[key[10:]] = value
+        else:
+            sbatch_only[key] = value
 
-    # Resolve packaging configuration
-    effective_packaging = packaging
-    if effective_packaging is None and container_file is not None:
-        # container_file is a convenience shorthand for container packaging
-        effective_packaging = {"type": "container", "dockerfile": container_file}
+    normalized_kwargs = normalize_sbatch_options(sbatch_only)
+
+    # Build packaging configuration dict from string + kwargs
+    effective_packaging = _parse_packaging_config(packaging, packaging_kwargs)
 
     def decorator(inner: Callable[..., Any]) -> SlurmTask:
         effective_options = dict(normalized_kwargs)
@@ -152,3 +277,55 @@ def task(
         return decorator(func)
 
     return decorator
+
+
+def _parse_packaging_config(
+    packaging: str, kwargs: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Parse packaging string and kwargs into a configuration dict.
+
+    Args:
+        packaging: Packaging strategy string. Options:
+            - "auto": Auto-detect (wheel if pyproject.toml exists, else none)
+            - "wheel": Build and install Python wheel
+            - "none": No packaging (code assumed available on cluster)
+            - "inherit": Inherit packaging from parent workflow
+            - "container:IMAGE:TAG": Use existing container image
+            - "IMAGE:TAG": Use existing container (shorthand without "container:" prefix)
+        kwargs: Additional packaging options from packaging_* parameters
+
+    Returns:
+        Packaging configuration dict, or None if packaging is None/empty
+    """
+    if not packaging:
+        return None
+
+    config = dict(kwargs)  # Start with additional options from packaging_* kwargs
+
+    if packaging == "auto":
+        config["type"] = "auto"
+    elif packaging == "wheel":
+        config["type"] = "wheel"
+    elif packaging == "none":
+        config["type"] = "none"
+    elif packaging == "inherit":
+        config["type"] = "inherit"
+    elif packaging == "container":
+        # Container packaging selected, but the image reference (if any) must come
+        # from packaging_* kwargs (e.g. dockerfile/registry) or an explicit
+        # container:image reference. Treating "container" as an image name is
+        # almost always a mistake and breaks nested workflows.
+        config["type"] = "container"
+    elif packaging.startswith("container:"):
+        config["type"] = "container"
+        # Parse "container:image:tag" or "container:image"
+        image_part = packaging[10:]  # Remove "container:" prefix
+        if image_part:
+            config["image"] = image_part
+    else:
+        # Assume it's a raw container image reference without "container:" prefix
+        # This is a fallback - users should use "container:..." for clarity
+        config["type"] = "container"
+        config["image"] = packaging
+
+    return config if config else None

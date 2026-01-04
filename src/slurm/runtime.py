@@ -293,8 +293,16 @@ def _bind_job_context(
         position = positional_params.index(target_param)
         if position < len(args):
             return args, kwargs, False
+        # If there are args provided but they don't reach the context parameter position,
+        # we should inject via kwargs to avoid conflicts with keyword arguments
+        # that might fill the gap between len(args) and position
+        if len(args) > 0 and position > len(args):
+            new_kwargs = dict(kwargs)
+            new_kwargs[name] = context
+            return args, new_kwargs, True
+        # Only use positional injection if we're extending args sequentially
         new_args = list(args)
-        new_args.insert(position, context)
+        new_args.append(context)
         return tuple(new_args), kwargs, True
 
     # We deliberately avoid injecting through *args/**kwargs as it is ambiguous.
@@ -359,12 +367,3 @@ def _unwrap_callable(func: Callable[..., Any]) -> Callable[..., Any]:
         break
 
     return candidate
-
-
-__all__ = [
-    "JobContext",
-    "build_job_context",
-    "current_job_context",
-    "function_wants_job_context",
-    "bind_job_context",
-]

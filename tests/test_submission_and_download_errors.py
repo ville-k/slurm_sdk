@@ -1,4 +1,3 @@
-import os
 import pickle
 import pytest
 
@@ -28,8 +27,12 @@ def test_submission_error_bubbled():
     c.backend_type = "FailingBackend"
     c.backend = FailingBackend()
     c.callbacks = []
+    # Add new string-based API attributes
+    c.default_packaging = None
+    c.default_account = None
+    c.default_partition = None
     with pytest.raises(SubmissionError):
-        echo.submit(cluster=c, packaging={"type": "none"})(1)
+        c.submit(echo, packaging="none")(1)
 
 
 class FakeSSHBackend:

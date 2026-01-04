@@ -1,0 +1,130 @@
+# syntax=docker/dockerfile:1.4
+
+FROM debian:12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    SLURM_USER=slurm \
+    SLURM_GROUP=slurm
+
+# Install base packages (Slurm, SSH, systemd)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        slurmctld \
+        slurmd \
+        slurm-client \
+        munge \
+        dbus \
+        systemd \
+        systemd-sysv \
+        openssh-server \
+        sudo \
+        python3 \
+        python3-pip \
+        python3-venv \
+        python3-cryptography \
+        procps \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create slurm user and set up directories
+RUN if ! getent group ${SLURM_GROUP} >/dev/null; then groupadd --system ${SLURM_GROUP}; fi \
+    && if ! id -u ${SLURM_USER} >/dev/null 2>&1; then useradd -ms /bin/bash -g ${SLURM_GROUP} ${SLURM_USER}; fi \
+    && echo "${SLURM_USER}:${SLURM_USER}" | chpasswd \
+    && usermod -aG sudo ${SLURM_USER} \
+    && mkdir -p /home/${SLURM_USER}/.ssh /home/${SLURM_USER}/slurm_jobs \
+    && chmod 700 /home/${SLURM_USER}/.ssh \
+    && mkdir -p /home/${SLURM_USER} \
+    && chown -R ${SLURM_USER}:${SLURM_GROUP} /home/${SLURM_USER} \
+    && chown -R ${SLURM_USER}:${SLURM_GROUP} /home/${SLURM_USER}/slurm_jobs \
+    && usermod -d /home/${SLURM_USER} ${SLURM_USER} \
+    && usermod -s /bin/bash ${SLURM_USER} \
+    && mkdir -p /var/spool/slurmctld /var/spool/slurmd /var/log/slurm /run/slurm \
+    && chown -R ${SLURM_USER}:${SLURM_GROUP} /var/spool/slurmctld /var/log/slurm \
+    && chown root:root /var/spool/slurmd
+
+# Set up SSH keys for passwordless localhost access for the slurm user
+RUN su - ${SLURM_USER} -c "ssh-keygen -t rsa -N '' -f /home/${SLURM_USER}/.ssh/id_rsa" \
+    && su - ${SLURM_USER} -c "cat /home/${SLURM_USER}/.ssh/id_rsa.pub >> /home/${SLURM_USER}/.ssh/authorized_keys" \
+    && chmod 600 /home/${SLURM_USER}/.ssh/authorized_keys \
+    && chown ${SLURM_USER}:${SLURM_GROUP} /home/${SLURM_USER}/.ssh/authorized_keys \
+    && su - ${SLURM_USER} -c "echo 'Host localhost slurm-control' > /home/${SLURM_USER}/.ssh/config" \
+    && su - ${SLURM_USER} -c "echo '    StrictHostKeyChecking no' >> /home/${SLURM_USER}/.ssh/config" \
+    && su - ${SLURM_USER} -c "echo '    UserKnownHostsFile /dev/null' >> /home/${SLURM_USER}/.ssh/config" \
+    && chmod 600 /home/${SLURM_USER}/.ssh/config
+
+# Set up munge for Slurm authentication
+RUN install -d -m 0700 -o munge -g munge /etc/munge \
+    && dd if=/dev/urandom of=/etc/munge/munge.key bs=1 count=1024 status=none \
+    && chown munge:munge /etc/munge/munge.key \
+    && chmod 0400 /etc/munge/munge.key \
+    && install -d -m 0700 -o munge -g munge /var/lib/munge
+
+# Configure SSH
+RUN mkdir -p /var/run/sshd \
+    && ssh-keygen -A \
+    && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+    && sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config \
+    && sed -i 's@session\\s\+required\\s\+pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd \
+    && ln -sf /lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/ssh.service \
+    && ln -sf /lib/systemd/system/munge.service /etc/systemd/system/multi-user.target.wants/munge.service \
+    && ln -sf /lib/systemd/system/slurmd.service /etc/systemd/system/multi-user.target.wants/slurmd.service \
+    && ln -sf /lib/systemd/system/slurmctld.service /etc/systemd/system/multi-user.target.wants/slurmctld.service
+
+# Note: Hostname and /etc/hosts are managed by docker-compose/podman at runtime
+# No need to set them during build
+
+# Copy installation scripts
+COPY install-enroot.sh /tmp/install-enroot.sh
+COPY install-pyxis.sh /tmp/install-pyxis.sh
+
+# Install enroot (container runtime for HPC)
+RUN chmod +x /tmp/install-enroot.sh \
+    && /tmp/install-enroot.sh \
+    && rm /tmp/install-enroot.sh
+
+# Install Pyxis (Slurm plugin for container support)
+RUN chmod +x /tmp/install-pyxis.sh \
+    && /tmp/install-pyxis.sh \
+    && rm /tmp/install-pyxis.sh
+
+# Configure enroot utilities to run with elevated privileges via sudo
+# This is required in nested container environments (e.g., podman-in-podman)
+# where CAP_SETFCAP is not available to unprivileged users. The enroot
+# utilities need to preserve file capabilities when extracting container
+# image layers.
+RUN for util in enroot-aufs2ovlfs enroot-mksquashovlfs; do \
+        if [ -f "/usr/bin/${util}" ]; then \
+            mv "/usr/bin/${util}" "/usr/bin/${util}.real" \
+            && printf '#!/bin/bash\nexec sudo "/usr/bin/%s.real" "$@"\n' "${util}" > "/usr/bin/${util}" \
+            && chmod +x "/usr/bin/${util}" \
+            && echo "${SLURM_USER} ALL=(root) NOPASSWD: /usr/bin/${util}.real *" >> /etc/sudoers; \
+        fi; \
+    done
+
+# Install podman for building container images
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        podman \
+        buildah \
+        slirp4netns \
+        fuse-overlayfs \
+        uidmap \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configure podman for rootless operation
+RUN mkdir -p /etc/containers \
+    && echo "${SLURM_USER}:100000:65536" > /etc/subuid \
+    && echo "${SLURM_USER}:100000:65536" > /etc/subgid
+
+# Configure test registries as insecure for HTTP-only access
+# This allows enroot and podman to pull from the local registry
+RUN printf '\n# Test registry configuration\n[[registry]]\nlocation = "registry:5000"\ninsecure = true\n\n[[registry]]\nlocation = "localhost:5000"\ninsecure = true\n\n[[registry]]\nlocation = "host.docker.internal:5000"\ninsecure = true\n\n[[registry]]\nlocation = "localregistry.test:5000"\ninsecure = true\n' >> /etc/containers/registries.conf
+
+# Copy Slurm configuration
+COPY slurm.conf /etc/slurm/slurm.conf
+
+EXPOSE 22
+
+# systemd as PID 1 - required for service management
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/sbin/init"]

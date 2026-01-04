@@ -8,12 +8,14 @@ from .base import PackagingStrategy
 from .none import NonePackagingStrategy
 from .container import ContainerPackagingStrategy
 from .wheel import WheelPackagingStrategy
+from .inherit import InheritPackagingStrategy
 
 
 _STRATEGIES = {
     "wheel": WheelPackagingStrategy,
     "none": NonePackagingStrategy,
     "container": ContainerPackagingStrategy,
+    "inherit": InheritPackagingStrategy,
 }
 
 
@@ -23,7 +25,7 @@ def get_packaging_strategy(config: Optional[Dict[str, Any]]) -> PackagingStrateg
 
     Args:
         config: Packaging configuration dictionary.
-                Expected keys: 'type' (e.g., 'wheel', 'none').
+                Expected keys: 'type' (e.g., 'auto', 'wheel', 'none', 'container').
 
     Returns:
         An instance of the appropriate PackagingStrategy subclass.
@@ -33,6 +35,21 @@ def get_packaging_strategy(config: Optional[Dict[str, Any]]) -> PackagingStrateg
         return NonePackagingStrategy()
 
     strategy_type = config.get("type")
+
+    # Handle "auto" type - detect based on presence of pyproject.toml
+    if strategy_type == "auto":
+        import pathlib
+
+        # Check for pyproject.toml in current directory or parents
+        cwd = pathlib.Path.cwd()
+        for directory in [cwd] + list(cwd.parents):
+            if (directory / "pyproject.toml").exists():
+                strategy_type = "wheel"
+                break
+        else:
+            # No pyproject.toml found, use none
+            strategy_type = "none"
+
     if not strategy_type:
         return NonePackagingStrategy()
 
@@ -49,4 +66,5 @@ __all__ = [
     "WheelPackagingStrategy",
     "NonePackagingStrategy",
     "ContainerPackagingStrategy",
+    "InheritPackagingStrategy",
 ]

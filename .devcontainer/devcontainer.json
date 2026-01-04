@@ -1,0 +1,65 @@
+{
+  "name": "Slurm SDK Development",
+
+  // Use docker-compose to manage all services
+  "dockerComposeFile": ["../containers/docker-compose.yml"],
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+
+  // Start Slurm and registry services alongside devcontainer
+  "runServices": ["slurm", "registry"],
+
+  // Ensure devcontainer profile is active
+  "dockerComposeCommandOptions": ["--profile", "dev"],
+
+  // VSCode/Cursor customizations
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-python.mypy-type-checker"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
+        "python.testing.pytestEnabled": true,
+        "python.testing.pytestArgs": ["tests"],
+        "python.analysis.typeCheckingMode": "basic",
+        "editor.formatOnSave": true,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff"
+        }
+      }
+    }
+  },
+
+  // Install dependencies after container is created
+  "postCreateCommand": "uv sync --dev",
+
+  // Remind user about available services
+  "postStartCommand": "echo '✓ Slurm cluster available at slurm:22 (or localhost:2222 from host)' && echo '✓ Registry available at registry:5000'",
+
+  // Environment variables for SDK
+  "remoteEnv": {
+    "SLURM_SDK_DEV_MODE": "devcontainer",
+    "SLURM_HOST": "slurm",
+    "SLURM_PORT": "22",
+    "REGISTRY_URL": "registry:5000"
+  },
+
+  // Forward useful ports to host
+  "forwardPorts": [5000, 2222],
+
+  // Port labels for better UX
+  "portsAttributes": {
+    "5000": {
+      "label": "Container Registry",
+      "onAutoForward": "silent"
+    },
+    "2222": {
+      "label": "Slurm SSH",
+      "onAutoForward": "silent"
+    }
+  }
+}

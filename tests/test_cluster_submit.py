@@ -1,16 +1,7 @@
-import sys
-import types
-from pathlib import Path
-
 from slurm.callbacks import BaseCallback
 from slurm.cluster import Cluster
 from slurm.decorators import task
 from slurm.packaging.base import PackagingStrategy
-
-# Allow importing test helpers as a simple module
-HELPERS_DIR = Path(__file__).parent / "helpers"
-if str(HELPERS_DIR) not in sys.path:
-    sys.path.insert(0, str(HELPERS_DIR))
 from local_backend import LocalBackend  # type: ignore
 
 
@@ -36,6 +27,10 @@ def test_cluster_submit_with_local_backend(monkeypatch, tmp_path):
     cluster.backend_type = "LocalBackend"
     cluster.console = None
     cluster.backend = LocalBackend(job_base_dir=str(tmp_path))
+    # Add new string-based API attributes
+    cluster.default_packaging = None
+    cluster.default_account = None
+    cluster.default_partition = None
 
     captured: dict[str, object] = {}
 
@@ -49,7 +44,7 @@ def test_cluster_submit_with_local_backend(monkeypatch, tmp_path):
     cluster.callbacks = [CaptureCallback()]
 
     # Submit and run locally
-    job = add_one.submit(cluster=cluster, packaging={"type": "none"})(41)
+    job = cluster.submit(add_one, packaging="none")(41)
 
     # Job should be immediately completed in local backend
     assert job.is_completed()

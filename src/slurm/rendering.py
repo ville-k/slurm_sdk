@@ -4,8 +4,7 @@ This module provides functions for rendering Slurm job scripts from task definit
 
 import logging
 import pickle
-import base64
-from typing import Any, Dict, Tuple, Callable, List
+from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING
 import inspect
 import sys
 import traceback
@@ -17,6 +16,8 @@ import os
 import importlib
 from .callbacks.callbacks import BaseCallback
 
+if TYPE_CHECKING:
+    from .cluster import Cluster
 
 logger = logging.getLogger(__name__)
 
@@ -98,24 +99,44 @@ def render_job_script(
     target_job_dir: str,
     pre_submission_id: str,
     callbacks: List[BaseCallback],
+    cluster: Optional["Cluster"] = None,
+    is_array_job: bool = False,
+    array_items_file: Optional[str] = None,
 ) -> str:
     """
     Renders the SLURM sbatch script using an explicit target directory path.
+
+    Args:
+        cluster: Optional cluster instance for workflow support (provides Slurmfile path and env name).
+        is_array_job: If True, generates script for native SLURM array job.
+        array_items_file: For array jobs, the filename of the pickled array items.
     """
 
     sbatch_params = normalize_sbatch_options(task_definition)
     overrides = normalize_sbatch_options(sbatch_overrides)
     sbatch_params.update(overrides)
 
-    stdout_path = sbatch_params.get("output")
-    if not stdout_path:
-        stdout_path = f"{target_job_dir}/slurm_{pre_submission_id}.out"
-        sbatch_params["output"] = stdout_path
+    # For array jobs, use %a (array task ID) in output/error paths
+    if is_array_job:
+        stdout_path = sbatch_params.get("output")
+        if not stdout_path:
+            stdout_path = f"{target_job_dir}/slurm_{pre_submission_id}_%a.out"
+            sbatch_params["output"] = stdout_path
 
-    stderr_path = sbatch_params.get("error")
-    if not stderr_path:
-        stderr_path = f"{target_job_dir}/slurm_{pre_submission_id}.err"
-        sbatch_params["error"] = stderr_path
+        stderr_path = sbatch_params.get("error")
+        if not stderr_path:
+            stderr_path = f"{target_job_dir}/slurm_{pre_submission_id}_%a.err"
+            sbatch_params["error"] = stderr_path
+    else:
+        stdout_path = sbatch_params.get("output")
+        if not stdout_path:
+            stdout_path = f"{target_job_dir}/slurm_{pre_submission_id}.out"
+            sbatch_params["output"] = stdout_path
+
+        stderr_path = sbatch_params.get("error")
+        if not stderr_path:
+            stderr_path = f"{target_job_dir}/slurm_{pre_submission_id}.err"
+            sbatch_params["error"] = stderr_path
 
     script_lines = ["#!/bin/bash"]
 
@@ -127,10 +148,20 @@ def render_job_script(
     output_path = sbatch_params.get("output")
     error_path = sbatch_params.get("error")
     if not output_path:
-        output_path = f"{shlex.quote(target_job_dir)}/slurm_{pre_submission_id}.out"
+        if is_array_job:
+            output_path = (
+                f"{shlex.quote(target_job_dir)}/slurm_{pre_submission_id}_%a.out"
+            )
+        else:
+            output_path = f"{shlex.quote(target_job_dir)}/slurm_{pre_submission_id}.out"
         sbatch_params["output"] = output_path
     if not error_path:
-        error_path = f"{shlex.quote(target_job_dir)}/slurm_{pre_submission_id}.err"
+        if is_array_job:
+            error_path = (
+                f"{shlex.quote(target_job_dir)}/slurm_{pre_submission_id}_%a.err"
+            )
+        else:
+            error_path = f"{shlex.quote(target_job_dir)}/slurm_{pre_submission_id}.err"
         sbatch_params["error"] = error_path
 
     # Emit remaining directives in insertion order
@@ -149,21 +180,90 @@ def render_job_script(
     script_lines.append("")
     script_lines.append(f'echo "Target Job Directory (from Python): {target_job_dir}"')
     script_lines.append(f"export JOB_DIR={shlex.quote(target_job_dir)}")
+    # Export the job base directory for the runner to find result files from dependent jobs
+    script_lines.append("export SLURM_JOBS_DIR=$(dirname $(dirname $JOB_DIR))")
+
+    # Export cluster configuration for workflow support
+    if cluster is not None:
+        slurmfile_path = getattr(cluster, "slurmfile_path", None)
+        env_name = getattr(cluster, "env_name", None)
+        # The Slurmfile will be uploaded to the job directory as "Slurmfile.toml"
+        is_workflow = getattr(task_func, "_is_workflow", False)
+        if is_workflow or slurmfile_path:
+            remote_slurmfile_path = f"{target_job_dir}/Slurmfile.toml"
+            script_lines.append(
+                f"export SLURM_SDK_SLURMFILE={shlex.quote(remote_slurmfile_path)}"
+            )
+        if env_name:
+            script_lines.append(f"export SLURM_SDK_ENV={shlex.quote(env_name)}")
+
+    # Export packaging configuration for child tasks to inherit
+    # This is especially important for container packaging where the image reference
+    # needs to be passed to nested tasks
+    if packaging_strategy is not None:
+        import json
+        import base64
+
+        packaging_config = getattr(packaging_strategy, "config", {})
+        if packaging_config:
+            # Include the packaging type
+            config_to_export = dict(packaging_config)
+            config_to_export["type"] = (
+                getattr(packaging_strategy, "__class__", type(packaging_strategy))
+                .__name__.replace("PackagingStrategy", "")
+                .lower()
+            )
+
+            # For container packaging, clean up the config for child tasks
+            # Remove build-time fields and set the resolved image reference
+            if hasattr(packaging_strategy, "_image_reference"):
+                config_to_export["image"] = packaging_strategy._image_reference
+                # Remove fields that would trigger a rebuild
+                # Child tasks should use the pre-built image directly
+                for key in ["dockerfile", "context", "registry", "name", "tag"]:
+                    config_to_export.pop(key, None)
+                # Don't push - image already exists in registry
+                config_to_export["push"] = False
+
+            # Serialize and encode for safe shell export
+            config_json = json.dumps(config_to_export)
+            config_b64 = base64.b64encode(config_json.encode()).decode()
+            script_lines.append(
+                f"export SLURM_SDK_PACKAGING_CONFIG={shlex.quote(config_b64)}"
+            )
+
+    # Export pre-built dependency images for workflows
+    # This allows child tasks to use pre-built images instead of inheriting
+    if cluster is not None:
+        prebuilt_images = getattr(cluster, "_prebuilt_dependency_images", None)
+        if prebuilt_images:
+            import json
+            import base64
+
+            images_json = json.dumps(prebuilt_images)
+            images_b64 = base64.b64encode(images_json.encode()).decode()
+            script_lines.append(
+                f"export SLURM_SDK_PREBUILT_IMAGES={shlex.quote(images_b64)}"
+            )
+
     script_lines.append("")
     script_lines.append('echo "SLURM Job ID: ${SLURM_JOB_ID:-}"')
     script_lines.append('echo "Running on host: $(hostname)"')
-    script_lines.append('echo "Working directory: $(pwd)"')
+    script_lines.append('echo "Initial working directory: $(pwd)"')
     script_lines.append('echo "Job output directory JOB_DIR: $JOB_DIR"')
+    script_lines.append("")
+    script_lines.append("# Change to job directory")
     script_lines.append(
-        "echo \"Python version: $(python --version || echo 'Python not found')\""
+        "cd $JOB_DIR || { echo 'ERROR: Failed to cd to $JOB_DIR' >&2; exit 1; }"
     )
+    script_lines.append('echo "Changed to working directory: $(pwd)"')
     script_lines.append("")
 
     try:
         setup_commands = packaging_strategy.generate_setup_commands(
             task=task_func,
             job_id=pre_submission_id,
-            job_dir='"$JOB_DIR"',
+            job_dir="$JOB_DIR",
         )
         if setup_commands:
             script_lines.extend(setup_commands)
@@ -183,14 +283,23 @@ def render_job_script(
     module_name = _get_importable_module_name(task_func)
     func_name = task_func.__name__
 
-    args_file_path_str = f"slurm_job_{pre_submission_id}_{ARGS_FILENAME}"
-    kwargs_file_path_str = f"slurm_job_{pre_submission_id}_{KWARGS_FILENAME}"
-    result_file_path_str = f"slurm_job_{pre_submission_id}_{RESULT_FILENAME}"
+    # For array jobs, use %a in result filenames for per-task results
+    if is_array_job:
+        args_file_path_str = None  # Not used for array jobs
+        kwargs_file_path_str = None  # Not used for array jobs
+        result_file_path_str = f"slurm_job_{pre_submission_id}_%a_{RESULT_FILENAME}"
+    else:
+        args_file_path_str = f"slurm_job_{pre_submission_id}_{ARGS_FILENAME}"
+        kwargs_file_path_str = f"slurm_job_{pre_submission_id}_{KWARGS_FILENAME}"
+        result_file_path_str = f"slurm_job_{pre_submission_id}_{RESULT_FILENAME}"
+
     callbacks_file_path_str = f"slurm_job_{pre_submission_id}_{CALLBACKS_FILENAME}"
 
     try:
-        pickled_args = base64.b64encode(pickle.dumps(task_args)).decode()
-        pickled_kwargs = base64.b64encode(pickle.dumps(task_kwargs)).decode()
+        # For array jobs, skip args/kwargs pickling (loaded from array_items_file)
+        if not is_array_job:
+            pickled_args = base64.b64encode(pickle.dumps(task_args)).decode()
+            pickled_kwargs = base64.b64encode(pickle.dumps(task_kwargs)).decode()
         pickled_sys_path = base64.b64encode(pickle.dumps(sys.path)).decode()
 
         picklable_callbacks = []
@@ -229,15 +338,30 @@ def render_job_script(
 
     except Exception as e:
         raise RuntimeError(
-            f"Failed to pickle task arguments/kwargs/sys.path/callbacks: {e}"
+            f"Failed to serialize task arguments for cluster execution.\n\n"
+            f"Error: {e}\n\n"
+            "This usually means one or more of your task arguments cannot be pickled.\n"
+            "Common non-picklable objects include:\n"
+            "  - Open file handles or database connections\n"
+            "  - Lambda functions or local functions\n"
+            "  - Objects with __getstate__ that raises errors\n"
+            "  - Thread locks or multiprocessing primitives\n\n"
+            "To fix:\n"
+            "  1. Pass file paths instead of open file objects\n"
+            "  2. Use module-level functions instead of lambdas\n"
+            "  3. Ensure all arguments are standard Python types or pickle-compatible objects"
         ) from e
 
-    script_lines.append(f'base64 -d > "{args_file_path_str}" << "BASE64_ARGS"')
-    script_lines.append(pickled_args)
-    script_lines.append("BASE64_ARGS")
-    script_lines.append(f'base64 -d > "{kwargs_file_path_str}" << "BASE64_KWARGS"')
-    script_lines.append(pickled_kwargs)
-    script_lines.append("BASE64_KWARGS")
+    # For regular jobs, write args/kwargs to files
+    # For array jobs, skip this (args/kwargs come from array_items_file)
+    if not is_array_job:
+        script_lines.append(f'base64 -d > "{args_file_path_str}" << "BASE64_ARGS"')
+        script_lines.append(pickled_args)
+        script_lines.append("BASE64_ARGS")
+        script_lines.append(f'base64 -d > "{kwargs_file_path_str}" << "BASE64_KWARGS"')
+        script_lines.append(pickled_kwargs)
+        script_lines.append("BASE64_KWARGS")
+
     if pickled_callbacks:
         script_lines.append(f'base64 -d > "{callbacks_file_path_str}" << "BASE64_CBS"')
         script_lines.append(pickled_callbacks)
@@ -268,40 +392,86 @@ def render_job_script(
     script_lines.append("PY_EXEC_RESOLVED=${PY_EXEC:-python}")
     script_lines.append("export PY_EXEC_RESOLVED")
 
+    # For array jobs, set up filenames with bash variable substitution (expand %a to actual array task ID)
+    if is_array_job:
+        script_lines.append("")
+        script_lines.append("# Set up filenames for array job (expand array task ID)")
+        script_lines.append(
+            f'RESULT_FILE="slurm_job_{pre_submission_id}_${{SLURM_ARRAY_TASK_ID}}_{RESULT_FILENAME}"'
+        )
+        if stdout_path and "%a" in stdout_path:
+            expanded_stdout = stdout_path.replace("%a", "${SLURM_ARRAY_TASK_ID}")
+            script_lines.append(f'STDOUT_PATH="{expanded_stdout}"')
+        if stderr_path and "%a" in stderr_path:
+            expanded_stderr = stderr_path.replace("%a", "${SLURM_ARRAY_TASK_ID}")
+            script_lines.append(f'STDERR_PATH="{expanded_stderr}"')
+
     # Construct the runner command that executes the user's task function.
-    # "${PY_EXEC[@]:-python}" uses bash array expansion preserving multi-word executables.
     def _escape_quotes(value: str) -> str:
         return value.replace('"', '\\"')
 
     runner_parts = [
-        '"${PY_EXEC[@]:-python}"',
+        '"$PY_EXEC_RESOLVED"',
         "-m slurm.runner",
         f'--module "{_escape_quotes(module_name)}"',
         f'--function "{_escape_quotes(func_name)}"',
-        f'--args-file "{_escape_quotes(args_file_path_str)}"',
-        f'--kwargs-file "{_escape_quotes(kwargs_file_path_str)}"',
-        f'--output-file "{_escape_quotes(result_file_path_str)}"',
-        f'--callbacks-file "{_escape_quotes(callbacks_file_path_str)}"',
-        f'--sys-path "{_escape_quotes(pickled_sys_path)}"',
     ]
+
+    # For array jobs, provide array-specific arguments
+    if is_array_job:
+        runner_parts.append('--array-index "$SLURM_ARRAY_TASK_ID"')
+        runner_parts.append(f'--array-items-file "{_escape_quotes(array_items_file)}"')
+    else:
+        # For regular jobs, provide args/kwargs files
+        runner_parts.append(f'--args-file "{_escape_quotes(args_file_path_str)}"')
+        runner_parts.append(f'--kwargs-file "{_escape_quotes(kwargs_file_path_str)}"')
+
+    # Common arguments for both job types
+    if is_array_job:
+        # Use bash variable for array jobs (already expanded)
+        runner_parts.append('--output-file "$RESULT_FILE"')
+    else:
+        runner_parts.append(f'--output-file "{_escape_quotes(result_file_path_str)}"')
+
+    runner_parts.extend(
+        [
+            f'--callbacks-file "{_escape_quotes(callbacks_file_path_str)}"',
+            f'--sys-path "{_escape_quotes(pickled_sys_path)}"',
+        ]
+    )
 
     if target_job_dir:
         runner_parts.append(f'--job-dir "{_escape_quotes(target_job_dir)}"')
     if stdout_path:
-        runner_parts.append(f'--stdout-path "{_escape_quotes(stdout_path)}"')
+        if is_array_job and "%a" in stdout_path:
+            runner_parts.append('--stdout-path "$STDOUT_PATH"')
+        else:
+            runner_parts.append(f'--stdout-path "{_escape_quotes(stdout_path)}"')
     if stderr_path:
-        runner_parts.append(f'--stderr-path "{_escape_quotes(stderr_path)}"')
+        if is_array_job and "%a" in stderr_path:
+            runner_parts.append('--stderr-path "$STDERR_PATH"')
+        else:
+            runner_parts.append(f'--stderr-path "{_escape_quotes(stderr_path)}"')
     runner_parts.append(f'--pre-submission-id "{_escape_quotes(pre_submission_id)}"')
 
     runner_command = " ".join(runner_parts)
 
     try:
-        runner_command = packaging_strategy.wrap_execution_command(
+        wrapped_command = packaging_strategy.wrap_execution_command(
             command=runner_command,
             task=task_func,
             job_id=pre_submission_id,
             job_dir='"$JOB_DIR"',
         )
+        # Add debug output for container packaging to verify image reference
+        if (
+            hasattr(packaging_strategy, "_image_reference")
+            and packaging_strategy._image_reference
+        ):
+            script_lines.append(
+                f"echo 'Executing with container image: {packaging_strategy._image_reference}'"
+            )
+        runner_command = wrapped_command
     except Exception as e:
         logger.error("Error wrapping execution command: %s", e)
         traceback.print_exc(file=sys.stderr)
@@ -312,23 +482,25 @@ def render_job_script(
     script_lines.append("EXECUTION_STATUS=$?")
     script_lines.append("")
 
-    try:
-        cleanup_commands = packaging_strategy.generate_cleanup_commands(
-            task=task_func,
-            job_id=pre_submission_id,
-            job_dir='"$JOB_DIR"',
-        )
-        if cleanup_commands:
-            script_lines.extend(cleanup_commands)
-            script_lines.append("echo 'Packaging cleanup commands executed.'")
-        else:
-            script_lines.append("echo 'No packaging cleanup commands generated.'")
-    except Exception as e:
-        logger.error("Error generating packaging cleanup commands: %s", e)
-        traceback.print_exc(file=sys.stderr)
-        script_lines.append(
-            "echo 'WARNING: Failed to generate packaging cleanup commands!' >&2"
-        )
+    # Skip cleanup for native array jobs since all tasks share the same environment
+    if not is_array_job:
+        try:
+            cleanup_commands = packaging_strategy.generate_cleanup_commands(
+                task=task_func,
+                job_id=pre_submission_id,
+                job_dir="$JOB_DIR",
+            )
+            if cleanup_commands:
+                script_lines.extend(cleanup_commands)
+                script_lines.append("echo 'Packaging cleanup commands executed.'")
+            else:
+                script_lines.append("echo 'No packaging cleanup commands generated.'")
+        except Exception as e:
+            logger.error("Error generating packaging cleanup commands: %s", e)
+            traceback.print_exc(file=sys.stderr)
+            script_lines.append(
+                "echo 'WARNING: Failed to generate packaging cleanup commands!' >&2"
+            )
 
     script_lines.append("")
 

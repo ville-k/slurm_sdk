@@ -1,3 +1,5 @@
+attic
+
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -5,12 +7,17 @@ build/
 dist/
 wheels/
 *.egg-info
-coverage_html/
-coverage.xml
 
 # Virtual environments
 .venv
 
+# Coverage reports
+.coverage
+coverage_html/
+coverage.xml
+
+# Agent instructions
+specs/
 
 Slurmfile.toml
 

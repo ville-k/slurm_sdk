@@ -18,7 +18,7 @@ import logging
 import shlex
 
 from .base import BackendBase
-from ..errors import BackendTimeout, BackendCommandError
+from ..errors import BackendTimeout, BackendCommandError, BackendError
 
 logger = logging.getLogger(__name__)
 
@@ -208,10 +208,27 @@ class SSHCommandBackend(BackendBase):
         """
         for attempt in range(retry_count):
             try:
+                # Set socket timeout to prevent hanging on recv_exit_status()
+                # This is critical because paramiko's timeout parameter only applies to exec_command(),
+                # not to channel operations like recv_exit_status() which can hang indefinitely
+                try:
+                    transport = self.client.get_transport()
+                    if transport and hasattr(transport, "sock") and transport.sock:
+                        transport.sock.settimeout(timeout)
+                except Exception as e:
+                    logger.debug(f"Could not set socket timeout: {e}")
+
                 _, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
+                # Use settimeout on the channel to prevent recv_exit_status from hanging
+                try:
+                    stdout.channel.settimeout(timeout)
+                except Exception as e:
+                    logger.debug(f"Could not set channel timeout: {e}")
+
                 exit_status = stdout.channel.recv_exit_status()
                 stdout_str = stdout.read().decode("utf-8")
                 stderr_str = stderr.read().decode("utf-8")
+
                 return stdout_str, stderr_str, exit_status
             except socket.timeout:
                 if attempt < retry_count - 1:
@@ -257,12 +274,15 @@ class SSHCommandBackend(BackendBase):
         account: Optional[str],
         partition: Optional[str],
         script_path: str,
+        array_spec: Optional[str] = None,
     ) -> str:
         parts = ["sbatch", f"--chdir={shlex.quote(target_job_dir)}"]
         if account:
             parts.append(f"--account={shlex.quote(account)}")
         if partition:
             parts.append(f"--partition={shlex.quote(partition)}")
+        if array_spec:
+            parts.append(f"--array={array_spec}")
         parts.append(shlex.quote(script_path))
         return " ".join(parts)
 
@@ -333,6 +353,7 @@ class SSHCommandBackend(BackendBase):
         pre_submission_id: str,
         account: Optional[str] = None,
         partition: Optional[str] = None,
+        array_spec: Optional[str] = None,
     ) -> str:
         """
         Submit a job to the SLURM cluster, creating the target directory first.
@@ -343,13 +364,20 @@ class SSHCommandBackend(BackendBase):
             pre_submission_id: The unique ID used in target_job_dir and filenames.
             account: Optional SLURM account to use.
             partition: Optional SLURM partition to use.
+            array_spec: Optional array specification for native SLURM arrays.
+                Format: "0-N" or "0-N%M" where M is max concurrent tasks.
 
         Returns:
-            str: The job ID.
+            str: The job ID. For array jobs, returns in format "12345_[0-N]".
 
         Raises:
             RuntimeError: If the job submission fails.
         """
+        # Persist script in job directory
+        script_filename = f"slurm_job_{pre_submission_id}_script.sh"
+        persistent_script_path = f"{target_job_dir}/{script_filename}"
+
+        # Also use a temporary location for sbatch (some clusters may need this)
         remote_script_filename = f"job_{uuid.uuid4().hex[:8]}.sh"
         if not self.remote_temp_dir or not self.remote_temp_dir.startswith("/"):
             raise RuntimeError(
@@ -365,19 +393,33 @@ class SSHCommandBackend(BackendBase):
                 "--- BEGIN SCRIPT REPR ---\n%s\n--- END SCRIPT REPR ---", repr(script)
             )
 
-            logger.debug("Uploading job script to: %s", remote_script_path)
-            self._upload_string_to_file(script, remote_script_path)
+            # Write script to persistent location in job directory
+            logger.debug("Writing script to job directory: %s", persistent_script_path)
+            self._upload_string_to_file(script, persistent_script_path)
+            self._make_remote_executable(persistent_script_path)
 
-            self._make_remote_executable(remote_script_path)
+            # Also write to temp location for sbatch (if different)
+            if persistent_script_path != remote_script_path:
+                logger.debug(
+                    "Uploading job script to temp location: %s", remote_script_path
+                )
+                self._upload_string_to_file(script, remote_script_path)
+                self._make_remote_executable(remote_script_path)
+            else:
+                remote_script_path = persistent_script_path
 
             sbatch_cmd_to_run = self._build_sbatch_command(
                 target_job_dir=target_job_dir,
                 account=account,
                 partition=partition,
                 script_path=remote_script_path,
+                array_spec=array_spec,
             )
 
-            logger.debug("Submitting job via sbatch")
+            if array_spec:
+                logger.debug("Submitting array job via sbatch (array=%s)", array_spec)
+            else:
+                logger.debug("Submitting job via sbatch")
             logger.debug("Running command: %s", sbatch_cmd_to_run)
             stdout, stderr, return_code = self._run_command(sbatch_cmd_to_run)
 
@@ -393,8 +435,16 @@ class SSHCommandBackend(BackendBase):
                 )
 
             job_id = match.group(1)
-            logger.info("Job submitted: %s", job_id)
+
+            # For array jobs, SLURM returns the base job ID
+            # We'll format it as "JOB_ID_[array_spec]" for consistency
+            if array_spec:
+                job_id = f"{job_id}_[{array_spec}]"
+                logger.info("Array job submitted: %s", job_id)
+            else:
+                logger.info("Job submitted: %s", job_id)
             logger.debug("Submitted from script: %s", remote_script_path)
+            logger.debug("Script persisted at: %s", persistent_script_path)
             return job_id
 
         except Exception as e:
@@ -426,17 +476,28 @@ class SSHCommandBackend(BackendBase):
 
             if return_code != 0:
                 if "Invalid job id specified" in stderr:
-                    return {
-                        "JobState": "UNKNOWN",
-                        "ExitCode": "",
-                        "Error": "Job not found",
-                    }
-                # Normalize non-zero exits to UNKNOWN state with error message
-                return {
-                    "JobState": "UNKNOWN",
-                    "ExitCode": "",
-                    "Error": stderr.strip() or "Unknown error",
-                }
+                    raise BackendCommandError(
+                        f"Job {job_id} not found in SLURM queue.\n\n"
+                        f"This job may have:\n"
+                        f"  1. Already completed and been purged from the queue\n"
+                        f"  2. Never existed (wrong job ID)\n"
+                        f"  3. Been cancelled\n\n"
+                        f"To check job history:\n"
+                        f"  sacct -j {job_id}  # Show completed/failed jobs\n"
+                        f"  squeue -j {job_id}  # Show only running/pending jobs"
+                    )
+                # Non-zero exit indicates command failure
+                error_msg = stderr.strip() or "Unknown error"
+                raise BackendCommandError(
+                    f"Failed to get status for job {job_id}.\n\n"
+                    f"SLURM command failed with: {error_msg}\n\n"
+                    f"Possible causes:\n"
+                    f"  1. SLURM controller is down or unreachable\n"
+                    f"  2. Permission issues accessing job information\n"
+                    f"  3. Network connectivity problems\n\n"
+                    f"To diagnose:\n"
+                    f"  scontrol show job {job_id}  # Run this manually to see SLURM's response"
+                )
 
             # Parse the output
             status = {}
@@ -449,12 +510,25 @@ class SSHCommandBackend(BackendBase):
             logger.debug("Job status: %s", status)
 
             return status
-        except BackendTimeout as e:
-            logger.warning("Warning: %s", e)
-            return {"JobState": "UNKNOWN", "ExitCode": "", "Error": "Timeout"}
+        except BackendTimeout:
+            # Re-raise timeout errors as-is
+            raise
+        except BackendCommandError:
+            # Re-raise command errors as-is
+            raise
         except Exception as e:
-            logger.warning("Warning: Failed to get job status: %s", e)
-            return {"JobState": "UNKNOWN", "ExitCode": "", "Error": str(e)}
+            logger.error("Failed to get job status for %s: %s", job_id, e)
+            raise BackendError(
+                f"Unexpected error while getting status for job {job_id}.\n\n"
+                f"Error: {e}\n\n"
+                f"This may indicate:\n"
+                f"  1. SSH connection was lost\n"
+                f"  2. Parsing error in SLURM output format\n"
+                f"  3. Unexpected SLURM response\n\n"
+                f"To diagnose:\n"
+                f"  1. Check SSH connection: ssh {getattr(self, 'hostname', 'cluster')} echo 'connected'\n"
+                f"  2. Try manual SLURM command: ssh {getattr(self, 'hostname', 'cluster')} scontrol show job {job_id}"
+            ) from e
 
     def cancel_job(self, job_id: str) -> bool:
         """
@@ -573,12 +647,26 @@ class SSHCommandBackend(BackendBase):
                     )
 
             return {"partitions": partitions}
-        except TimeoutError as e:
-            logger.warning("Warning: %s", e)
-            return {"partitions": []}  # Return empty list instead of failing
+        except BackendTimeout:
+            # Re-raise timeout errors as-is
+            raise
         except Exception as e:
-            logger.warning("Warning: Failed to get cluster info: %s", e)
-            return {"partitions": []}  # Return empty list instead of failing
+            logger.error("Failed to get cluster info: %s", e)
+            raise BackendError(
+                "Failed to get cluster information.\n\n"
+                f"Error: {e}\n\n"
+                "This usually happens when:\n"
+                "  1. SLURM controller is not running\n"
+                "  2. Network issues prevent SSH connection\n"
+                "  3. 'sinfo' command is not available on the cluster\n\n"
+                "To diagnose:\n"
+                "  1. Check SLURM controller status: ssh {hostname} systemctl status slurmctld\n"
+                "  2. Verify sinfo works: ssh {hostname} sinfo\n"
+                "  3. Check SSH connection: ssh {hostname} echo 'connected'\n\n"
+                "Note: This error won't affect job submission, but may limit partition information.".format(
+                    hostname=getattr(self, "hostname", "cluster")
+                )
+            ) from e
 
     def __del__(self):
         """
@@ -590,20 +678,23 @@ class SSHCommandBackend(BackendBase):
                 if hasattr(self, "remote_temp_dir"):
                     try:
                         self._run_command(f"rm -rf {self.remote_temp_dir}")
-                    except:
-                        pass
+                    except Exception as e:
+                        # Catch all exceptions in __del__ - we can't propagate them anyway
+                        logger.debug(f"Error cleaning up remote temp dir: {e}")
 
                 # Close the SFTP connection
                 if hasattr(self, "sftp") and self.sftp:
                     try:
                         self.sftp.close()
-                    except:
-                        pass
+                    except Exception as e:
+                        # Catch all exceptions in __del__ - we can't propagate them anyway
+                        logger.debug(f"Error closing SFTP connection: {e}")
 
                 # Close the SSH connection
                 self.client.close()
-            except:
-                pass
+            except Exception as e:
+                # Catch all exceptions in __del__ - we can't propagate them anyway
+                logger.debug(f"Error during cleanup: {e}")
 
     def _upload_file(self, local_path: str, remote_path: str) -> None:
         """
@@ -761,6 +852,39 @@ class SSHCommandBackend(BackendBase):
             raise RuntimeError("Job base directory not resolved yet.")
         return self.job_base_dir
 
+    def read_file(self, remote_path: str) -> str:
+        """
+        Read a file from the remote host.
+
+        Args:
+            remote_path: The path to the remote file.
+
+        Returns:
+            str: The file contents as a string.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            RuntimeError: If the read operation fails.
+        """
+        try:
+            logger.debug(f"Reading remote file: {remote_path}")
+            sftp = self._get_sftp_client()
+
+            with sftp.open(remote_path, "r") as remote_file:
+                content = remote_file.read().decode("utf-8")
+
+            logger.debug(f"Successfully read {len(content)} bytes from {remote_path}")
+            return content
+
+        except IOError as e:
+            # Paramiko raises IOError for file not found
+            if e.errno == 2:  # ENOENT - No such file or directory
+                raise FileNotFoundError(f"Remote file not found: {remote_path}") from e
+            raise RuntimeError(f"Failed to read file {remote_path}: {e}") from e
+        except Exception as e:
+            logger.error(f"Error reading file {remote_path}: {e}")
+            raise RuntimeError(f"Failed to read file {remote_path}: {e}") from e
+
     def _resolve_remote_path(self, path: str) -> str:
         """Resolves a path (potentially containing ~) on the remote host."""
         if not path:
@@ -806,3 +930,7 @@ class SSHCommandBackend(BackendBase):
                 path,
             )
             return path.replace("\\", "/")
+
+    def is_remote(self) -> bool:
+        """Return True since SSH backend requires remote file operations."""
+        return True

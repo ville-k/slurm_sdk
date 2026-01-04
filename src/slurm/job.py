@@ -4,7 +4,7 @@ import pickle
 import os
 import threading
 
-from typing import Optional, Any, Dict, TYPE_CHECKING
+from typing import Optional, Any, Dict, TYPE_CHECKING, TypeVar, Generic
 
 # Import backend types needed for isinstance checks
 from .api.ssh import SSHCommandBackend
@@ -13,13 +13,18 @@ from .api.ssh import SSHCommandBackend
 if TYPE_CHECKING:
     from .cluster import Cluster
 
+from .errors import BackendError
+
 from .rendering import RESULT_FILENAME
 
 
 logger = logging.getLogger(__name__)
 
+# Type variable for Job's generic return type
+T = TypeVar("T")
 
-class Job:
+
+class Job(Generic[T]):
     """Represents a submitted Slurm job, providing status tracking and result retrieval.
 
     A Job instance is returned when you submit a task via `cluster.submit()`. It provides
@@ -96,7 +101,15 @@ class Job:
             sbatch_options: The SBATCH options used for this job's submission.
             stdout_path: Scheduler stdout path for this job, if known.
             stderr_path: Scheduler stderr path for this job, if known.
+
+        Raises:
+            ValueError: If id is not a non-empty string or if cluster is None.
         """
+        if not id or not isinstance(id, str) or not id.strip():
+            raise ValueError(
+                f"job id must be a non-empty string, got {type(id).__name__}: {id!r}"
+            )
+
         self.id = id
         logger.debug("[%s] Initializing Job", self.id)
         if cluster is None:
@@ -212,8 +225,22 @@ class Job:
 
             return status
         except Exception as e:
-            logger.error("Error getting job status: %s", e)
-            return {"JobState": "UNKNOWN", "Error": str(e)}
+            logger.error("Error getting job status for job %s: %s", self.id, e)
+            raise BackendError(
+                f"Failed to get status for job {self.id}.\n\n"
+                f"Error: {e}\n\n"
+                "This error usually indicates a communication issue with the SLURM cluster.\n\n"
+                "Possible causes:\n"
+                "  1. Network or SSH connection was lost\n"
+                "  2. SLURM controller is down\n"
+                "  3. Job information is temporarily unavailable\n\n"
+                "To diagnose:\n"
+                "  1. Check if you can still reach the cluster\n"
+                "  2. Try: cluster.backend.get_job_status('{job_id}') to see backend error\n"
+                "  3. Check SLURM directly: squeue -j {job_id} or sacct -j {job_id}".format(
+                    job_id=self.id
+                )
+            ) from e
 
     def is_running(self) -> bool:
         """Check if the job is currently executing.
@@ -277,7 +304,64 @@ class Job:
             return None
         return self.target_job_dir
 
-    def get_result(self) -> Any:
+    @staticmethod
+    def _tail_text(text: str, *, max_lines: int = 200, max_chars: int = 10_000) -> str:
+        """Return a tail slice of the given text for error messages."""
+        if not text:
+            return ""
+
+        original_len = len(text)
+        truncated_chars = False
+        if original_len > max_chars:
+            text = text[-max_chars:]
+            truncated_chars = True
+
+        lines = text.splitlines()
+        truncated_lines = False
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+            truncated_lines = True
+
+        rendered = "\n".join(lines)
+        if truncated_chars or truncated_lines:
+            note_parts = []
+            if truncated_chars:
+                note_parts.append(f"chars>{max_chars}")
+            if truncated_lines:
+                note_parts.append(f"lines>{max_lines}")
+            note = ", ".join(note_parts)
+            return f"[... output truncated ({note}) ...]\n{rendered}"
+        return rendered
+
+    def _format_failure_diagnostics(self) -> str:
+        parts: list[str] = []
+
+        if self.target_job_dir:
+            parts.append(f"Check job output in: {self.target_job_dir}")
+
+        if self.stdout_path:
+            try:
+                stdout = self.get_stdout()
+                stdout_tail = self._tail_text(stdout)
+                parts.append(
+                    "--- Remote Stdout (tail) ---\n" + (stdout_tail or "[empty]")
+                )
+            except Exception as exc:
+                parts.append(f"--- Remote Stdout Unavailable: {exc} ---")
+
+        if self.stderr_path:
+            try:
+                stderr = self.get_stderr()
+                stderr_tail = self._tail_text(stderr)
+                parts.append(
+                    "--- Remote Stderr (tail) ---\n" + (stderr_tail or "[empty]")
+                )
+            except Exception as exc:
+                parts.append(f"--- Remote Stderr Unavailable: {exc} ---")
+
+        return "\n".join(parts)
+
+    def get_result(self, timeout: Optional[float] = None) -> T:
         """Retrieve the return value from the completed job.
 
         This method waits for job completion if necessary, then downloads and
@@ -287,6 +371,11 @@ class Job:
         handles, database connections, or objects with custom serialization
         requirements may not work.
 
+        Args:
+            timeout: Optional timeout in seconds to wait for job completion.
+                If None (default), waits indefinitely. If the timeout is exceeded,
+                raises DownloadError.
+
         Returns:
             The object returned by your task function, deserialized from the
             remote result file. Type matches your function's return type annotation.
@@ -295,6 +384,7 @@ class Job:
             DownloadError: If the job did not complete successfully, or if the
                 result file cannot be found or downloaded. Common causes:
                 - Job failed (non-zero exit code)
+                - Job timed out while waiting for completion
                 - Job metadata missing (when using `get_job()`)
                 - Network issues during download
                 - Unpickling errors (incompatible Python versions, missing dependencies)
@@ -302,6 +392,13 @@ class Job:
         Examples:
             >>> job = submitter(x=42)
             >>> result = job.get_result()  # Blocks until complete
+
+            With timeout:
+
+            >>> try:
+            ...     result = job.get_result(timeout=300)  # 5 minutes max
+            ... except DownloadError as e:
+            ...     print(f"Failed or timed out: {e}")
 
             Handle potential failures:
 
@@ -316,21 +413,33 @@ class Job:
             then loads it. For local backends, it reads the file directly.
         """
         if not self.is_completed():
-            self.wait()
+            self.wait(timeout=timeout)
+            if not self.is_completed():
+                from .errors import DownloadError
+
+                status = self.get_status()
+                state = status.get("JobState")
+                diagnostics = self._format_failure_diagnostics()
+                message = (
+                    f"Job {self.id} did not reach a terminal state within timeout.\n"
+                    f"State: {state}\n"
+                )
+                if diagnostics:
+                    message += diagnostics
+                raise DownloadError(message)
 
         status = self.get_status()
         if not self.is_successful():
             from .errors import DownloadError
 
+            diagnostics = self._format_failure_diagnostics()
+            reason = status.get("Reason")
             raise DownloadError(
                 f"Job {self.id} did not succeed.\n"
                 f"State: {status.get('JobState')}\n"
                 f"Exit Code: {status.get('ExitCode')}\n"
-                + (
-                    f"Check job output in: {self.target_job_dir}"
-                    if self.target_job_dir
-                    else ""
-                )
+                + (f"Reason: {reason}\n" if reason else "")
+                + (diagnostics if diagnostics else "")
             )
 
         try:
@@ -352,8 +461,15 @@ class Job:
             logger.debug("[%s] Expecting result file at: %s", self.id, result_file_path)
 
         except Exception as e:
-            logger.error("[%s] Error determining result file path: %s", self.id, e)
-            return None
+            raise RuntimeError(
+                f"Failed to determine result file path for job {self.id}.\n"
+                f"Error: {e}\n\n"
+                "This usually means:\n"
+                "  1. The job metadata is incomplete or corrupted\n"
+                "  2. The job directory structure is unexpected\n"
+                "  3. The result file naming convention has changed\n\n"
+                "Ensure the job completed successfully before calling get_result()."
+            ) from e
 
         if isinstance(self.cluster.backend, SSHCommandBackend):
             import tempfile
@@ -379,7 +495,25 @@ class Job:
                 from .errors import DownloadError
 
                 raise DownloadError(
-                    f"Remote result file not found: {result_file_path}"
+                    f"Failed to download job result: File not found on remote cluster.\n\n"
+                    f"Job ID: {self.id}\n"
+                    f"Expected result file: {result_file_path}\n\n"
+                    "This usually means:\n"
+                    "  1. Job hasn't finished writing its result yet (still running)\n"
+                    "  2. Job failed before writing result file\n"
+                    "  3. Result file was deleted or moved\n"
+                    "  4. Job directory path is incorrect\n\n"
+                    "To diagnose:\n"
+                    "  1. Check job status: job.get_status() or squeue/sacct -j {job_id}\n"
+                    "  2. Check job output/error logs in: {job_dir}\n"
+                    "  3. Verify job completed successfully: job.is_successful()\n"
+                    "  4. SSH to cluster and check: ls -la {result_file}".format(
+                        job_id=self.id,
+                        job_dir=self.target_job_dir
+                        if self.target_job_dir
+                        else "job directory",
+                        result_file=result_file_path,
+                    )
                 ) from e
             except Exception as e:
                 logger.error(
@@ -392,7 +526,27 @@ class Job:
                 from .errors import DownloadError
 
                 raise DownloadError(
-                    f"Failed to download or deserialize result from {result_file_path}: {e}"
+                    f"Failed to download or load job result.\n\n"
+                    f"Job ID: {self.id}\n"
+                    f"Result file: {result_file_path}\n"
+                    f"Error: {e}\n\n"
+                    "Possible causes:\n"
+                    "  1. Network error during download (SSH connection lost)\n"
+                    "  2. Result file is corrupted\n"
+                    "  3. Pickle deserialization failed (incompatible Python versions)\n"
+                    "  4. Permission issues accessing the file\n\n"
+                    "To diagnose:\n"
+                    "  1. Check SSH connection: ssh {hostname} echo 'connected'\n"
+                    "  2. Verify file exists on cluster: ssh {hostname} ls -la {result_file}\n"
+                    "  3. Check file size: ssh {hostname} du -h {result_file}\n"
+                    "  4. Check Python versions match between local and cluster\n"
+                    "  5. Review job output logs for errors: {job_dir}/*.out".format(
+                        hostname=getattr(self.cluster.backend, "hostname", "cluster"),
+                        result_file=result_file_path,
+                        job_dir=self.target_job_dir
+                        if self.target_job_dir
+                        else "job directory",
+                    )
                 ) from e
         else:
             try:
@@ -410,7 +564,23 @@ class Job:
                 from .errors import DownloadError
 
                 raise DownloadError(
-                    f"Local result file not found: {local_result_path}"
+                    f"Failed to load job result: File not found locally.\n\n"
+                    f"Job ID: {self.id}\n"
+                    f"Expected file: {local_result_path}\n\n"
+                    "This usually means:\n"
+                    "  1. Job hasn't finished yet (still running or pending)\n"
+                    "  2. Job failed before writing result\n"
+                    "  3. Result file was deleted\n"
+                    "  4. Job directory path is wrong\n\n"
+                    "To diagnose:\n"
+                    "  1. Check job status: job.get_status()\n"
+                    "  2. Verify job completed: job.is_successful()\n"
+                    "  3. Check files in job directory: ls -la {job_dir}\n"
+                    "  4. Review job logs: cat {job_dir}/*.out {job_dir}/*.err".format(
+                        job_dir=self.target_job_dir
+                        if self.target_job_dir
+                        else "job directory"
+                    )
                 ) from e
             except Exception as e:
                 logger.error(
@@ -509,3 +679,178 @@ class Job:
         except Exception as e:
             logger.error("Error cancelling job: %s", e)
             return False
+
+    def get_stdout(self) -> str:
+        """Retrieve the standard output from the job.
+
+        This is a debug helper that reads the scheduler's stdout file for this job.
+        Useful for debugging job failures or inspecting output without waiting for
+        completion.
+
+        Returns:
+            The contents of the job's stdout file as a string.
+
+        Raises:
+            FileNotFoundError: If the stdout file doesn't exist yet (job may not have started).
+            RuntimeError: If stdout_path metadata is missing.
+
+        Examples:
+            >>> try:
+            ...     output = job.get_stdout()
+            ...     print(output)
+            ... except FileNotFoundError:
+            ...     print("Job hasn't produced output yet")
+
+        Note:
+            For jobs that are still running, this returns the output written so far.
+            The file may be incomplete until the job completes.
+        """
+        if not self.stdout_path:
+            raise RuntimeError(
+                f"Cannot retrieve stdout for job {self.id}: stdout_path is not set.\n"
+                f"This typically occurs when reconstructing jobs via get_job(). "
+                f"For full debugging access, use the Job object returned from submit()."
+            )
+
+        return self._read_remote_file(self.stdout_path, "stdout")
+
+    def get_stderr(self) -> str:
+        """Retrieve the standard error output from the job.
+
+        This is a debug helper that reads the scheduler's stderr file for this job.
+        Useful for debugging job failures or inspecting error messages without waiting
+        for completion.
+
+        Returns:
+            The contents of the job's stderr file as a string.
+
+        Raises:
+            FileNotFoundError: If the stderr file doesn't exist yet (job may not have started).
+            RuntimeError: If stderr_path metadata is missing.
+
+        Examples:
+            >>> try:
+            ...     errors = job.get_stderr()
+            ...     if errors:
+            ...         print(f"Job errors: {errors}")
+            ... except FileNotFoundError:
+            ...     print("Job hasn't produced errors yet")
+
+        Note:
+            For jobs that are still running, this returns the errors written so far.
+            The file may be incomplete until the job completes.
+        """
+        if not self.stderr_path:
+            raise RuntimeError(
+                f"Cannot retrieve stderr for job {self.id}: stderr_path is not set.\n"
+                f"This typically occurs when reconstructing jobs via get_job(). "
+                f"For full debugging access, use the Job object returned from submit()."
+            )
+
+        return self._read_remote_file(self.stderr_path, "stderr")
+
+    def get_script(self) -> str:
+        """Retrieve the generated SLURM batch script for this job.
+
+        This is a debug helper that reads the actual sbatch script that was submitted.
+        Useful for understanding exactly what commands are being executed and debugging
+        environment or packaging issues.
+
+        Returns:
+            The contents of the job's batch script as a string.
+
+        Raises:
+            FileNotFoundError: If the script file doesn't exist.
+            RuntimeError: If job metadata is missing.
+
+        Examples:
+            >>> script = job.get_script()
+            >>> print(script)
+            #!/bin/bash
+            #SBATCH --job-name=my_task
+            ...
+
+        Note:
+            The script includes all SBATCH directives, setup commands, the task execution,
+            and cleanup commands.
+        """
+        if not self.target_job_dir or not self.pre_submission_id:
+            raise RuntimeError(
+                f"Cannot retrieve script for job {self.id}: job metadata is incomplete.\n"
+                f"This typically occurs when reconstructing jobs via get_job(). "
+                f"For full debugging access, use the Job object returned from submit()."
+            )
+
+        script_filename = f"slurm_job_{self.pre_submission_id}_script.sh"
+        script_path = os.path.join(self.target_job_dir, script_filename)
+
+        return self._read_remote_file(script_path, "script")
+
+    def _read_remote_file(self, remote_path: str, file_type: str) -> str:
+        """Read a file from the cluster (SSH or local).
+
+        Args:
+            remote_path: Absolute path to the file on the cluster.
+            file_type: Description of file type for error messages (e.g., "stdout", "stderr", "script").
+
+        Returns:
+            File contents as a string.
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist.
+        """
+        if isinstance(self.cluster.backend, SSHCommandBackend):
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                mode="w+", delete=False, suffix=f"_{file_type}"
+            ) as temp_file:
+                local_temp_path = temp_file.name
+
+            try:
+                logger.debug(
+                    "[%s] Downloading %s from %s to %s",
+                    self.id,
+                    file_type,
+                    remote_path,
+                    local_temp_path,
+                )
+                self.cluster.backend.download_file(remote_path, local_temp_path)
+
+                with open(local_temp_path, "r") as f:
+                    return f.read()
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"File not found on remote cluster: {remote_path}\n"
+                    f"Job ID: {self.id}\n\n"
+                    "This usually means:\n"
+                    "  1. Job hasn't started yet (file not created)\n"
+                    "  2. Job directory was cleaned up\n"
+                    "  3. Path is incorrect\n\n"
+                    f"Job directory: {self.target_job_dir}"
+                ) from e
+            finally:
+                if os.path.exists(local_temp_path):
+                    os.unlink(local_temp_path)
+        else:
+            # Local backend - read file directly
+            try:
+                local_path = remote_path
+                if not os.path.isabs(local_path):
+                    local_path = os.path.abspath(local_path)
+
+                logger.debug(
+                    "[%s] Reading local %s from %s", self.id, file_type, local_path
+                )
+                with open(local_path, "r") as f:
+                    return f.read()
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"File not found locally: {local_path}\n"
+                    f"Job ID: {self.id}\n\n"
+                    "This usually means:\n"
+                    "  1. Job hasn't started yet (file not created)\n"
+                    "  2. Job directory was cleaned up\n"
+                    "  3. Path is incorrect\n\n"
+                    f"Job directory: {self.target_job_dir}"
+                ) from e

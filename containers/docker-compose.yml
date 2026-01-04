@@ -1,0 +1,104 @@
+# Unified docker-compose for Slurm SDK development and integration testing
+#
+# Usage:
+#   Start Slurm cluster only:     docker compose up -d slurm registry
+#   Start with dev container:     docker compose --profile dev up -d
+#   Run in CI mode:               docker compose --profile ci up -d
+#
+# The devcontainer profile is used by VSCode/Cursor when opening in container.
+# The ci profile is used by the integration test runner script.
+
+services:
+  # Development container (optional - use with devcontainer or CI)
+  # Not started by default - requires --profile dev or --profile ci
+  devcontainer:
+    build:
+      context: ./dev
+      dockerfile: Containerfile
+    image: slurm-sdk-dev:latest
+    container_name: slurm-sdk-dev
+    # Privileged mode required for docker socket access on macOS with Podman
+    privileged: true
+    volumes:
+      - ..:/workspace:cached
+      # Mount docker socket for container builds inside devcontainer
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - slurm-dev-network
+    depends_on:
+      slurm:
+        condition: service_healthy
+      registry:
+        condition: service_started
+    environment:
+      - SLURM_SDK_DEV_MODE=devcontainer
+      - SLURM_HOST=slurm
+      - SLURM_PORT=22
+      - REGISTRY_URL=registry:5000
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    # Use profiles to make this optional
+    profiles:
+      - dev
+      - ci
+
+  # Local container registry for testing
+  # Accessible as "registry:5000" from other containers
+  # Accessible as "localhost:5000" from host
+  registry:
+    image: registry:2
+    container_name: slurm-test-registry
+    ports:
+      - "5000:5000"
+    networks:
+      - slurm-dev-network
+    restart: unless-stopped
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    volumes:
+      - registry-data:/var/lib/registry
+
+  # Unified Slurm cluster for all integration tests
+  # Includes Pyxis/enroot for container packaging tests
+  # Accessible as "slurm" from other containers
+  # SSH accessible as "localhost:2222" from host
+  slurm:
+    build:
+      context: ./slurm-pyxis-integration
+      dockerfile: Containerfile
+    image: slurm-integration:latest
+    container_name: slurm-test
+    hostname: slurm-control
+    privileged: true
+    ports:
+      - "2222:22"  # SSH from host
+    networks:
+      slurm-dev-network:
+        aliases:
+          - slurm
+          - slurm-pyxis
+          - slurm-control
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - slurm-home:/home/slurm
+    depends_on:
+      - registry
+    command: ["/sbin/init"]
+    healthcheck:
+      test: ["CMD", "systemctl", "is-active", "sshd"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+networks:
+  slurm-dev-network:
+    driver: bridge
+    name: slurm-dev-network
+
+volumes:
+  registry-data:
+    name: slurm-test-registry-data
+  slurm-home:
+    name: slurm-test-home
