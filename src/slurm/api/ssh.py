@@ -530,6 +530,184 @@ class SSHCommandBackend(BackendBase):
                 f"  2. Try manual SLURM command: ssh {getattr(self, 'hostname', 'cluster')} scontrol show job {job_id}"
             ) from e
 
+    def get_job_accounting(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get job information from Slurm accounting (for completed jobs).
+
+        This uses sacct to query job history, which works for jobs that have
+        completed and left the queue.
+
+        Args:
+            job_id: The job ID.
+
+        Returns:
+            Dict[str, Any]: The job accounting information including final state.
+
+        Raises:
+            RuntimeError: If the command fails.
+        """
+        try:
+            # Use sacct with specific format for faster execution
+            # Format: JobID, State, ExitCode, Start, End, Elapsed
+            stdout, stderr, return_code = self._run_command(
+                f"sacct -j {job_id} --format=JobID,State,ExitCode,Start,End,Elapsed --parsable2 --noheader",
+                timeout=10,
+                retry_count=1,
+            )
+
+            logger.debug("Job accounting stdout: %s", stdout)
+            logger.debug("Job accounting stderr: %s", stderr)
+            logger.debug("Job accounting return_code: %s", return_code)
+
+            if return_code != 0:
+                error_msg = stderr.strip() or "Unknown error"
+                raise BackendCommandError(
+                    f"Failed to get accounting info for job {job_id}: {error_msg}"
+                )
+
+            # Parse sacct output (parsable2 format uses | as delimiter)
+            lines = stdout.strip().split("\n")
+            if not lines or not lines[0]:
+                raise BackendCommandError(f"No accounting data found for job {job_id}")
+
+            # First line is the main job (not individual steps)
+            parts = lines[0].split("|")
+            if len(parts) < 6:
+                raise BackendCommandError(
+                    f"Unexpected sacct output format for job {job_id}: {stdout}"
+                )
+
+            job_id_out, state, exit_code, start_time, end_time, elapsed = (
+                parts[0],
+                parts[1],
+                parts[2],
+                parts[3],
+                parts[4],
+                parts[5],
+            )
+
+            # Map sacct state to scontrol-style state for consistency
+            status = {
+                "JobID": job_id_out,
+                "JobState": state,
+                "ExitCode": exit_code,
+                "StartTime": start_time,
+                "EndTime": end_time,
+                "Elapsed": elapsed,
+            }
+
+            logger.debug("Job accounting status: %s", status)
+            return status
+
+        except BackendTimeout:
+            raise
+        except BackendCommandError:
+            raise
+        except Exception as e:
+            logger.error("Failed to get job accounting for %s: %s", job_id, e)
+            raise BackendError(
+                f"Unexpected error while getting accounting info for job {job_id}: {e}"
+            ) from e
+
+    def get_account_jobs(
+        self, account: str, start_time: str, end_time: str = "now"
+    ) -> List[Dict[str, Any]]:
+        """
+        Query sacct for all jobs in an account within a time range.
+
+        Args:
+            account: The Slurm account name to query.
+            start_time: Start of time range (format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).
+            end_time: End of time range (default: "now").
+
+        Returns:
+            List[Dict[str, Any]]: List of job dictionaries with fields.
+
+        Raises:
+            BackendCommandError: If the command fails.
+        """
+        try:
+            # Use sacct with specific format for reporting
+            # Format: JobID, JobName, User, Account, State, ExitCode, AllocTRES, AllocNodes,
+            #         Start, End, Elapsed, Partition
+            # Note: Using AllocTRES instead of deprecated AllocGRES
+            cmd = (
+                f"sacct -A {account} -S {start_time} -E {end_time} "
+                f"--format=JobID,JobName,User,Account,State,ExitCode,AllocTRES,AllocNodes,"
+                f"Start,End,Elapsed,Partition --parsable2 --noheader"
+            )
+
+            stdout, stderr, return_code = self._run_command(
+                cmd,
+                timeout=30,
+                retry_count=2,
+            )
+
+            logger.debug("Account jobs stdout: %s", stdout[:500])
+            logger.debug("Account jobs stderr: %s", stderr)
+            logger.debug("Account jobs return_code: %s", return_code)
+
+            if return_code != 0:
+                error_msg = stderr.strip() or "Unknown error"
+                raise BackendCommandError(
+                    f"Failed to get jobs for account {account}: {error_msg}"
+                )
+
+            # Parse sacct output (parsable2 format uses | as delimiter)
+            lines = stdout.strip().split("\n")
+            if not lines or not lines[0]:
+                logger.info("No jobs found for account %s", account)
+                return []
+
+            jobs = []
+            for line in lines:
+                if not line.strip():
+                    continue
+
+                parts = line.split("|")
+                if len(parts) < 12:
+                    logger.warning("Unexpected sacct output format: %s", line)
+                    continue
+
+                job_id = parts[0]
+
+                # Skip job steps (e.g., "12345.batch", "12345.0")
+                # We only want main jobs (e.g., "12345")
+                if "." in job_id:
+                    continue
+
+                job = {
+                    "JobID": parts[0],
+                    "JobName": parts[1],
+                    "User": parts[2],
+                    "Account": parts[3],
+                    "State": parts[4],
+                    "ExitCode": parts[5],
+                    "AllocTRES": parts[6] if parts[6] else "",
+                    "AllocGRES": parts[6]
+                    if parts[6]
+                    else "",  # Keep for backwards compatibility
+                    "AllocNodes": parts[7],
+                    "Start": parts[8],
+                    "End": parts[9],
+                    "Elapsed": parts[10],
+                    "Partition": parts[11],
+                }
+                jobs.append(job)
+
+            logger.debug("Found %d jobs for account %s", len(jobs), account)
+            return jobs
+
+        except BackendTimeout:
+            raise
+        except BackendCommandError:
+            raise
+        except Exception as e:
+            logger.error("Failed to get jobs for account %s: %s", account, e)
+            raise BackendError(
+                f"Unexpected error while getting jobs for account {account}: {e}"
+            ) from e
+
     def cancel_job(self, job_id: str) -> bool:
         """
         Cancel a job.
@@ -562,8 +740,9 @@ class SSHCommandBackend(BackendBase):
         """
         try:
             # Use a simpler format that's faster to execute
+            # %A=JobID, %j=Name, %T=State, %u=User, %S=StartTime, %M=TimeUsed, %l=TimeLimit, %P=Partition, %a=Account
             stdout, stderr, return_code = self._run_command(
-                "squeue -h -o '%A|%j|%T|%u|%M|%l|%P|%a'", timeout=30, retry_count=2
+                "squeue -h -o '%A|%j|%T|%u|%S|%M|%l|%P|%a'", timeout=30, retry_count=2
             )
 
             if return_code != 0:
@@ -576,23 +755,25 @@ class SSHCommandBackend(BackendBase):
                     continue
 
                 parts = line.split("|")
-                if len(parts) >= 8:
+                if len(parts) >= 9:
                     (
                         job_id,
                         job_name,
                         state,
                         user,
+                        start_time,
                         time,
                         time_limit,
                         partition,
                         account,
-                    ) = parts[:8]
+                    ) = parts[:9]
                     jobs.append(
                         {
                             "JOBID": job_id,
                             "NAME": job_name,
                             "STATE": state,
                             "USER": user,
+                            "START_TIME": start_time,
                             "TIME": time,
                             "TIME_LIMIT": time_limit,
                             "PARTITION": partition,
