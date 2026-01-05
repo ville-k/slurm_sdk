@@ -80,7 +80,7 @@ def test_hello_world_example(
         packaging="container",
         extra_args=[
             "--packaging-registry",
-            "registry:5000/hello-world",
+            "registry:20002/hello-world",
             "--packaging-platform",
             _default_platform(),
             "--packaging",
@@ -102,7 +102,7 @@ def test_hello_container_example(
         packaging="container",
         extra_args=[
             "--packaging-registry",
-            "registry:5000/hello-container",
+            "registry:20002/hello-container",
             "--packaging-platform",
             _default_platform(),
             "--packaging",
@@ -123,7 +123,7 @@ def test_map_reduce_example(slurm_pyxis_cluster_config, sdk_on_pyxis_cluster):
             "--num-chunks",
             "3",
             "--packaging-registry",
-            "registry:5000/map-reduce",
+            "registry:20002/map-reduce",
             "--packaging-platform",
             _default_platform(),
             "--packaging",
@@ -146,7 +146,7 @@ def test_parallelization_patterns_example(
             "--pattern",
             "all",
             "--packaging-registry",
-            "registry:5000/parallel-patterns",
+            "registry:20002/parallel-patterns",
             "--packaging-platform",
             _default_platform(),
             "--packaging",
@@ -170,7 +170,7 @@ def test_hello_torch_example(slurm_pyxis_cluster_config, sdk_on_pyxis_cluster):
         packaging="container",
         extra_args=[
             "--packaging-registry",
-            "registry:5000/parallel-patterns",
+            "registry:20002/parallel-patterns",
             "--packaging-platform",
             _default_platform(),
             "--packaging",
@@ -206,7 +206,7 @@ def test_workflow_graph_visualization_example(
         packaging="container",
         extra_args=[
             "--packaging-registry",
-            "registry:5000/workflow-graph",
+            "registry:20002/workflow-graph",
             "--packaging-platform",
             _default_platform(),
             "--packaging",

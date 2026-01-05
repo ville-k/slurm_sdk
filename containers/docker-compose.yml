@@ -34,7 +34,7 @@ services:
       - SLURM_SDK_DEV_MODE=devcontainer
       - SLURM_HOST=slurm
       - SLURM_PORT=22
-      - REGISTRY_URL=registry:5000
+      - REGISTRY_URL=registry:20002
     stdin_open: true
     tty: true
     working_dir: /workspace
@@ -44,18 +44,19 @@ services:
       - ci
 
   # Local container registry for testing
-  # Accessible as "registry:5000" from other containers
-  # Accessible as "localhost:5000" from host
+  # Accessible as "registry:20002" from other containers
+  # Accessible as "localhost:20002" from host
   registry:
     image: registry:2
     container_name: slurm-test-registry
     ports:
-      - "5000:5000"
+      - "20002:20002"
     networks:
       - slurm-dev-network
     restart: unless-stopped
     environment:
       REGISTRY_STORAGE_DELETE_ENABLED: "true"
+      REGISTRY_HTTP_ADDR: ":20002"
     volumes:
       - registry-data:/var/lib/registry
 

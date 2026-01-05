@@ -256,9 +256,11 @@ class WheelPackagingStrategy(PackagingStrategy):
         commands.append("fi")
         commands.append("")
 
-        # Use file locking to synchronize array elements
-        commands.append("# File locking for concurrent array execution")
-        commands.append(f'LOCK_FILE="{lock_file}"')
+        # Use directory-based locking to synchronize array elements (cross-platform)
+        commands.append(
+            "# Directory locking for concurrent array execution (works on Linux and macOS)"
+        )
+        commands.append(f'LOCK_DIR="{lock_file}.d"')
         commands.append(f'VENV_PATH="{venv_path}"')
         commands.append(f'SETUP_MARKER="{setup_complete_marker}"')
         commands.append("")
@@ -276,10 +278,11 @@ class WheelPackagingStrategy(PackagingStrategy):
 
         # If not skipping, acquire lock and set up
         commands.append('if [ "$SKIP_SETUP" = "0" ]; then')
-        commands.append("  # Open lock file and acquire exclusive lock")
-        commands.append('  exec 200>"$LOCK_FILE"')
+        commands.append("  # Acquire lock using mkdir (atomic on both Linux and macOS)")
         commands.append('  echo "Acquiring setup lock..."')
-        commands.append("  flock -x 200")
+        commands.append('  while ! mkdir "$LOCK_DIR" 2>/dev/null; do')
+        commands.append("    sleep 0.5")
+        commands.append("  done")
         commands.append('  echo "Lock acquired"')
         commands.append("")
 
@@ -289,7 +292,7 @@ class WheelPackagingStrategy(PackagingStrategy):
         commands.append(
             '    echo "Setup completed by another process while waiting, using existing environment"'
         )
-        commands.append("    flock -u 200")
+        commands.append('    rmdir "$LOCK_DIR"')
         commands.append("  else")
         commands.append('    echo "Performing environment setup..."')
         commands.append("")
@@ -319,7 +322,7 @@ class WheelPackagingStrategy(PackagingStrategy):
             commands.append(
                 '      echo "ERROR: Wheel file not found at source or target" >&2'
             )
-            commands.append("      flock -u 200")
+            commands.append('      rmdir "$LOCK_DIR"')
             commands.append("      exit 1")
             commands.append("    else")
             commands.append('      echo "Wheel already at target location"')
@@ -332,11 +335,11 @@ class WheelPackagingStrategy(PackagingStrategy):
         # Venv creation and activation (use explicit interpreter)
         commands.append('    echo "Creating venv at $VENV_PATH"')
         commands.append(
-            '    "$PY_EXEC" -m venv "$VENV_PATH" || { echo "ERROR: Failed to create venv" >&2; flock -u 200; exit 1; }'
+            '    "$PY_EXEC" -m venv "$VENV_PATH" || { echo "ERROR: Failed to create venv" >&2; rmdir "$LOCK_DIR"; exit 1; }'
         )
         commands.append('    echo "Activating venv: $VENV_PATH/bin/activate"')
         commands.append(
-            '    source "$VENV_PATH/bin/activate" || { echo "ERROR: Failed to activate venv" >&2; flock -u 200; exit 1; }'
+            '    source "$VENV_PATH/bin/activate" || { echo "ERROR: Failed to activate venv" >&2; rmdir "$LOCK_DIR"; exit 1; }'
         )
         commands.append('    PY_EXEC="$VENV_PATH/bin/python"')
         commands.append('    echo "Updated PY_EXEC to venv python: $PY_EXEC"')
@@ -346,11 +349,11 @@ class WheelPackagingStrategy(PackagingStrategy):
         commands.append('    echo "Installing wheel and dependencies using pip..."')
         if self.upgrade_pip:
             commands.append(
-                '    "$PY_EXEC" -m pip install --quiet --upgrade pip || { echo "ERROR: Failed to upgrade pip" >&2; flock -u 200; exit 1; }'
+                '    "$PY_EXEC" -m pip install --quiet --upgrade pip || { echo "ERROR: Failed to upgrade pip" >&2; rmdir "$LOCK_DIR"; exit 1; }'
             )
         install_cmd = f'"$PY_EXEC" -m pip install --quiet {extra_index_cmd} {install_wheel_path}{extras_str} {deps_str}'
         commands.append(
-            f'    {install_cmd.strip()} || {{ echo "ERROR: Failed to install wheel" >&2; flock -u 200; exit 1; }}'
+            f'    {install_cmd.strip()} || {{ echo "ERROR: Failed to install wheel" >&2; rmdir "$LOCK_DIR"; exit 1; }}'
         )
         commands.append("")
 
@@ -359,10 +362,10 @@ class WheelPackagingStrategy(PackagingStrategy):
             '    echo "Installation complete. Python: $(which \\"$PY_EXEC\\")"'
         )
         commands.append(
-            '    touch "$SETUP_MARKER" || { echo "ERROR: Failed to create setup marker" >&2; flock -u 200; exit 1; }'
+            '    touch "$SETUP_MARKER" || { echo "ERROR: Failed to create setup marker" >&2; rmdir "$LOCK_DIR"; exit 1; }'
         )
         commands.append('    echo "Setup complete, releasing lock"')
-        commands.append("    flock -u 200")
+        commands.append('    rmdir "$LOCK_DIR"')
         commands.append("  fi")
         commands.append("fi")
         commands.append("")

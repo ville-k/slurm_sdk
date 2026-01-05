@@ -34,7 +34,7 @@ The easiest way to get started is using the devcontainer, which provides a fully
 The devcontainer automatically starts:
 
 - A Slurm cluster with Pyxis/enroot (accessible at `slurm:22`)
-- A container registry (accessible at `registry:5000`)
+- A container registry (accessible at `registry:20002`)
 
 ### Option 2: Host Development
 
@@ -144,7 +144,7 @@ Add registry hostname to `/etc/hosts`:
 echo '127.0.0.1 registry' | sudo tee -a /etc/hosts
 ```
 
-**Why is this needed?** When you push an image as `registry:5000/myimage`, both the host (pushing) and the Slurm container (pulling) must resolve `registry` to reach the same registry service. The `/etc/hosts` entry makes `registry` resolve to `localhost` on your machine, where docker-compose exposes the registry on port 5000.
+**Why is this needed?** When you push an image as `registry:20002/myimage`, both the host (pushing) and the Slurm container (pulling) must resolve `registry` to reach the same registry service. The `/etc/hosts` entry makes `registry` resolve to `localhost` on your machine, where docker-compose exposes the registry on port 20002.
 
 **Not needed inside devcontainer:** If you run tests from inside the devcontainer, Docker's internal DNS automatically resolves `registry` to the registry container. No `/etc/hosts` modification required.
 
@@ -171,7 +171,7 @@ uv run pytest --run-integration -v -m "not container_packaging"
 | `SLURM_SDK_DEV_MODE`           | Execution mode: `host`, `devcontainer`, or `ci` | Auto-detected                                |
 | `SLURM_HOST`                   | Slurm cluster hostname                          | `slurm` (devcontainer) or `127.0.0.1` (host) |
 | `SLURM_PORT`                   | Slurm SSH port                                  | `22` (devcontainer) or `2222` (host)         |
-| `REGISTRY_URL`                 | Container registry URL                          | `registry:5000`                              |
+| `REGISTRY_URL`                 | Container registry URL                          | `registry:20002`                             |
 | `SLURM_RUN_INTEGRATION`        | Enable integration tests                        | `0`                                          |
 | `SLURM_TEST_KEEP`              | Keep docker-compose services after tests        | Not set                                      |
 | `SLURM_TEST_COMPOSE_COMMAND`   | Override compose command                        | Auto-detected                                |
@@ -196,7 +196,7 @@ uv run pytest --run-integration -v -m "not container_packaging"
 
 ### Port Conflicts
 
-**"Port 5000 is already in use"**
+**"Port 20002 is already in use"**
 
 - Stop conflicting services, or
 - Modify port mappings in `containers/docker-compose.yml`
@@ -224,7 +224,7 @@ uv run pytest --run-integration -v -m "not container_packaging"
 
 ### Registry Issues
 
-**"registry:5000" not found (host only)**
+**"registry:20002" not found (host only)**
 
 - This only happens when running tests from your host machine, not inside devcontainer
 - Add to `/etc/hosts`: `echo '127.0.0.1 registry' | sudo tee -a /etc/hosts`
@@ -233,7 +233,7 @@ uv run pytest --run-integration -v -m "not container_packaging"
 **Push fails with connection refused**
 
 - Ensure registry is running: `docker compose -f containers/docker-compose.yml ps registry`
-- Check port: `curl -s http://localhost:5000/v2/`
+- Check port: `curl -s http://localhost:20002/v2/`
 
 ## Project Structure
 

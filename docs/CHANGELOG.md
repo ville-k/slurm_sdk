@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - SSH host key verification with configurable policies (`auto`, `warn`, `reject`)
+- Modular runner architecture with dedicated modules for argument loading, callbacks,
+  context injection, placeholder resolution, result saving, and workflow building
 - Input validation module (`slurm.validation`) for job names, accounts, and partitions
 - Security documentation explaining the SDK's trust model and best practices
 - How-to guide for hardening SSH connections in production
@@ -26,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refactored `slurm.runner` from monolithic module into focused package with 7 modules
+  while maintaining full backwards compatibility
+- Integration test registry port changed from 5000 to 20002 to avoid conflicts with
+  common services (e.g., macOS AirPlay Receiver)
 - Local backend now uses `shell=False` for SLURM commands (more secure)
 - Default SSH host key policy changed from `auto` to `warn` (logs warning for unknown hosts)
 - Job script permissions now default to `0o750` (configurable via `script_permissions`)
@@ -43,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Replaced Linux-only `flock` with cross-platform `mkdir`-based locking in wheel
+  packaging for macOS compatibility
 - Type annotations added to public APIs to resolve mkdocstrings warnings:
   - `Cluster.from_file()`, `Cluster.add_argparse_args()`, `Cluster.from_args()`, `Cluster.submit()`
   - `task()` and `workflow()` decorator return types
