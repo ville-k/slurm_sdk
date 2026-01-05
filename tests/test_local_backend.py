@@ -205,8 +205,9 @@ def test_cancel_job_failure(mock_run, backend):
 @patch("subprocess.run")
 def test_get_queue(mock_run, backend):
     """Test getting job queue."""
+    # Format: JOBID|NAME|STATE|USER|START_TIME|TIME|TIME_LIMIT|PARTITION|ACCOUNT
     mock_run.return_value = MagicMock(
-        stdout="101|job1|RUNNING|user|0:05|1:00:00|normal|account1\n102|job2|PENDING|user|0:00|2:00:00|gpu|account2\n",
+        stdout="101|job1|RUNNING|user|2024-01-01T00:00:00|0:05|1:00:00|normal|account1\n102|job2|PENDING|user|N/A|0:00|2:00:00|gpu|account2\n",
         stderr="",
         returncode=0,
     )
@@ -369,3 +370,105 @@ def test_submit_job_script_filename_format(mock_run, backend, temp_job_dir):
     )
     assert os.path.exists(expected_script_path)
     assert expected_script_path.endswith("slurm_job_20250109_212626_81f18a7e_script.sh")
+
+
+# Tests for get_account_jobs
+
+
+@patch("subprocess.run")
+def test_get_account_jobs_parses_output(mock_run, backend):
+    """Test that get_account_jobs correctly parses sacct output."""
+    # Format: JobID|JobName|User|Account|State|ExitCode|AllocTRES|AllocNodes|Start|End|Elapsed|Partition
+    mock_output = (
+        "12345|job1|user1|account1|COMPLETED|0:0|billing=8,cpu=8,gres/gpu=4,mem=32G,node=2|2|2024-01-01T00:00:00|2024-01-01T01:00:00|01:00:00|partition1\n"
+        "12346|job2|user2|account1|FAILED|1:0|gres/gpu=2|1|2024-01-01T02:00:00|2024-01-01T02:30:00|00:30:00|partition1\n"
+    )
+    mock_run.return_value = MagicMock(stdout=mock_output, stderr="", returncode=0)
+
+    jobs = backend.get_account_jobs(
+        account="account1",
+        start_time="2024-01-01",
+        end_time="now",
+    )
+
+    assert len(jobs) == 2
+    assert jobs[0]["JobID"] == "12345"
+    assert jobs[0]["JobName"] == "job1"
+    assert jobs[0]["User"] == "user1"
+    assert jobs[0]["Account"] == "account1"
+    assert jobs[0]["State"] == "COMPLETED"
+    assert jobs[0]["AllocTRES"] == "billing=8,cpu=8,gres/gpu=4,mem=32G,node=2"
+    assert (
+        jobs[0]["AllocGRES"] == "billing=8,cpu=8,gres/gpu=4,mem=32G,node=2"
+    )  # Backwards compat
+    assert jobs[0]["AllocNodes"] == "2"
+
+    assert jobs[1]["JobID"] == "12346"
+    assert jobs[1]["State"] == "FAILED"
+
+
+@patch("subprocess.run")
+def test_get_account_jobs_skips_job_steps(mock_run, backend):
+    """Test that job steps (e.g., 12345.batch) are filtered out."""
+    mock_output = (
+        "12345|job1|user1|account1|COMPLETED|0:0|gres/gpu=4|2|2024-01-01T00:00:00|2024-01-01T01:00:00|01:00:00|partition1\n"
+        "12345.batch|batch|user1|account1|COMPLETED|0:0||2|2024-01-01T00:00:00|2024-01-01T01:00:00|01:00:00|partition1\n"
+        "12345.0|step0|user1|account1|COMPLETED|0:0||2|2024-01-01T00:00:00|2024-01-01T01:00:00|01:00:00|partition1\n"
+    )
+    mock_run.return_value = MagicMock(stdout=mock_output, stderr="", returncode=0)
+
+    jobs = backend.get_account_jobs(
+        account="account1",
+        start_time="2024-01-01",
+        end_time="now",
+    )
+
+    # Should only include the main job, not the steps
+    assert len(jobs) == 1
+    assert jobs[0]["JobID"] == "12345"
+
+
+@patch("subprocess.run")
+def test_get_account_jobs_empty_result(mock_run, backend):
+    """Test handling of no jobs found."""
+    mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+    jobs = backend.get_account_jobs(
+        account="account1",
+        start_time="2024-01-01",
+        end_time="now",
+    )
+
+    assert len(jobs) == 0
+
+
+@patch("subprocess.run")
+def test_get_account_jobs_failure(mock_run, backend):
+    """Test handling of sacct command failure."""
+    mock_run.return_value = MagicMock(
+        stdout="", stderr="sacct: error: Invalid account", returncode=1
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to get jobs for account"):
+        backend.get_account_jobs(
+            account="invalid_account",
+            start_time="2024-01-01",
+            end_time="now",
+        )
+
+
+@patch("subprocess.run")
+def test_get_account_jobs_handles_empty_tres(mock_run, backend):
+    """Test that empty AllocTRES is handled correctly."""
+    mock_output = "12345|job1|user1|account1|COMPLETED|0:0||1|2024-01-01T00:00:00|2024-01-01T01:00:00|01:00:00|partition1\n"
+    mock_run.return_value = MagicMock(stdout=mock_output, stderr="", returncode=0)
+
+    jobs = backend.get_account_jobs(
+        account="account1",
+        start_time="2024-01-01",
+        end_time="now",
+    )
+
+    assert len(jobs) == 1
+    assert jobs[0]["AllocTRES"] == ""
+    assert jobs[0]["AllocGRES"] == ""
