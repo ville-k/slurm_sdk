@@ -315,6 +315,139 @@ class LocalBackend(BackendBase):
                 f"  2. Try manual command: scontrol show job {job_id}"
             ) from e
 
+    def get_job_accounting(self, job_id: str) -> Dict[str, Any]:
+        """Get job information from Slurm accounting (for completed jobs)."""
+        try:
+            result = subprocess.run(
+                [
+                    "sacct",
+                    "-j",
+                    job_id,
+                    "--format=JobID,State,ExitCode,Start,End,Elapsed",
+                    "--parsable2",
+                    "--noheader",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to get accounting info for job {job_id}: {result.stderr}"
+                )
+
+            lines = result.stdout.strip().split("\n")
+            if not lines or not lines[0]:
+                raise RuntimeError(f"No accounting data found for job {job_id}")
+
+            parts = lines[0].split("|")
+            if len(parts) < 6:
+                raise RuntimeError(
+                    f"Unexpected sacct output for job {job_id}: {result.stdout}"
+                )
+
+            return {
+                "JobID": parts[0],
+                "JobState": parts[1],
+                "ExitCode": parts[2],
+                "StartTime": parts[3],
+                "EndTime": parts[4],
+                "Elapsed": parts[5],
+            }
+        except Exception as e:
+            raise RuntimeError(f"Failed to get job accounting for {job_id}: {e}") from e
+
+    def get_account_jobs(
+        self, account: str, start_time: str, end_time: str = "now"
+    ) -> List[Dict[str, Any]]:
+        """
+        Query sacct for all jobs in an account within a time range.
+
+        Args:
+            account: The Slurm account name to query.
+            start_time: Start of time range (format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).
+            end_time: End of time range (default: "now").
+
+        Returns:
+            List[Dict[str, Any]]: List of job dictionaries with fields.
+
+        Raises:
+            RuntimeError: If the command fails.
+        """
+        try:
+            cmd = [
+                "sacct",
+                "-A",
+                account,
+                "-S",
+                start_time,
+                "-E",
+                end_time,
+                "--format=JobID,JobName,User,Account,State,ExitCode,AllocTRES,AllocNodes,Start,End,Elapsed,Partition",
+                "--parsable2",
+                "--noheader",
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to get jobs for account {account}: {result.stderr}"
+                )
+
+            lines = result.stdout.strip().split("\n")
+            if not lines or not lines[0]:
+                logger.info("No jobs found for account %s", account)
+                return []
+
+            jobs = []
+            for line in lines:
+                if not line.strip():
+                    continue
+
+                parts = line.split("|")
+                if len(parts) < 12:
+                    logger.warning("Unexpected sacct output format: %s", line)
+                    continue
+
+                job_id = parts[0]
+
+                # Skip job steps
+                if "." in job_id:
+                    continue
+
+                job = {
+                    "JobID": parts[0],
+                    "JobName": parts[1],
+                    "User": parts[2],
+                    "Account": parts[3],
+                    "State": parts[4],
+                    "ExitCode": parts[5],
+                    "AllocTRES": parts[6] if parts[6] else "",
+                    "AllocGRES": parts[6]
+                    if parts[6]
+                    else "",  # Keep for backwards compatibility
+                    "AllocNodes": parts[7],
+                    "Start": parts[8],
+                    "End": parts[9],
+                    "Elapsed": parts[10],
+                    "Partition": parts[11],
+                }
+                jobs.append(job)
+
+            logger.debug("Found %d jobs for account %s", len(jobs), account)
+            return jobs
+
+        except Exception as e:
+            logger.error("Failed to get jobs for account %s: %s", account, e)
+            raise RuntimeError(f"Failed to get jobs for account {account}: {e}") from e
+
     def cancel_job(self, job_id: str) -> bool:
         """
         Cancel a job.
@@ -351,8 +484,9 @@ class LocalBackend(BackendBase):
             RuntimeError: If the command fails
         """
         try:
+            # %A=JobID, %j=Name, %T=State, %u=User, %S=StartTime, %M=TimeUsed, %l=TimeLimit, %P=Partition, %a=Account
             stdout, stderr, return_code = self._run_command(
-                "squeue -h -o '%A|%j|%T|%u|%M|%l|%P|%a'", check=False
+                "squeue -h -o '%A|%j|%T|%u|%S|%M|%l|%P|%a'", check=False
             )
 
             if return_code != 0:
@@ -366,23 +500,25 @@ class LocalBackend(BackendBase):
                     continue
 
                 parts = line.split("|")
-                if len(parts) >= 8:
+                if len(parts) >= 9:
                     (
                         job_id,
                         job_name,
                         state,
                         user,
+                        start_time,
                         time,
                         time_limit,
                         partition,
                         account,
-                    ) = parts[:8]
+                    ) = parts[:9]
                     jobs.append(
                         {
                             "JOBID": job_id,
                             "NAME": job_name,
                             "STATE": state,
                             "USER": user,
+                            "START_TIME": start_time,
                             "TIME": time,
                             "TIME_LIMIT": time_limit,
                             "PARTITION": partition,

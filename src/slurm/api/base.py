@@ -67,6 +67,58 @@ class BackendBase(abc.ABC):
         pass
 
     @abc.abstractmethod
+    def get_job_accounting(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get job information from Slurm accounting (for completed jobs).
+
+        This uses sacct to query job history, which works for jobs that have
+        completed and left the queue.
+
+        Args:
+            job_id: The ID of the job to query.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing job accounting information.
+
+        Raises:
+            Exception: If the accounting query fails.
+        """
+        pass
+
+    @abc.abstractmethod
+    def get_account_jobs(
+        self, account: str, start_time: str, end_time: str = "now"
+    ) -> List[Dict[str, Any]]:
+        """
+        Query sacct for all jobs in an account within a time range.
+
+        Args:
+            account: The Slurm account name to query.
+            start_time: Start of time range (format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).
+            end_time: End of time range (default: "now").
+
+        Returns:
+            List[Dict[str, Any]]: List of job dictionaries with fields:
+                - JobID: Job identifier
+                - JobName: Name of the job
+                - User: Username who submitted the job
+                - Account: Slurm account
+                - State: Job state (COMPLETED, FAILED, etc.)
+                - ExitCode: Job exit code
+                - AllocTRES: Allocated trackable resources (e.g., "gres/gpu=4")
+                - AllocGRES: Alias for AllocTRES (backwards compatibility)
+                - AllocNodes: Number of allocated nodes
+                - Start: Job start time
+                - End: Job end time
+                - Elapsed: Job elapsed time (format: DD-HH:MM:SS)
+                - Partition: Slurm partition
+
+        Raises:
+            Exception: If the query fails.
+        """
+        pass
+
+    @abc.abstractmethod
     def cancel_job(self, job_id: str) -> bool:
         """
         Cancel a job.
