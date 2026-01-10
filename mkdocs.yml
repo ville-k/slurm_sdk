@@ -1,8 +1,8 @@
 site_name: Slurm SDK
 site_description: Python SDK for containerized Slurm workflows and task orchestration.
-repo_url: https://github.com/ville-k/slurm
-repo_name: ville-k/slurm
-site_url: https://ville-k.github.io/slurm
+repo_url: https://github.com/ville-k/slurm_sdk
+repo_name: ville-k/slurm_sdk
+site_url: https://ville-k.github.io/slurm_sdk
 
 nav:
   - Home: index.md
