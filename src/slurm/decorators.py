@@ -5,6 +5,7 @@ from typing import (
     Optional,
     TypeVar,
     TYPE_CHECKING,
+    Union,
     overload,
 )
 
@@ -45,7 +46,7 @@ def workflow(
     *,
     time: str = "01:00:00",
     **sbatch_kwargs: Any,
-):
+) -> Union[SlurmTask, Callable[[Callable[..., Any]], SlurmTask]]:
     """Decorator for workflow orchestrator tasks.
 
     Workflows are special tasks that can submit other tasks. They automatically
@@ -121,7 +122,7 @@ def task(
     *,
     packaging: str = "auto",
     **sbatch_kwargs: Any,
-):
+) -> Union[SlurmTask, Callable[[Callable[..., Any]], SlurmTask]]:
     """Decorator for defining a Python function as a Slurm task.
 
     This decorator wraps your function in a SlurmTask object, capturing SBATCH

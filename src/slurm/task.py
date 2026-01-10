@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import functools
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, Union
 
 # Add this block for type hinting Cluster without causing circular import at runtime
 if TYPE_CHECKING:
-    pass
+    from .job import Job
+    from .array_job import ArrayJob
 
 
 class JobResultPlaceholder:
@@ -323,6 +324,40 @@ class SlurmTask:
     The task can be called like a regular function (runs locally) or submitted to a
     cluster for remote execution.
 
+    Task API Flow:
+
+    ```mermaid
+    flowchart LR
+        subgraph Creation
+            A["@task decorator"] --> B[SlurmTask]
+        end
+
+        subgraph Modifiers["Modifiers (return new SlurmTask)"]
+            B --> C[".with_options()"]
+            C --> B
+        end
+
+        subgraph Dependencies
+            B --> D[".after(jobs)"]
+            D --> E[SlurmTaskWithDependencies]
+        end
+
+        subgraph Execution
+            B --> F["__call__(args)"]
+            E --> F
+            F --> G[Job]
+
+            B --> H[".map(items)"]
+            E --> H
+            H --> I[ArrayJob]
+        end
+
+        subgraph Local
+            B --> J[".unwrapped"]
+            J --> K["Original function"]
+        end
+    ```
+
     Attributes:
         func: The wrapped Python function.
         sbatch_options: SBATCH directive parameters (normalized with underscores).
@@ -479,7 +514,7 @@ class SlurmTask:
         return job
 
     @property
-    def unwrapped(self):
+    def unwrapped(self) -> Callable[..., Any]:
         """Access the original function for local testing.
 
         Use this property to call the task function locally without submitting
@@ -499,7 +534,7 @@ class SlurmTask:
         """
         return self.func
 
-    def map(self, items: List[Any], max_concurrent: Optional[int] = None):
+    def map(self, items: List[Any], max_concurrent: Optional[int] = None) -> "ArrayJob":
         """Map task over items, creating an array job.
 
         This method creates an array job where each item in the list becomes
@@ -590,7 +625,7 @@ class SlurmTask:
             task=self, items=items, cluster=cluster, max_concurrent=max_concurrent
         )
 
-    def after(self, *jobs):
+    def after(self, *jobs: Union["Job", "ArrayJob"]) -> "SlurmTaskWithDependencies":
         """Bind explicit dependencies to this task (pre-call dependency binding).
 
         Returns a SlurmTaskWithDependencies wrapper that can be called or mapped.
@@ -648,7 +683,7 @@ class SlurmTask:
         # Return a wrapper that supports both __call__ and .map()
         return SlurmTaskWithDependencies(task=self, dependencies=flattened_deps)
 
-    def with_options(self, **options):
+    def with_options(self, **options: Any) -> "SlurmTask":
         """Create a variant of this task with different SBATCH or packaging options.
 
         Returns a new SlurmTask instance with updated options while preserving
@@ -727,7 +762,7 @@ class SlurmTask:
 
         return new_task
 
-    def with_dependencies(self, tasks):
+    def with_dependencies(self, tasks: List["SlurmTask"]) -> "SlurmTask":
         """Specify tasks that need their containers pre-built before this workflow runs.
 
         This method is used for workflows that call tasks with different container

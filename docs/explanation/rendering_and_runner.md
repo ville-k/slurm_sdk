@@ -2,6 +2,33 @@
 
 The renderer produces the sbatch script that configures the job environment, and the runner executes the target function inside the job.
 
+## Execution Flow
+
+```mermaid
+flowchart TB
+    subgraph Client["Client Side"]
+        A[cluster.submit] --> B[Serialize args/kwargs]
+        B --> C[Renderer: Generate sbatch script]
+        C --> D[Upload to cluster]
+        D --> E[sbatch submission]
+    end
+
+    subgraph Cluster["Cluster Side"]
+        E --> F[SLURM schedules job]
+        F --> G[Runner starts]
+        G --> H[Load args from job_dir]
+        H --> I{Task or Workflow?}
+        I -->|Task| J[Inject JobContext]
+        I -->|Workflow| K[Inject WorkflowContext]
+        J --> L[Execute function]
+        K --> L
+        L --> M[Serialize result.pkl]
+        M --> N[Emit callbacks]
+    end
+
+    N --> O[Job complete]
+```
+
 ## Rendering (`slurm.rendering`)
 - Combines SBATCH directives, packaging setup commands, and runner invocation.
 - Exports cluster metadata such as packaging config for nested workflow execution.
