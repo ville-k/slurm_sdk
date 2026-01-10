@@ -5,6 +5,7 @@ job segments, launches evaluation after each epoch, and keeps training moving
 without waiting for evaluation to finish.
 
 ## Run
+
 ```bash
 uv run python -m slurm.examples.parallel_train_eval.workflow \
   --hostname your-slurm-host \
@@ -16,6 +17,7 @@ uv run python -m slurm.examples.parallel_train_eval.workflow \
 ```
 
 ## Outputs
+
 - `state.json` tracks epoch progress, checkpoints, and submitted job IDs.
 - `checkpoints/epoch_XXX.json` records per-epoch training progress.
 - `metrics/epoch_XXX.json` records evaluation results.

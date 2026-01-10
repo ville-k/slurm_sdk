@@ -3,6 +3,7 @@
 Slurm SDK is built around a small set of components that turn Python functions into containerized Slurm jobs.
 
 ## Core components
+
 - **Cluster** (`slurm.cluster`): Holds backend connection details, packaging defaults, and submission behavior.
 - **Backend** (`slurm.api.*`): Submits scripts and fetches logs (SSH or local).
 - **Packaging** (`slurm.packaging.container`): Builds or references container images for tasks.
@@ -46,6 +47,7 @@ graph TB
 ```
 
 ## Execution flow (high level)
+
 ```mermaid
 graph TD
   A[Python task/workflow] --> B[Cluster.submit]
@@ -58,6 +60,7 @@ graph TD
 ```
 
 ## What gets persisted
+
 - **Job directory**: Scripts, stdout/stderr, pickled args/kwargs, and result files.
 - **Workflow directory**: A root job directory plus per-task subdirectories.
 - **Environment metadata**: `.slurm_environment.json` for workflow inheritance.
@@ -85,6 +88,7 @@ flowchart TD
 ```
 
 ## Why this structure
+
 - **Separation of concerns**: Packaging, rendering, and execution are isolated.
 - **Debuggability**: The job directory is the source of truth for execution artifacts.
 - **Repeatability**: Container builds and image references are explicit and traceable.

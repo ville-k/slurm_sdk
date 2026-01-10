@@ -97,7 +97,6 @@ if __name__ == "__main__":
 - [AGENTS.md](AGENTS.md) - Guide for AI agents working with this codebase
 - [examples/](src/slurm/examples/) - Complete working examples including parallelization patterns
 
-
 ## Running on an ARM Mac (Apple Silicon)
 
 You can build and publish x86_64 (``linux/amd64```) images from an ARM Mac by

@@ -3,6 +3,7 @@
 Callbacks let you observe packaging, submission, execution, and workflow events without changing task code.
 
 ## Lifecycle stages
+
 - **Packaging begin/end**: Inspect container build and image resolution.
 - **Submit begin/end**: Track job submission metadata and target paths.
 - **Run begin/end**: Observe execution timing and outcomes.
@@ -52,6 +53,7 @@ Callbacks can be configured to run on the client or on the runner. The SDK check
 Callbacks that need to run on the runner are pickled and shipped alongside the job script. Lightweight logging callbacks typically run only on the client.
 
 ## Typical uses
+
 - Structured logging and progress output.
 - Dependency graph visualization.
 - Custom metrics or telemetry hooks.
