@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(cp:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(awk:*)",
+      "Bash(sort:*)",
+      "Bash(tee:*)",
+      "Bash(xargs:*)",
+      "Bash(chmod:*)",
+      "Bash(ln:*)",
+      "Bash(timeout:*)",
+      "Bash(pkill:*)",
+      "Bash(pgrep:*)",
+      "Bash(lsof:*)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(uv run:*)",
+      "Bash(git diff:*)",
+      "Bash(git mv:*)",
+      "Bash(docker:*)",
+      "Bash(docker-compose:*)",
+      "Bash(podman:*)",
+      "Bash(curl:*)",
+      "Bash(ssh:*)",
+      "Bash(for file in:*)",
+      "Bash(do echo:*)",
+      "Bash(done)",
+      "Bash(export:*)"
+    ],
+    "deny": [
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(cp:*)",
+      "Bash(chmod:*)",
+      "Bash(chown:*)",
+      "Bash(dd:*)",
+      "Bash(mkfs:*)",
+      "Bash(sudo:*)",
+      "Bash(shutdown:*)",
+      "Bash(reboot:*)",
+      "Bash(git reset:*)",
+      "Bash(git clean:*)",
+      "Bash(git checkout:*)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git merge:*)"
+    ]
+  },
+  "plugins": {
+    "ralph-wiggum": {
+      "enabled": true
+    }
+  }
+}
