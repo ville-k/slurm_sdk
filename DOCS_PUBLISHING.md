@@ -45,7 +45,7 @@ The documentation is automatically published to GitHub Pages when:
 
 ### Published URL
 
-https://ville-k.github.io/slurm_sdk/
+<https://ville-k.github.io/slurm_sdk/>
 
 ## Configuration
 
@@ -70,7 +70,7 @@ To enable GitHub Pages:
 
 Follows the [Diataxis framework](https://diataxis.fr/):
 
-```
+```text
 docs/
 ├── index.md              # Home page
 ├── tutorials/            # Learning-oriented lessons
