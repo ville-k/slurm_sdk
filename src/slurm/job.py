@@ -34,6 +34,28 @@ class Job(Generic[T]):
     Jobs track their own metadata (working directory, output paths) to enable result
     retrieval even after the scheduler has purged the job from its queue.
 
+    Job State Machine:
+
+    ```mermaid
+    stateDiagram-v2
+        [*] --> PENDING: submit()
+        PENDING --> RUNNING: SLURM schedules
+        RUNNING --> COMPLETED: Success
+        RUNNING --> FAILED: Error/Exception
+        RUNNING --> TIMEOUT: Time limit
+        RUNNING --> CANCELLED: cancel()
+        RUNNING --> NODE_FAIL: Node failure
+        PENDING --> CANCELLED: cancel()
+
+        COMPLETED --> [*]
+        FAILED --> [*]
+        TIMEOUT --> [*]
+        CANCELLED --> [*]
+        NODE_FAIL --> [*]
+    ```
+
+    Terminal states: COMPLETED, FAILED, CANCELLED, TIMEOUT, NODE_FAIL
+
     Examples:
         Basic job lifecycle:
 

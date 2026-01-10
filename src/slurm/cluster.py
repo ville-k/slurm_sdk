@@ -4,6 +4,7 @@ This module provides the Cluster class for submitting and managing jobs on SLURM
 
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable, Tuple, Union
+import argparse
 import sys
 import traceback
 import uuid
@@ -679,7 +680,7 @@ class Cluster:
         return cluster_instance
 
     @classmethod
-    def from_file(cls, config_path: str, **extra_kwargs) -> "Cluster":
+    def from_file(cls, config_path: str, **extra_kwargs: Any) -> "Cluster":
         """Create a Cluster instance from a flat TOML configuration file.
 
         This method provides explicit, simple configuration loading without auto-discovery.
@@ -760,7 +761,7 @@ class Cluster:
         return cls(**cluster_kwargs)
 
     @staticmethod
-    def add_argparse_args(parser) -> None:
+    def add_argparse_args(parser: argparse.ArgumentParser) -> None:
         """Add common cluster configuration arguments to an argparse parser.
 
         This is a convenience method for building CLI tools that create Cluster instances.
@@ -840,7 +841,7 @@ class Cluster:
         )
 
     @classmethod
-    def from_args(cls, args, **extra_kwargs) -> "Cluster":
+    def from_args(cls, args: argparse.Namespace, **extra_kwargs: Any) -> "Cluster":
         """Create a Cluster instance from argparse arguments.
 
         This method works with arguments added by `add_argparse_args()` to create
@@ -1587,7 +1588,7 @@ class Cluster:
         task_func: SlurmTask,
         packaging_config: Optional[Dict[str, Any]] = None,
         after: Optional[Union[Job, List[Job]]] = None,
-        **sbatch_options,
+        **sbatch_options: Any,
     ) -> Union[Callable[..., Job], SubmittableWorkflow]:
         """Prepare a task for submission to the cluster.
 
@@ -1596,7 +1597,27 @@ class Cluster:
         the actual job submission. This separation allows you to configure SBATCH
         parameters and packaging once, then submit multiple jobs with different arguments.
 
+        Two-Phase Submission Pattern:
+
+        ```mermaid
+        flowchart LR
+            subgraph Phase1["Phase 1: Prepare"]
+                A["cluster.submit(task)"] --> B[Configure packaging]
+                B --> C[Set SBATCH options]
+                C --> D["Return submitter"]
+            end
+
+            subgraph Phase2["Phase 2: Execute"]
+                D --> E["submitter(args)"]
+                E --> F[Package code]
+                F --> G[Render script]
+                G --> H[Upload & sbatch]
+                H --> I[Return Job]
+            end
+        ```
+
         The submission process:
+
         1. Packages your code (builds wheel or container as configured)
         2. Generates a bash job script with SBATCH directives
         3. Uploads the script and artifacts to the cluster
