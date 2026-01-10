@@ -3,6 +3,7 @@
 Workflows are Python functions decorated with `@workflow`. They orchestrate multiple tasks and can submit additional jobs while running on the cluster.
 
 ## Key pieces
+
 - **WorkflowContext**: Injected automatically into workflow functions. It provides a `cluster` instance, the workflow job directory, and a shared directory for artifacts.
 - **Nested submissions**: Tasks invoked inside a workflow submit new jobs using the same cluster configuration.
 - **Packaging inheritance**: Child tasks reuse the parent container image when possible, so they do not rebuild images mid-workflow.
@@ -46,7 +47,7 @@ Step by step:
 
 Workflow jobs create a nested directory structure for organizing outputs:
 
-```
+```text
 workflow_job_dir/
 ├── result.pkl              # Workflow return value
 ├── metadata.json           # Job metadata
@@ -69,10 +70,12 @@ workflow_job_dir/
 ```
 
 ## Error handling
+
 - If cluster initialization fails inside the workflow, task submission is blocked early with a clear error.
 - The workflow job still captures stdout/stderr in the usual job directory.
 
 ## Tips
+
 - Keep workflow orchestration lightweight; heavy computation should live in task functions.
 - Use the shared directory to pass large artifacts between tasks.
 - Attach callbacks to observe workflow-level events and dependency graphs.

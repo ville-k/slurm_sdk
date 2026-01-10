@@ -1,6 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
+
 - `src/slurm/` hosts the core SDK: job orchestration (`cluster.py`, `job.py`), decorators (`task.py`), packaging utilities, and renderers. Keep new modules under this package with explicit exports in `__init__.py`.
 - `src/slurm/examples/` contains runnable usage samples; mirror this pattern when adding new tutorials.
 - `tests/` holds pytest suites with shared fixtures in `tests/conftest.py` and helpers under `tests/helpers/`.
@@ -8,6 +9,7 @@
 - Project configuration lives at the repository root (`pyproject.toml`, `uv.lock`, `README.md`).
 
 ## Build, Test, and Development Commands
+
 - `uv pip install -e .` installs the package in editable mode for local development.
 - `uv run pytest` executes the offline unit suite against the local backend.
 - `uv run python -m slurm.examples.hello_world` performs a smoke test of job submission without SLURM access.
@@ -17,11 +19,11 @@
 - `uv run ruff check --fix` lints the code and auto-fixes issues where possible.
 
 ## Coding Style & Naming Conventions
+
 - Use 4-space indentation and type hints throughout; the package ships `py.typed`.
 - Follow Google-style docstrings for public APIs and mirror existing logging patterns (`slurm.logging.configure_logging()`).
 - Prefer snake_case for functions, PascalCase for classes, and keep module names lowercase.
 - Avoid restructuring logs: reserve INFO for user-facing messaging and DEBUG for internals.
-
 
 ## Code Comments Guidelines
 
@@ -30,6 +32,7 @@
 Code should be self-documenting through clear naming and structure. Comments should explain **why** decisions were made, not **what** the code does.
 
 ❌ **Bad (what-style)**:
+
 ```python
 # Increment counter by 1
 counter += 1
@@ -41,6 +44,7 @@ for user in users:
 ```
 
 ✅ **Good (why-style)**:
+
 ```python
 # Increment before check to avoid off-by-one error in batch processing
 counter += 1
@@ -98,84 +102,10 @@ Classify all changes under these headings:
 1. **During development**: Add entries to `## [Unreleased]` section
 2. **At release**: Move `[Unreleased]` entries to new versioned section `## [X.Y.Z] - YYYY-MM-DD`
 3. **Format**: Use bullet points (`-`) with descriptive, user-focused language
-4. **Audience**: Write for end users, not developers - explain *what* and *why*, not implementation details
+4. **Audience**: Write for end users, not developers - explain _what_ and _why_, not implementation details
 
 ### Example Structure
-```markdown
-# Changelog
 
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Added
-- New API endpoint for batch processing requests
-- Support for concurrent job execution with configurable worker pools
-
-### Fixed
-- Memory leak in long-running data pipeline operations
-
-## [1.2.0] - 2025-01-15
-
-### Added
-- REST API for job management
-- Webhook notifications on job completion
-
-### Changed
-- Improved error messages with actionable resolution steps
-- Database connection pooling now uses exponential backoff
-
-### Deprecated
-- Legacy `/v1/process` endpoint (use `/v2/jobs` instead)
-
-## [1.1.0] - 2025-01-01
-
-### Added
-- Initial release with core processing capabilities
-```
-
-### Key Principles
-
-- ✅ **Do**: Focus on user-facing changes and their impact
-- ✅ **Do**: Group similar changes together under appropriate categories  
-- ✅ **Do**: Keep entries concise but descriptive
-- ❌ **Don't**: Include every commit or minor internal refactoring
-- ❌ **Don't**: Use commit messages as changelog entries
-- ❌ **Don't**: Forget to mention breaking changes or deprecations
-
-## Changelog Management
-
-When modifying code, always update `CHANGELOG.md` following the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format:
-
-### Format Requirements
-
-- **File**: `CHANGELOG.md` at project root
-- **Date format**: ISO 8601 (YYYY-MM-DD)
-- **Structure**: Reverse chronological (newest first)
-- **Semantic versioning**: Link to [semver.org](https://semver.org/spec/v2.0.0.html)
-
-### Entry Categories
-
-Classify all changes under these headings:
-
-- **Added**: New features
-- **Changed**: Changes in existing functionality  
-- **Deprecated**: Soon-to-be removed features
-- **Removed**: Now removed features
-- **Fixed**: Bug fixes
-- **Security**: Vulnerability fixes
-
-### Workflow
-
-1. **During development**: Add entries to `## [Unreleased]` section
-2. **At release**: Move `[Unreleased]` entries to new versioned section `## [X.Y.Z] - YYYY-MM-DD`
-3. **Format**: Use bullet points (`-`) with descriptive, user-focused language
-4. **Audience**: Write for end users, not developers - explain *what* and *why*, not implementation details
-
-### Example Structure
 ```markdown
 # Changelog
 
@@ -222,12 +152,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ❌ **Don't**: Forget to mention breaking changes or deprecations
 
 ## Testing Guidelines
+
 - Base tests on `pytest`; name files `test_*.py` and co-locate fixtures or builders under `tests/helpers/`.
 - Cover new behaviors with local-backend tests; mock SSH interactions unless explicitly targeting integration scenarios.
 - Mark slower or external tests clearly (e.g., `pytest.mark.ssh`) and keep them skipped by default.
 - Run `uv run pytest` before opening a PR and document any deviations.
 
 ## Commit & Pull Request Guidelines
+
 - Commit messages follow concise sentence-case summaries (see `git log`), optionally followed by descriptive body text.
 - Reference issues when applicable and record the motivation for API changes.
 - Include testing evidence (command + result) in PR descriptions and update docs or examples when behavior changes.
@@ -239,7 +171,7 @@ Follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/
 
 ### Format
 
-```
+```text
 <type>[optional scope]: <description>
 
 [optional body]
@@ -266,7 +198,7 @@ Follow the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/
 
 Indicate with `!` after type/scope OR with `BREAKING CHANGE:` footer (correlates with MAJOR version bump):
 
-```
+```text
 feat!: remove deprecated API endpoints
 
 BREAKING CHANGE: The /v1/users endpoint has been removed. Use /v2/users instead.
@@ -276,7 +208,7 @@ BREAKING CHANGE: The /v1/users endpoint has been removed. Use /v2/users instead.
 
 Add scope in parentheses for context:
 
-```
+```text
 feat(api): add rate limiting
 fix(auth): resolve token refresh race condition
 docs(readme): update installation instructions
@@ -285,17 +217,20 @@ docs(readme): update installation instructions
 ### Examples
 
 **Simple fix:**
-```
+
+```text
 fix: prevent race condition in request handling
 ```
 
 **Feature with scope:**
-```
+
+```text
 feat(training): add gradient checkpointing for memory efficiency
 ```
 
 **Breaking change:**
-```
+
+```text
 feat(api)!: change authentication flow to OAuth2
 
 BREAKING CHANGE: API now requires OAuth2 tokens instead of API keys.
@@ -303,7 +238,8 @@ Migration guide: https://docs.example.com/oauth2-migration
 ```
 
 **Multi-paragraph body:**
-```
+
+```text
 fix: resolve distributed training hang on GB200
 
 Introduce request ID tracking and dismiss responses from stale requests.
@@ -348,19 +284,22 @@ When modifying code, always keep documentation synchronized following the [Diata
 **Focus**: Practical lessons that build confidence through successful completion
 
 **Characteristics**:
+
 - Take users step-by-step through a concrete project
 - Always reach a meaningful, working conclusion
-- Prioritize learning over explaining *why*
+- Prioritize learning over explaining _why_
 - Avoid distractions, alternatives, or edge cases
 - Ensure every step produces expected results
 - Use concrete examples, not abstractions
 
 **Example titles**:
+
 - "Build your first neural network training pipeline"
 - "Create a simple distributed training job"
 - "Getting started with AutoBot"
 
 **Structure**:
+
 ````markdown
 # Tutorial: [Specific achievable goal]
 
@@ -383,6 +322,7 @@ When modifying code, always keep documentation synchronized following the [Diata
 ````
 
 **Writing guidelines**:
+
 - ✅ "Now run `train.py` - you'll see the training loss decreasing"
 - ✅ "We use HTTPS here because it's more secure ([learn more](link))"
 - ❌ Don't explain concepts in depth - link to explanations instead
@@ -397,6 +337,7 @@ When modifying code, always keep documentation synchronized following the [Diata
 **Focus**: Efficient solutions to common problems
 
 **Characteristics**:
+
 - Address a specific goal or problem
 - Assume user competence and familiarity
 - Show the steps, skip the explanation
@@ -404,12 +345,14 @@ When modifying code, always keep documentation synchronized following the [Diata
 - Don't need to be comprehensive end-to-end
 
 **Example titles**:
+
 - "How to configure multi-node training"
 - "How to monitor GPU memory usage"
 - "How to troubleshoot out-of-memory errors"
 - "How to integrate with MLflow"
 
 **Structure**:
+
 ````markdown
 # How to [solve specific problem]
 
@@ -443,6 +386,7 @@ When modifying code, always keep documentation synchronized following the [Diata
 ````
 
 **Writing guidelines**:
+
 - ✅ Use conditional imperatives: "To achieve X, do Y"
 - ✅ Focus on the task, not the tool
 - ✅ Link to reference for complete option lists
@@ -458,6 +402,7 @@ When modifying code, always keep documentation synchronized following the [Diata
 **Focus**: Comprehensive, accurate, consistent information
 
 **Characteristics**:
+
 - Describes the machinery/API/system as it is
 - Factual, neutral, free of opinion
 - Structured to mirror the code/system architecture
@@ -465,12 +410,14 @@ When modifying code, always keep documentation synchronized following the [Diata
 - Complete and authoritative
 
 **Example sections**:
+
 - "API Reference"
 - "Configuration Options"
 - "Command-Line Interface"
 - "Error Codes"
 
 **Structure**:
+
 ````markdown
 # [Module/Class/Function] Reference
 
@@ -528,6 +475,7 @@ result = train_model(config, "/data/training")
 ````
 
 **Writing guidelines**:
+
 - ✅ Be accurate and complete
 - ✅ Follow consistent structure
 - ✅ Mirror code/system organization
@@ -544,6 +492,7 @@ result = train_model(config, "/data/training")
 **Focus**: Clarification, discussion, multiple perspectives
 
 **Characteristics**:
+
 - Discusses concepts, design, alternatives, context
 - Can include opinions and perspectives
 - Approaches topics from multiple angles
@@ -551,12 +500,14 @@ result = train_model(config, "/data/training")
 - For study, not for work
 
 **Example titles**:
+
 - "Understanding distributed training strategies"
 - "Why we use gradient accumulation"
 - "Design principles of the training pipeline"
 - "Training at scale: architectural considerations"
 
 **Structure**:
+
 ````markdown
 # [Topic] Explained
 
@@ -590,6 +541,7 @@ result = train_model(config, "/data/training")
 ````
 
 **Writing guidelines**:
+
 - ✅ Circle around the topic from different angles
 - ✅ Make connections to other concepts
 - ✅ Provide context and history
@@ -602,7 +554,8 @@ result = train_model(config, "/data/training")
 
 ### Documentation Workflow
 
-#### When writing new code:
+#### When Writing New Code
+
 1. **Identify which documentation types need updates**
    - New feature → Tutorial (if fundamental) + How-to + Reference
    - Bug fix → Update relevant How-to or Reference
@@ -619,8 +572,9 @@ result = train_model(config, "/data/training")
    - Validate parameter descriptions
    - Confirm error messages match
 
-#### Directory structure:
-````
+#### Directory Structure
+
+````text
 docs/
 ├── tutorials/           # Learning-oriented lessons
 │   ├── getting-started.md
@@ -642,6 +596,7 @@ docs/
 ### Quick Decision Guide
 
 **Ask yourself:**
+
 1. **Is the user learning or working?**
    - Learning → Tutorial or Explanation
    - Working → How-to or Reference
@@ -657,23 +612,27 @@ docs/
 ### Common Mistakes to Avoid
 
 ❌ **Tutorial mistakes**:
+
 - Explaining concepts in depth (use brief notes + links)
 - Showing multiple ways to do things
 - Skipping steps or assuming knowledge beyond prerequisites
 - Not testing that each step produces expected results
 
 ❌ **How-to mistakes**:
+
 - Teaching basics (assume competence)
 - Explaining why things work (link to explanations)
 - Making it comprehensive end-to-end (focus on the task)
 
 ❌ **Reference mistakes**:
+
 - Including "how to use this" instructions (link to how-tos)
 - Explaining design decisions (link to explanations)
 - Using inconsistent structure
 - Being incomplete or ambiguous
 
 ❌ **Explanation mistakes**:
+
 - Providing step-by-step instructions (link to tutorials/how-tos)
 - Just listing facts (that's reference)
 - Staying too abstract without examples
@@ -701,6 +660,7 @@ Before committing documentation changes, verify:
 ### Using Diagrams
 
 Add diagrams where they help achieve learning objectives or clarify complex concepts. Visual representations are especially valuable for:
+
 - System architecture and component relationships
 - Data flow and execution sequences
 - State machines and lifecycle diagrams
@@ -721,12 +681,14 @@ graph LR
 ````
 
 **Docstrings with diagrams**: Public API docstrings can include Mermaid diagrams, markdown formatting, and ASCII art. These are rendered in the reference documentation via mkdocstrings. Use diagrams in docstrings when they help users understand:
+
 - Method call sequences
 - Object relationships
 - State transitions
 - Complex return structures
 
 Example docstring with Mermaid:
+
 ```python
 def submit(self, task_func: SlurmTask) -> Job:
     """Submit a task to the cluster.
@@ -747,6 +709,7 @@ def submit(self, task_func: SlurmTask) -> Job:
 ```
 
 **When to use ASCII art**: For simple inline diagrams in docstrings where Mermaid would be overkill, ASCII art is acceptable:
+
 ```python
 def process_pipeline(self):
     """Run the processing pipeline.
@@ -760,5 +723,6 @@ def process_pipeline(self):
 ```
 
 ## Security & Configuration Tips
+
 - Store SSH credentials via environment variables or your SSH config; never commit secrets.
 - Validate remote cluster settings in a private `.env` file and document required variables in PR discussions.

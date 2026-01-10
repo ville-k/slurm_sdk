@@ -20,6 +20,7 @@ The easiest way to get started is using the devcontainer, which provides a fully
    - Wait for the container to build and dependencies to install
 
 3. **Run tests:**
+
    ```bash
    # Unit tests
    uv run pytest tests/ --ignore=tests/integration
@@ -29,6 +30,7 @@ The easiest way to get started is using the devcontainer, which provides a fully
    ```
 
 The devcontainer automatically starts:
+
 - A Slurm cluster with Pyxis/enroot (accessible at `slurm:22`)
 - A container registry (accessible at `registry:5000`)
 
@@ -37,21 +39,25 @@ The devcontainer automatically starts:
 If you prefer developing on your host machine:
 
 1. **Install uv:**
+
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
 2. **Install dependencies:**
+
    ```bash
    uv sync --dev
    ```
 
 3. **Run unit tests:**
+
    ```bash
    uv run pytest tests/ --ignore=tests/integration
    ```
 
 4. **Run integration tests** (requires Docker/Podman):
+
    ```bash
    # Using the integration test runner script
    ./scripts/run-integration-tests.sh
@@ -163,10 +169,12 @@ uv run pytest --run-integration -v -m "not container_packaging"
 ### Docker/Podman Issues
 
 **"Cannot connect to the Docker daemon"**
+
 - Start Docker Desktop, or
 - Run `systemctl start docker` (Linux)
 
 **"Cannot connect to Podman"**
+
 - Run `podman machine init --now` (one-time setup)
 - Run `podman machine start`
 
@@ -175,40 +183,47 @@ uv run pytest --run-integration -v -m "not container_packaging"
 ### Port Conflicts
 
 **"Port 5000 is already in use"**
+
 - Stop conflicting services, or
 - Modify port mappings in `containers/docker-compose.yml`
 
 **"Port 2222 is already in use"**
+
 - Stop any existing Slurm containers: `docker compose -f containers/docker-compose.yml down`
 
 ### Devcontainer Issues
 
 **Container fails to start**
+
 - Check Docker/Podman is running
 - Try rebuilding: Command Palette → "Dev Containers: Rebuild Container"
 
 **SSH to Slurm fails inside devcontainer**
+
 - Wait for services to be healthy (check with `docker compose ps`)
 - Verify network: `getent hosts slurm` should resolve
 
 **Tests hang**
+
 - Check Slurm services: `docker exec slurm-test squeue`
 - Check SSH: `docker exec slurm-test systemctl status sshd`
 
 ### Registry Issues
 
 **"registry:5000" not found (host only)**
+
 - This only happens when running tests from your host machine, not inside devcontainer
 - Add to `/etc/hosts`: `echo '127.0.0.1 registry' | sudo tee -a /etc/hosts`
 - Alternatively, run tests inside the devcontainer where Docker DNS handles resolution
 
 **Push fails with connection refused**
+
 - Ensure registry is running: `docker compose -f containers/docker-compose.yml ps registry`
 - Check port: `curl -s http://localhost:5000/v2/`
 
 ## Project Structure
 
-```
+```text
 slurm_sdk/
 ├── .devcontainer/           # VSCode/Cursor devcontainer config
 │   └── devcontainer.json
@@ -234,11 +249,13 @@ slurm_sdk/
 ## Submitting Changes
 
 1. Ensure all tests pass:
+
    ```bash
    uv run pytest
    ```
 
 2. For integration changes, also run:
+
    ```bash
    ./scripts/run-integration-tests.sh
    ```
