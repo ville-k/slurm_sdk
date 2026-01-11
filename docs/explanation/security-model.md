@@ -5,7 +5,7 @@ assumptions, potential risks, and best practices for secure usage.
 
 ## Overview
 
-The SLURM SDK is designed to run user-defined Python tasks on HPC clusters. It
+The Slurm SDK is designed to run user-defined Python tasks on HPC clusters. It
 handles:
 
 - Serializing task arguments and results
@@ -225,6 +225,6 @@ cluster's `umask` settings provide appropriate protection.
 
 ## Reporting Security Issues
 
-If you discover a security vulnerability in the SLURM SDK, please report it
+If you discover a security vulnerability in the Slurm SDK, please report it
 responsibly by contacting the maintainers directly rather than opening a public
 issue.

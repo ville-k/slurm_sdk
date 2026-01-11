@@ -7,7 +7,7 @@ import os
 import pathlib
 import shlex
 import shutil
-import subprocess
+import subprocess  # nosec B404 - required for docker/podman commands during container building
 import uuid
 import re
 from dataclasses import dataclass

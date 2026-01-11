@@ -254,6 +254,41 @@ slurm_sdk/
     └── *.py                 # Unit tests
 ```
 
+## Security Scanning
+
+We use [Bandit](https://bandit.readthedocs.io/) to detect common security issues in Python code. Run the security scan before submitting PRs:
+
+```bash
+# Run security analysis (fails on HIGH or MEDIUM severity issues)
+uv run bandit -r src/ -ll
+
+# Run with full output including LOW severity
+uv run bandit -r src/
+```
+
+**What Bandit checks for:**
+
+- Hardcoded passwords and secrets
+- SQL injection vulnerabilities
+- Command injection (shell=True, subprocess calls)
+- Insecure deserialization (pickle)
+- Weak cryptographic practices
+- And many more ([full list](https://bandit.readthedocs.io/en/latest/plugins/index.html))
+
+**Handling false positives:**
+
+When Bandit flags code that is intentionally written that way (e.g., pickle for SDK serialization), use `# nosec` comments with the specific rule:
+
+```python
+# Good: specific rule suppression
+data = pickle.loads(trusted_data)  # nosec B301
+
+# Avoid: blanket suppression without rule ID
+data = pickle.loads(trusted_data)  # nosec
+```
+
+Always include a brief justification in the comment or nearby code explaining why the suppression is safe.
+
 ## Style
 
 - Follow the Google Python Style Guide for public API docstrings and type hints.
@@ -288,6 +323,12 @@ uv run mdformat --check docs/tutorials docs/how-to docs/explanation docs/referen
 
    ```bash
    ./scripts/run-integration-tests.sh
+   ```
+
+1. Run security analysis:
+
+   ```bash
+   uv run bandit -r src/ -ll
    ```
 
 1. Format and lint your code:

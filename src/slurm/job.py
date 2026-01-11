@@ -1,5 +1,7 @@
 import logging
 import time
+
+# nosec B403 - pickle required for loading job results serialized by SDK runner
 import pickle
 import os
 import threading
@@ -508,8 +510,9 @@ class Job(Generic[T]):
                 )
                 self.cluster.backend.download_file(result_file_path, local_temp_path)
 
+                # nosec B301 - result file created by SDK runner via trusted SSH transfer
                 with open(local_temp_path, "rb") as f:
-                    return pickle.load(f)
+                    return pickle.load(f)  # nosec B301
             except FileNotFoundError as e:
                 logger.error(
                     "[%s] Remote result file not found: %s", self.id, result_file_path
@@ -577,8 +580,9 @@ class Job(Generic[T]):
                     local_result_path = os.path.abspath(local_result_path)
 
                 logger.debug("[%s] Loading local result %s", self.id, local_result_path)
+                # nosec B301 - result file created by SDK runner in local job directory
                 with open(local_result_path, "rb") as f:
-                    return pickle.load(f)
+                    return pickle.load(f)  # nosec B301
             except FileNotFoundError as e:
                 logger.error(
                     "[%s] Local result file not found: %s", self.id, local_result_path

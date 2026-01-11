@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SSH host key verification with configurable policies (`auto`, `warn`, `reject`)
+- Input validation module (`slurm.validation`) for job names, accounts, and partitions
+- Security documentation explaining the SDK's trust model and best practices
+- How-to guide for hardening SSH connections in production
+- Bandit security scanning as dev dependency and CI workflow
 - Basic monitoring APIs for job status tracking
 - Mermaid diagrams throughout documentation for improved understanding:
   - Parallelization pattern diagrams (fan-out/fan-in, pipeline, sweep, dynamic dependencies)
@@ -21,10 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Local backend now uses `shell=False` for SLURM commands (more secure)
+- Default SSH host key policy changed from `auto` to `warn` (logs warning for unknown hosts)
+- Job script permissions now default to `0o750` (configurable via `script_permissions`)
+- SSH passwords are cleared from memory immediately after successful authentication
 - Documentation restructured to follow Diataxis framework with four distinct types:
   - Renamed `docs/guides/` to `docs/how-to/` for consistency
   - Moved architecture content from `docs/reference/architecture/` to `docs/explanation/`
   - Updated navigation in `mkdocs.yml` to reflect new structure
+
+### Security
+
+- Fixed missing `shlex.quote()` calls in SSH backend path handling
+- Added security-focused Bandit `# nosec` comments with justifications throughout codebase
+- Improved temporary directory handling to use secure paths
 
 ### Fixed
 

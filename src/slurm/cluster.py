@@ -830,6 +830,12 @@ class Cluster:
             help="Password for SSH connection (if key-based auth is not used)",
         )
         parser.add_argument(
+            "--host-key-policy",
+            choices=["auto", "warn", "reject"],
+            default="warn",
+            help="SSH host key verification policy: auto (accept all), warn (log warning), reject (strict). Default: warn",
+        )
+        parser.add_argument(
             "--backend",
             default="ssh",
             choices=["ssh", "local"],
@@ -910,6 +916,8 @@ class Cluster:
             kwargs["username"] = args.username
         if hasattr(args, "password") and args.password:
             kwargs["password"] = args.password
+        if hasattr(args, "host_key_policy") and args.host_key_policy:
+            kwargs["host_key_policy"] = args.host_key_policy
         if hasattr(args, "job_base_dir") and args.job_base_dir:
             kwargs["job_base_dir"] = args.job_base_dir
 

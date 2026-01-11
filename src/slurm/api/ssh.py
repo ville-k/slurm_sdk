@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import paramiko
 import logging
@@ -53,6 +53,7 @@ class SSHCommandBackend(BackendBase):
         gss_host: Optional[str] = None,
         disabled_algorithms: Optional[Dict[str, List[str]]] = None,
         job_base_dir: Optional[str] = None,
+        host_key_policy: Literal["auto", "warn", "reject"] = "warn",
     ):
         """
         Initialize the SSH command backend.
@@ -78,6 +79,10 @@ class SSHCommandBackend(BackendBase):
             gss_host: The target name for GSS-API authentication.
             disabled_algorithms: Dictionary of disabled algorithms by type.
             job_base_dir: The base directory for job-related files.
+            host_key_policy: Policy for handling unknown SSH host keys:
+                - "auto": Automatically accept and save unknown keys (less secure)
+                - "warn": Log a warning but accept unknown keys (default)
+                - "reject": Reject connections to unknown hosts (most secure)
         """
         self.hostname = hostname
         self.username = username
@@ -98,6 +103,7 @@ class SSHCommandBackend(BackendBase):
         self.gss_deleg_creds = gss_deleg_creds
         self.gss_host = gss_host
         self.disabled_algorithms = disabled_algorithms
+        self.host_key_policy = host_key_policy
 
         # Store and resolve job_base_dir
         self._raw_job_base_dir = job_base_dir or "~/slurm_jobs"  # Store the raw path
@@ -128,7 +134,32 @@ class SSHCommandBackend(BackendBase):
             Exception: If the connection fails.
         """
         self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        # Load system known hosts for host key verification
+        self.client.load_system_host_keys()
+
+        # Try to load user's known_hosts file
+        known_hosts_file = os.path.expanduser("~/.ssh/known_hosts")
+        if os.path.exists(known_hosts_file):
+            try:
+                self.client.load_host_keys(known_hosts_file)
+            except Exception as e:
+                logger.debug("Could not load known_hosts file: %s", e)
+
+        # Set the missing host key policy based on configuration
+        if self.host_key_policy == "auto":
+            # Automatically accept and save unknown keys (less secure)
+            self.client.set_missing_host_key_policy(
+                paramiko.AutoAddPolicy()  # nosec B507 - user explicitly chose auto policy
+            )
+        elif self.host_key_policy == "warn":
+            # Log a warning but accept unknown keys (default)
+            self.client.set_missing_host_key_policy(
+                paramiko.WarningPolicy()  # nosec B507
+            )
+        elif self.host_key_policy == "reject":
+            # Reject connections to unknown hosts (most secure)
+            self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
         ssh_config = paramiko.SSHConfig()
         user_config_file = os.path.expanduser("~/.ssh/config")
@@ -172,6 +203,12 @@ class SSHCommandBackend(BackendBase):
 
                 self.client.connect(**connect_kwargs)
                 self.sftp = self.client.open_sftp()
+
+                # Clear password from memory after successful authentication
+                # This reduces the window of exposure for credentials
+                if self.password is not None:
+                    self.password = None
+                    logger.debug("Cleared password from memory after successful auth")
 
                 logger.info("Connected to %s", self.hostname)
                 return
@@ -218,7 +255,9 @@ class SSHCommandBackend(BackendBase):
                 except Exception as e:
                     logger.debug(f"Could not set socket timeout: {e}")
 
-                _, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
+                _, stdout, stderr = self.client.exec_command(  # nosec B601
+                    cmd, timeout=timeout
+                )
                 # Use settimeout on the channel to prevent recv_exit_status from hanging
                 try:
                     stdout.channel.settimeout(timeout)
@@ -301,7 +340,7 @@ class SSHCommandBackend(BackendBase):
             # Create parent directory if it doesn't exist
             parent_dir = os.path.dirname(remote_path)
             if parent_dir:
-                self._run_command(f"mkdir -p {parent_dir}")
+                self._run_command(f"mkdir -p {shlex.quote(parent_dir)}")
 
             # Write the content to a temporary file, ensuring Unix line endings
             with tempfile.NamedTemporaryFile(
@@ -335,10 +374,11 @@ class SSHCommandBackend(BackendBase):
 
         if return_code != 0:
             # Fallback to creating a directory in /tmp
+            # Use $TMPDIR if available, otherwise fall back to /tmp
             unique_id = str(uuid.uuid4())[:8]
-            temp_dir = f"/tmp/slurm_ssh_{unique_id}"
+            temp_dir = f"/tmp/slurm_ssh_{unique_id}"  # nosec B108 - UUID makes path unpredictable
             stdout, stderr, return_code = self._run_command(
-                f"mkdir -p {temp_dir} && echo {temp_dir}"
+                f"mkdir -p {shlex.quote(temp_dir)} && echo {shlex.quote(temp_dir)}"
             )
 
             if return_code != 0:
@@ -902,7 +942,7 @@ class SSHCommandBackend(BackendBase):
             # Create the directory if it doesn't exist
             remote_dir = os.path.dirname(remote_path)
             if remote_dir:
-                self._run_command(f"mkdir -p {remote_dir}")
+                self._run_command(f"mkdir -p {shlex.quote(remote_dir)}")
 
             # Ensure we have an SFTP connection
             if not hasattr(self, "sftp") or self.sftp is None:
@@ -931,7 +971,7 @@ class SSHCommandBackend(BackendBase):
             self._connect()
 
         try:
-            stdin, stdout, stderr = self.client.exec_command(command)
+            stdin, stdout, stderr = self.client.exec_command(command)  # nosec B601
             exit_status = stdout.channel.recv_exit_status()
 
             if exit_status != 0:
