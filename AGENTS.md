@@ -12,6 +12,7 @@
 
 - `uv pip install -e .` installs the package in editable mode for local development.
 - `uv run pytest` executes the offline unit suite against the local backend.
+- `uv run pytest -n auto` runs tests in parallel using all available CPU cores (via pytest-xdist).
 - `uv run python -m slurm.examples.hello_world` performs a smoke test of job submission without SLURM access.
 - `uv run mkdocs serve` launches the documentation preview at `http://127.0.0.1:8000`; stop with `Ctrl+C`.
 - `uv run mkdocs build` builds the documentation and checks for warnings and errors.

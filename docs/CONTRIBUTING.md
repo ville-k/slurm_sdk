@@ -81,6 +81,18 @@ uv run pytest tests/ --ignore=tests/integration
 
 These use the `LocalBackend` for quick end-to-end checks.
 
+### Parallel Test Execution
+
+Tests can be run in parallel using pytest-xdist for faster execution:
+
+```bash
+# Use all available CPU cores
+uv run pytest -n auto tests/ --ignore=tests/integration
+
+# Use a specific number of workers
+uv run pytest -n 4 tests/ --ignore=tests/integration
+```
+
 ### Integration Tests
 
 Integration tests require a running Slurm cluster. There are several ways to run them:

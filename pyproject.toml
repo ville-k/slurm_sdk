@@ -36,6 +36,7 @@ dev = [
     "pytest-cov>=7.0.0",
     "pytest-integration>=0.2.3",
     "pytest-testinfra>=10.0.0",
+    "pytest-xdist>=3.5.0",
 ]
 
 [tool.pytest.ini_options]
