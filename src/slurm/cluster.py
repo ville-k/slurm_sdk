@@ -181,6 +181,32 @@ class SubmittableWorkflow:
 
     This class is returned by `cluster.submit()` when submitting a workflow, allowing
     users to specify dependent tasks that need their containers built before the workflow runs.
+
+    When a workflow contains child tasks that use different container configurations,
+    those containers must be built before the workflow starts. This class provides
+    a fluent interface via `with_dependencies()` to specify which tasks need
+    pre-building.
+
+    Attributes:
+        _cluster: The Cluster instance for submission.
+        _submitter: The underlying submitter callable.
+        _task_func: The workflow SlurmTask being submitted.
+        _packaging_config: Packaging configuration override.
+        _dependent_tasks: List of tasks with containers to pre-build.
+        _prebuilt_images: Dict mapping task qualified names to pre-built image references.
+
+    Examples:
+        Basic workflow submission (no dependencies):
+
+            >>> submitter = cluster.submit(my_workflow)
+            >>> job = submitter(input_data)
+
+        Pre-build containers for child tasks:
+
+            >>> job = cluster.submit(my_workflow).with_dependencies([
+            ...     task_a,
+            ...     task_b.with_options(packaging_container_tag="v2"),
+            ... ])(input_data)
     """
 
     def __init__(

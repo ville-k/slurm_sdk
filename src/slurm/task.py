@@ -31,8 +31,28 @@ class JobResultPlaceholder:
 
 
 def normalize_sbatch_key(key: str) -> str:
-    """Normalize SBATCH keyword-style input to our internal underscore form."""
+    """Normalize SBATCH keyword-style input to our internal underscore form.
 
+    Converts SBATCH parameter names to a consistent internal format using
+    underscores. This allows users to specify parameters using either
+    SBATCH-style dashes or Python-style underscores.
+
+    Args:
+        key: The SBATCH parameter name to normalize. Can use dashes or
+            underscores (e.g., "cpus-per-task" or "cpus_per_task").
+
+    Returns:
+        Normalized key with underscores, lowercase. The special case "name"
+        is converted to "job_name" for SBATCH compatibility.
+
+    Examples:
+        >>> normalize_sbatch_key("cpus-per-task")
+        'cpus_per_task'
+        >>> normalize_sbatch_key("Job-Name")
+        'job_name'
+        >>> normalize_sbatch_key("name")
+        'job_name'
+    """
     normalized = str(key or "").strip().lower().replace("-", "_")
     if normalized == "name":
         return "job_name"
@@ -40,8 +60,25 @@ def normalize_sbatch_key(key: str) -> str:
 
 
 def normalize_sbatch_options(options: Dict[str, Any] | None) -> Dict[str, Any]:
-    """Return a copy of the provided mapping with normalized SBATCH keys."""
+    """Return a copy of the provided mapping with normalized SBATCH keys.
 
+    Normalizes all keys in an options dictionary to use our internal
+    underscore format. Also handles common aliases like "memory" -> "mem".
+
+    Args:
+        options: Dictionary of SBATCH options to normalize. Keys can use
+            either dash or underscore style. None keys are skipped.
+
+    Returns:
+        New dictionary with all keys normalized to underscore format.
+        Returns empty dict if options is None or empty.
+
+    Examples:
+        >>> normalize_sbatch_options({"cpus-per-task": 4, "memory": "8GB"})
+        {'cpus_per_task': 4, 'mem': '8GB'}
+        >>> normalize_sbatch_options(None)
+        {}
+    """
     normalized: Dict[str, Any] = {}
     if not options:
         return normalized

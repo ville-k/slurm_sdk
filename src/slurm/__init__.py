@@ -22,6 +22,7 @@ from .callbacks import (
     BaseCallback,
     LoggerCallback,
     BenchmarkCallback,
+    RichLoggerCallback,
 )
 from .errors import (
     SubmissionError,
@@ -48,6 +49,7 @@ __all__ = [
     "BaseCallback",
     "LoggerCallback",
     "BenchmarkCallback",
+    "RichLoggerCallback",
     # Errors
     "SubmissionError",
     "DownloadError",
