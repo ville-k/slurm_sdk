@@ -1,5 +1,6 @@
 """Array items serialization and loading for native SLURM arrays."""
 
+# nosec B403 - pickle required for serializing/deserializing array job items
 import pickle
 from pathlib import Path
 from typing import Any, List, Optional, Tuple, TYPE_CHECKING
@@ -109,8 +110,9 @@ def load_array_item(
         FileNotFoundError: If the array items file doesn't exist.
         IndexError: If the array index is out of range.
     """
+    # nosec B301 - array items file created by SDK in serialize_array_items()
     with open(array_items_file, "rb") as f:
-        array_data = pickle.load(f)
+        array_data = pickle.load(f)  # nosec B301
 
     items = array_data["items"]
 

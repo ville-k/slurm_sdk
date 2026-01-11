@@ -20,6 +20,7 @@ nav:
       - Container Dependencies (Map-Reduce): how-to/container_dependencies.md
       - Parallelization Patterns: how-to/parallelization_patterns.md
       - GPU Hello Torch: how-to/hello_torch.md
+      - SSH Security: how-to/ssh_security.md
   - Reference:
       - reference/index.md
       - API Reference:
@@ -38,6 +39,7 @@ nav:
       - Workflow Execution: explanation/workflow_execution.md
       - Rendering and Runner: explanation/rendering_and_runner.md
       - Callbacks and Events: explanation/callbacks_and_events.md
+      - Security Model: explanation/security-model.md
   - Community:
       - Contributing: CONTRIBUTING.md
       - Changelog: CHANGELOG.md

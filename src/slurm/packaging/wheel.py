@@ -9,7 +9,7 @@ Design goals:
 
 import logging
 import os
-import subprocess
+import subprocess  # nosec B404 - required for pip/uv commands during wheel building
 import tempfile
 import pathlib
 from typing import Any, Dict, List, Optional, Union, Callable

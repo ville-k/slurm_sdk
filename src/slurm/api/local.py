@@ -9,10 +9,9 @@ such as workflow orchestrators running within a Slurm job.
 
 import os
 import re
-import subprocess
-import shlex
+import subprocess  # nosec B404 - subprocess is required for SLURM command execution
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .base import BackendBase
 from ..errors import BackendTimeout, BackendCommandError, BackendError
@@ -34,6 +33,7 @@ class LocalBackend(BackendBase):
         job_base_dir: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         timeout: int = 30,
+        script_permissions: int = 0o750,
     ):
         """
         Initialize the local command backend.
@@ -42,9 +42,12 @@ class LocalBackend(BackendBase):
             job_base_dir: The base directory for job-related files.
             env: Optional environment variables to use when executing commands.
             timeout: Command timeout in seconds.
+            script_permissions: Unix file permissions for job scripts (default: 0o750).
+                Use 0o755 if SLURM requires world-readable scripts on your cluster.
         """
         self.env = env or {}
         self.timeout = timeout
+        self.script_permissions = script_permissions
 
         # Resolve job_base_dir
         self._raw_job_base_dir = job_base_dir or "~/slurm_jobs"
@@ -79,13 +82,17 @@ class LocalBackend(BackendBase):
         return absolute
 
     def _run_command(
-        self, cmd: str, timeout: Optional[int] = None, check: bool = True
+        self,
+        cmd: Union[str, List[str]],
+        timeout: Optional[int] = None,
+        check: bool = True,
     ) -> tuple[str, str, int]:
         """
         Run a command on the local system.
 
         Args:
-            cmd: The command to run
+            cmd: The command to run. If a list, shell=False is used (safer).
+                 If a string, shell=True is used (for backward compatibility).
             timeout: Timeout in seconds (defaults to self.timeout)
             check: Whether to check return code
 
@@ -99,16 +106,21 @@ class LocalBackend(BackendBase):
         if timeout is None:
             timeout = self.timeout
 
+        # Determine shell mode based on command type
+        # List commands use shell=False (safer, no injection risk)
+        # String commands use shell=True (for backward compat with execute_command)
+        use_shell = isinstance(cmd, str)
+
         try:
-            logger.debug("Running command: %s", cmd)
+            logger.debug("Running command: %s (shell=%s)", cmd, use_shell)
 
             # Merge environment variables
             env = os.environ.copy()
             env.update(self.env)
 
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603 B602 - shell mode determined by input type
                 cmd,
-                shell=True,
+                shell=use_shell,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -181,28 +193,28 @@ class LocalBackend(BackendBase):
         logger.debug("Writing script to job directory: %s", persistent_script_path)
         with open(persistent_script_path, "w", newline="\n") as f:
             f.write(script)
-        os.chmod(persistent_script_path, 0o755)
+        # nosec B103 - permissions are configurable, default 0o750 is more restrictive
+        os.chmod(persistent_script_path, self.script_permissions)
 
         try:
-            # Build sbatch command using the persistent script path
-            sbatch_cmd_parts = ["sbatch", f"--chdir={shlex.quote(target_job_dir)}"]
+            # Build sbatch command as a list (uses shell=False for safety)
+            sbatch_cmd: List[str] = ["sbatch", f"--chdir={target_job_dir}"]
 
             if account:
-                sbatch_cmd_parts.append(f"--account={shlex.quote(account)}")
+                sbatch_cmd.append(f"--account={account}")
             if partition:
-                sbatch_cmd_parts.append(f"--partition={shlex.quote(partition)}")
+                sbatch_cmd.append(f"--partition={partition}")
             if array_spec:
-                sbatch_cmd_parts.append(f"--array={array_spec}")
+                sbatch_cmd.append(f"--array={array_spec}")
 
-            sbatch_cmd_parts.append(shlex.quote(persistent_script_path))
-            sbatch_cmd = " ".join(sbatch_cmd_parts)
+            sbatch_cmd.append(persistent_script_path)
 
             logger.debug("Submitting with command: %s", sbatch_cmd)
             logger.debug(
                 "--- BEGIN SCRIPT CONTENT ---\n%s\n--- END SCRIPT CONTENT ---", script
             )
 
-            # Execute sbatch
+            # Execute sbatch (list format uses shell=False)
             stdout, stderr, return_code = self._run_command(sbatch_cmd, check=False)
 
             if return_code != 0:
@@ -251,7 +263,7 @@ class LocalBackend(BackendBase):
         """
         try:
             stdout, stderr, return_code = self._run_command(
-                f"scontrol show job {job_id}", check=False
+                ["scontrol", "show", "job", job_id], check=False
             )
 
             logger.debug("Job status stdout: %s", stdout)
@@ -464,7 +476,7 @@ class LocalBackend(BackendBase):
         logger.debug("Cancelling job: %s", job_id)
 
         stdout, stderr, return_code = self._run_command(
-            f"scancel {job_id}", check=False
+            ["scancel", job_id], check=False
         )
 
         if return_code != 0:
@@ -485,8 +497,9 @@ class LocalBackend(BackendBase):
         """
         try:
             # %A=JobID, %j=Name, %T=State, %u=User, %S=StartTime, %M=TimeUsed, %l=TimeLimit, %P=Partition, %a=Account
+            # Using list format (shell=False) - format string doesn't need shell quoting
             stdout, stderr, return_code = self._run_command(
-                "squeue -h -o '%A|%j|%T|%u|%S|%M|%l|%P|%a'", check=False
+                ["squeue", "-h", "-o", "%A|%j|%T|%u|%S|%M|%l|%P|%a"], check=False
             )
 
             if return_code != 0:
@@ -547,8 +560,9 @@ class LocalBackend(BackendBase):
             RuntimeError: If the command fails
         """
         try:
+            # Using list format (shell=False) - format string doesn't need shell quoting
             stdout, stderr, return_code = self._run_command(
-                "sinfo -h -o '%R|%a|%l|%D|%T'", check=False
+                ["sinfo", "-h", "-o", "%R|%a|%l|%D|%T"], check=False
             )
 
             if return_code != 0:

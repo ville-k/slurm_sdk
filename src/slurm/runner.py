@@ -9,6 +9,9 @@ import importlib
 import json
 import logging
 import os
+
+# nosec B403 - pickle is required for deserializing task arguments and results
+# Security note: pickle files are created by the SDK and transferred via trusted SSH/local storage
 import pickle
 import platform
 import socket
@@ -313,7 +316,9 @@ def main():
     if args.sys_path:
         import base64
 
-        original_sys_path = pickle.loads(base64.b64decode(args.sys_path.encode()))
+        original_sys_path = pickle.loads(  # nosec B301
+            base64.b64decode(args.sys_path.encode())
+        )  # sys.path comes from SDK's own serialization in rendering.py
         # Prepend original paths to ensure user modules are found first
         sys.path = original_sys_path + [
             p for p in sys.path if p not in original_sys_path
@@ -364,17 +369,19 @@ def main():
                 logger.debug("Loaded single item as first arg")
         else:
             # Regular job: load from args/kwargs files
+            # nosec B301 - args/kwargs files created by SDK in rendering.py, stored in trusted job dir
             with open(args.args_file, "rb") as f:
-                task_args = pickle.load(f)
+                task_args = pickle.load(f)  # nosec B301
             with open(args.kwargs_file, "rb") as f:
-                task_kwargs = pickle.load(f)
+                task_kwargs = pickle.load(f)  # nosec B301
         # Load callbacks
         try:
             with open(args.callbacks_file, "rb") as f:
                 # Handle empty file case (created by rendering script if no callbacks)
                 content = f.read()
                 if content:
-                    callbacks = pickle.loads(content)
+                    # nosec B301 - callbacks serialized by SDK in rendering.py
+                    callbacks = pickle.loads(content)  # nosec B301
                     logger.debug("Deserialized %d callbacks.", len(callbacks))
                 else:
                     logger.debug("No callbacks provided (empty callbacks file).")
@@ -431,8 +438,9 @@ def main():
                             result_path = os.path.join(result_dir, result_filename)
 
                             logger.debug("Found result file: %s", result_path)
+                            # nosec B301 - result file created by SDK runner, stored in trusted job dir
                             with open(result_path, "rb") as f:
-                                return pickle.load(f)
+                                return pickle.load(f)  # nosec B301
                     except Exception as e:
                         logger.warning(
                             "Error reading metadata from %s: %s", metadata_path, e

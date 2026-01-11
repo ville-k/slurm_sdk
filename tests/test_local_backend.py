@@ -128,11 +128,10 @@ def test_submit_job_with_options(mock_run, backend, temp_job_dir):
     assert job_id == "54321"
 
     # Verify sbatch command includes account and partition
+    # call_args is a list when using shell=False
     call_args = mock_run.call_args[0][0]
-    assert "--account=" in call_args
-    assert "myaccount" in call_args
-    assert "--partition=" in call_args
-    assert "gpu" in call_args
+    assert "--account=myaccount" in call_args
+    assert "--partition=gpu" in call_args
 
 
 @patch("subprocess.run")

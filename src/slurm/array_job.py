@@ -142,7 +142,11 @@ class ArrayJob(Generic[T]):
         pre_submission_id = f"{timestamp}_{unique_id}"
 
         task_name = getattr(self.task, "__name__", "array_job")
-        job_base_dir = getattr(self.cluster.backend, "job_base_dir", "/tmp/slurm_jobs")
+        job_base_dir = getattr(
+            self.cluster.backend,
+            "job_base_dir",
+            "/tmp/slurm_jobs",  # nosec B108
+        )
         array_dir = Path(job_base_dir) / task_name / pre_submission_id
         target_job_dir = str(array_dir)
 

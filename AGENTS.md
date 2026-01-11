@@ -18,6 +18,7 @@
 - `uv run mkdocs build` builds the documentation and checks for warnings and errors.
 - `uv format` formats code according to project style guidelines.
 - `uv run ruff check --fix` lints the code and auto-fixes issues where possible.
+- `uv run bandit -r src/ -ll` runs security analysis; fails on HIGH or MEDIUM severity issues. Run before submitting PRs.
 - `uv run mdformat docs/tutorials docs/how-to docs/explanation docs/reference docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md` formats markdown files (note: `docs/index.md` is excluded as it uses special MkDocs Material grid syntax).
 - `uv run mdformat --check docs/tutorials docs/how-to docs/explanation docs/reference docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md` checks markdown formatting without modifying files.
 
