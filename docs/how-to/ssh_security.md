@@ -97,11 +97,11 @@ except paramiko.ssh_exception.SSHException as e:
 
 ## Host key policy options
 
-| Policy | Behavior | Use case |
-|--------|----------|----------|
-| `reject` | Refuse unknown hosts | Production |
-| `warn` | Log warning, allow connection | Development (default) |
-| `auto` | Silently accept and save | Testing only |
+| Policy   | Behavior                      | Use case              |
+| -------- | ----------------------------- | --------------------- |
+| `reject` | Refuse unknown hosts          | Production            |
+| `warn`   | Log warning, allow connection | Development (default) |
+| `auto`   | Silently accept and save      | Testing only          |
 
 ## Troubleshooting
 
@@ -124,14 +124,14 @@ The host key changed since you last connected. This could indicate:
    ssh-keyscan -t ed25519 your-cluster.example.com >> ~/.ssh/known_hosts
    ```
 
-2. **Potential attack**: If unexpected, do not connect. Contact your administrator.
+1. **Potential attack**: If unexpected, do not connect. Contact your administrator.
 
 ### Connection works in terminal but not SDK
 
 Ensure the SDK is reading the same known_hosts file. The SDK checks:
 
 1. System host keys (`/etc/ssh/ssh_known_hosts`)
-2. User host keys (`~/.ssh/known_hosts`)
+1. User host keys (`~/.ssh/known_hosts`)
 
 ## See also
 

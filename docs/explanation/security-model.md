@@ -24,12 +24,12 @@ have authenticated access to cluster resources.
    The SDK assumes that only authorized users can access job directories on the
    cluster.
 
-2. **SSH connections**: Once authenticated, the SSH connection is trusted for
+1. **SSH connections**: Once authenticated, the SSH connection is trusted for
    command execution and file transfer.
 
-3. **Local filesystem**: On local backend, the SDK trusts the local filesystem.
+1. **Local filesystem**: On local backend, the SDK trusts the local filesystem.
 
-4. **User-provided code**: Tasks are user-defined Python functions. The SDK
+1. **User-provided code**: Tasks are user-defined Python functions. The SDK
    executes whatever code the user provides.
 
 ### What the SDK Does NOT Trust
@@ -37,7 +37,7 @@ have authenticated access to cluster resources.
 1. **Arbitrary network hosts**: The SDK verifies SSH host keys (by default, logs
    a warning for unknown hosts).
 
-2. **User input in shell commands**: All user-provided strings are escaped with
+1. **User input in shell commands**: All user-provided strings are escaped with
    `shlex.quote()` before inclusion in shell commands.
 
 ## Pickle Serialization
@@ -67,10 +67,10 @@ The SDK's pickle usage is safe when:
 1. **Pickle files are created by the SDK itself** - The SDK serializes data in
    `rendering.py` and deserializes it in `runner.py`.
 
-2. **Files are transferred via trusted channels** - SSH with host key
+1. **Files are transferred via trusted channels** - SSH with host key
    verification, or local filesystem access.
 
-3. **Job directories are protected** - Standard HPC cluster permissions prevent
+1. **Job directories are protected** - Standard HPC cluster permissions prevent
    unauthorized access to job directories.
 
 ### When to Be Cautious
@@ -86,11 +86,11 @@ The SDK's pickle usage is safe when:
 
 The SDK supports three host key verification policies:
 
-| Policy | Description | Use Case |
-|--------|-------------|----------|
-| `auto` | Automatically accept and save unknown keys | Development/testing |
-| `warn` | Log a warning but accept unknown keys (default) | General use |
-| `reject` | Reject connections to unknown hosts | High-security environments |
+| Policy   | Description                                     | Use Case                   |
+| -------- | ----------------------------------------------- | -------------------------- |
+| `auto`   | Automatically accept and save unknown keys      | Development/testing        |
+| `warn`   | Log a warning but accept unknown keys (default) | General use                |
+| `reject` | Reject connections to unknown hosts             | High-security environments |
 
 Configure via:
 
@@ -119,8 +119,8 @@ python script.py --host-key-policy=reject
 ### Recommendations
 
 1. Add cluster hosts to `~/.ssh/known_hosts` before first use
-2. Use SSH keys with passphrase protection
-3. Consider using `host_key_policy="reject"` in production
+1. Use SSH keys with passphrase protection
+1. Consider using `host_key_policy="reject"` in production
 
 ## Command Execution
 
@@ -131,10 +131,10 @@ The SDK prevents shell injection through:
 1. **List-based subprocess calls**: Internal SLURM commands use list arguments
    with `shell=False`, eliminating shell interpretation.
 
-2. **shlex.quote()**: All user-provided strings included in shell commands are
+1. **shlex.quote()**: All user-provided strings included in shell commands are
    escaped using `shlex.quote()`.
 
-3. **Input validation**: The `validation` module provides functions to validate
+1. **Input validation**: The `validation` module provides functions to validate
    job names, account names, partition names, and job IDs.
 
 ### Public API
@@ -201,27 +201,27 @@ cluster's `umask` settings provide appropriate protection.
 ### High-Security Environments
 
 1. Use `host_key_policy="reject"` for SSH
-2. Pre-populate `~/.ssh/known_hosts` with cluster host keys
-3. Use SSH key authentication (no passwords)
-4. Review and audit Slurmfile configurations
-5. Restrict job directory permissions
+1. Pre-populate `~/.ssh/known_hosts` with cluster host keys
+1. Use SSH key authentication (no passwords)
+1. Review and audit Slurmfile configurations
+1. Restrict job directory permissions
 
 ### General Best Practices
 
 1. Keep the SDK updated for security fixes
-2. Use SSH keys instead of passwords
-3. Validate user input before including in job configurations
-4. Monitor job directories for unauthorized modifications
-5. Use cluster-provided authentication mechanisms (Kerberos, etc.) when
+1. Use SSH keys instead of passwords
+1. Validate user input before including in job configurations
+1. Monitor job directories for unauthorized modifications
+1. Use cluster-provided authentication mechanisms (Kerberos, etc.) when
    available
 
 ## Security-Related Configuration
 
-| Setting | Location | Default | Description |
-|---------|----------|---------|-------------|
-| `host_key_policy` | `SSHCommandBackend` | `"warn"` | SSH host key verification |
-| `script_permissions` | `LocalBackend` | `0o750` | Job script file permissions |
-| `job_base_dir` | Backend | `~/slurm_jobs` | Base directory for job files |
+| Setting              | Location            | Default        | Description                  |
+| -------------------- | ------------------- | -------------- | ---------------------------- |
+| `host_key_policy`    | `SSHCommandBackend` | `"warn"`       | SSH host key verification    |
+| `script_permissions` | `LocalBackend`      | `0o750`        | Job script file permissions  |
+| `job_base_dir`       | Backend             | `~/slurm_jobs` | Base directory for job files |
 
 ## Reporting Security Issues
 
