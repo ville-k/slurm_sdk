@@ -30,21 +30,40 @@ nav:
   - Explanation:
       - explanation/index.md
       - System Overview: explanation/system_overview.md
+      - Slurm Concepts: explanation/slurm_concepts.md
       - Container Packaging: explanation/container_packaging.md
       - Workflow Execution: explanation/workflow_execution.md
       - Rendering and Runner: explanation/rendering_and_runner.md
       - Callbacks and Events: explanation/callbacks_and_events.md
+  - Community:
+      - Contributing: CONTRIBUTING.md
+      - Changelog: CHANGELOG.md
 
 theme:
   name: material
   language: en
   icon:
     logo: material/library-shelves
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
   features:
     - navigation.indexes
     - navigation.instant
     - navigation.instant.progress
     - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
     - toc.follow
     - content.code.copy
 
@@ -62,6 +81,9 @@ plugins:
               - '!^_'
 
 markdown_extensions:
+  - toc:
+      permalink: true
+      toc_depth: 3
   - admonition
   - pymdownx.details
   - attr_list

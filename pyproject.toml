@@ -24,6 +24,10 @@ packages = ["src/slurm"]
 
 [dependency-groups]
 dev = [
+    "mdformat>=0.7.22",
+    "mdformat-frontmatter>=2.0.8",
+    "mdformat-gfm>=0.4.1",
+    "mdformat-tables>=1.0.0",
     "mkdocs-coverage>=2.0.0",
     "mkdocs-material>=9.6.1",
     "mkdocstrings>=0.30.1",

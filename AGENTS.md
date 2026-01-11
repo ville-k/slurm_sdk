@@ -17,6 +17,8 @@
 - `uv run mkdocs build` builds the documentation and checks for warnings and errors.
 - `uv format` formats code according to project style guidelines.
 - `uv run ruff check --fix` lints the code and auto-fixes issues where possible.
+- `uv run mdformat docs/tutorials docs/how-to docs/explanation docs/reference docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md` formats markdown files (note: `docs/index.md` is excluded as it uses special MkDocs Material grid syntax).
+- `uv run mdformat --check docs/tutorials docs/how-to docs/explanation docs/reference docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md` checks markdown formatting without modifying files.
 
 ## Coding Style & Naming Conventions
 
@@ -77,11 +79,11 @@ Use what-style comments **only** when code is necessarily complex or unintuitive
 
 ## Changelog Management
 
-When modifying code, always update `CHANGELOG.md` following the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format:
+When modifying code, always update `docs/CHANGELOG.md` following the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format:
 
 ### Format Requirements
 
-- **File**: `CHANGELOG.md` at project root
+- **File**: `docs/CHANGELOG.md`
 - **Date format**: ISO 8601 (YYYY-MM-DD)
 - **Structure**: Reverse chronological (newest first)
 - **Semantic versioning**: Link to [semver.org](https://semver.org/spec/v2.0.0.html)
@@ -91,7 +93,7 @@ When modifying code, always update `CHANGELOG.md` following the [Keep a Changelo
 Classify all changes under these headings:
 
 - **Added**: New features
-- **Changed**: Changes in existing functionality  
+- **Changed**: Changes in existing functionality
 - **Deprecated**: Soon-to-be removed features
 - **Removed**: Now removed features
 - **Fixed**: Bug fixes
@@ -100,9 +102,9 @@ Classify all changes under these headings:
 ### Workflow
 
 1. **During development**: Add entries to `## [Unreleased]` section
-2. **At release**: Move `[Unreleased]` entries to new versioned section `## [X.Y.Z] - YYYY-MM-DD`
-3. **Format**: Use bullet points (`-`) with descriptive, user-focused language
-4. **Audience**: Write for end users, not developers - explain _what_ and _why_, not implementation details
+1. **At release**: Move `[Unreleased]` entries to new versioned section `## [X.Y.Z] - YYYY-MM-DD`
+1. **Format**: Use bullet points (`-`) with descriptive, user-focused language
+1. **Audience**: Write for end users, not developers - explain _what_ and _why_, not implementation details
 
 ### Example Structure
 
@@ -145,7 +147,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Key Principles
 
 - ✅ **Do**: Focus on user-facing changes and their impact
-- ✅ **Do**: Group similar changes together under appropriate categories  
+- ✅ **Do**: Group similar changes together under appropriate categories
 - ✅ **Do**: Keep entries concise but descriptive
 - ❌ **Don't**: Include every commit or minor internal refactoring
 - ❌ **Don't**: Use commit messages as changelog entries
@@ -279,8 +281,9 @@ When modifying code, always keep documentation synchronized following the [Diata
 ### The Four Documentation Types
 
 #### 1. **Tutorials** (Learning-Oriented)
-**Purpose**: Guide beginners through a complete learning experience  
-**Audience**: New users acquiring basic competence  
+
+**Purpose**: Guide beginners through a complete learning experience\
+**Audience**: New users acquiring basic competence\
 **Focus**: Practical lessons that build confidence through successful completion
 
 **Characteristics**:
@@ -300,7 +303,7 @@ When modifying code, always keep documentation synchronized following the [Diata
 
 **Structure**:
 
-````markdown
+```markdown
 # Tutorial: [Specific achievable goal]
 
 ## What you'll build
@@ -319,7 +322,7 @@ When modifying code, always keep documentation synchronized following the [Diata
 ## Summary
 [What they accomplished, what they learned]
 [Links to related how-to guides and explanations]
-````
+```
 
 **Writing guidelines**:
 
@@ -329,11 +332,12 @@ When modifying code, always keep documentation synchronized following the [Diata
 - ❌ Don't show alternative approaches - stay focused on one path
 - ❌ Don't assume prior knowledge beyond prerequisites
 
----
+______________________________________________________________________
 
 #### 2. **How-To Guides** (Task-Oriented)
-**Purpose**: Help competent users accomplish specific real-world tasks  
-**Audience**: Experienced users solving practical problems  
+
+**Purpose**: Help competent users accomplish specific real-world tasks\
+**Audience**: Experienced users solving practical problems\
 **Focus**: Efficient solutions to common problems
 
 **Characteristics**:
@@ -394,11 +398,12 @@ When modifying code, always keep documentation synchronized following the [Diata
 - ❌ Don't teach - assume they know the basics
 - ❌ Don't provide full end-to-end setup
 
----
+______________________________________________________________________
 
 #### 3. **Reference** (Information-Oriented)
-**Purpose**: Provide accurate technical descriptions for users at work  
-**Audience**: Users who need to look up specific facts  
+
+**Purpose**: Provide accurate technical descriptions for users at work\
+**Audience**: Users who need to look up specific facts\
 **Focus**: Comprehensive, accurate, consistent information
 
 **Characteristics**:
@@ -484,11 +489,12 @@ result = train_model(config, "/data/training")
 - ❌ Don't provide instructions - link to how-tos
 - ❌ Don't include opinions or recommendations
 
----
+______________________________________________________________________
 
 #### 4. **Explanation** (Understanding-Oriented)
-**Purpose**: Deepen understanding of topics and design decisions  
-**Audience**: Users wanting to understand "why" and context  
+
+**Purpose**: Deepen understanding of topics and design decisions\
+**Audience**: Users wanting to understand "why" and context\
 **Focus**: Clarification, discussion, multiple perspectives
 
 **Characteristics**:
@@ -508,7 +514,7 @@ result = train_model(config, "/data/training")
 
 **Structure**:
 
-````markdown
+```markdown
 # [Topic] Explained
 
 ## Overview
@@ -538,7 +544,7 @@ result = train_model(config, "/data/training")
 ## Further Reading
 - [Related explanations]
 - [Academic papers or external resources]
-````
+```
 
 **Writing guidelines**:
 
@@ -550,31 +556,34 @@ result = train_model(config, "/data/training")
 - ❌ Don't give step-by-step instructions
 - ❌ Don't turn into reference material with tables of facts
 
----
+______________________________________________________________________
 
 ### Documentation Workflow
 
 #### When Writing New Code
 
 1. **Identify which documentation types need updates**
+
    - New feature → Tutorial (if fundamental) + How-to + Reference
    - Bug fix → Update relevant How-to or Reference
    - API change → Always update Reference
    - Design decision → Add/update Explanation
 
-2. **Update each type appropriately**
+1. **Update each type appropriately**
+
    - Keep types separate (no explanations in tutorials!)
    - Update related cross-links
    - Ensure examples still work
 
-3. **Verify documentation matches code**
+1. **Verify documentation matches code**
+
    - Test all code examples
    - Validate parameter descriptions
    - Confirm error messages match
 
 #### Directory Structure
 
-````text
+```text
 docs/
 ├── tutorials/           # Learning-oriented lessons
 │   ├── getting-started.md
@@ -591,21 +600,24 @@ docs/
     ├── architecture.md
     ├── training-strategies.md
     └── design-principles.md
-````
+```
 
 ### Quick Decision Guide
 
 **Ask yourself:**
 
 1. **Is the user learning or working?**
+
    - Learning → Tutorial or Explanation
    - Working → How-to or Reference
 
-2. **Do they need to follow steps?**
+1. **Do they need to follow steps?**
+
    - Yes, learning → Tutorial
    - Yes, solving problem → How-to
 
-3. **Do they need facts or understanding?**
+1. **Do they need facts or understanding?**
+
    - Facts to use → Reference
    - Understanding → Explanation
 
@@ -689,7 +701,7 @@ graph LR
 
 Example docstring with Mermaid:
 
-```python
+````python
 def submit(self, task_func: SlurmTask) -> Job:
     """Submit a task to the cluster.
 
@@ -706,7 +718,7 @@ def submit(self, task_func: SlurmTask) -> Job:
         Cluster-->>User: Job object
     ```
     """
-```
+````
 
 **When to use ASCII art**: For simple inline diagrams in docstrings where Mermaid would be overkill, ASCII art is acceptable:
 

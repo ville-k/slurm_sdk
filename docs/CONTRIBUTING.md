@@ -11,15 +11,17 @@ There are two ways to develop the SDK:
 The easiest way to get started is using the devcontainer, which provides a fully configured development environment with access to a local Slurm cluster.
 
 1. **Prerequisites:**
+
    - Docker or Podman installed and running
    - VSCode or Cursor with the "Dev Containers" extension
 
-2. **Open in container:**
+1. **Open in container:**
+
    - Open the project in VSCode/Cursor
    - Click "Reopen in Container" when prompted (or use Command Palette: "Dev Containers: Reopen in Container")
    - Wait for the container to build and dependencies to install
 
-3. **Run tests:**
+1. **Run tests:**
 
    ```bash
    # Unit tests
@@ -44,19 +46,19 @@ If you prefer developing on your host machine:
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-2. **Install dependencies:**
+1. **Install dependencies:**
 
    ```bash
    uv sync --dev
    ```
 
-3. **Run unit tests:**
+1. **Run unit tests:**
 
    ```bash
    uv run pytest tests/ --ignore=tests/integration
    ```
 
-4. **Run integration tests** (requires Docker/Podman):
+1. **Run integration tests** (requires Docker/Podman):
 
    ```bash
    # Using the integration test runner script
@@ -152,17 +154,17 @@ uv run pytest --run-integration -v -m "not container_packaging"
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `SLURM_SDK_DEV_MODE` | Execution mode: `host`, `devcontainer`, or `ci` | Auto-detected |
-| `SLURM_HOST` | Slurm cluster hostname | `slurm` (devcontainer) or `127.0.0.1` (host) |
-| `SLURM_PORT` | Slurm SSH port | `22` (devcontainer) or `2222` (host) |
-| `REGISTRY_URL` | Container registry URL | `registry:5000` |
-| `SLURM_RUN_INTEGRATION` | Enable integration tests | `0` |
-| `SLURM_TEST_KEEP` | Keep docker-compose services after tests | Not set |
-| `SLURM_TEST_COMPOSE_COMMAND` | Override compose command | Auto-detected |
-| `SLURM_TEST_COMPOSE_NO_BUILD` | Skip image rebuilds | Not set |
-| `SLURM_TEST_CONTAINER_RUNTIME` | Force container runtime (`docker`/`podman`) | Auto-detected |
+| Variable                       | Description                                     | Default                                      |
+| ------------------------------ | ----------------------------------------------- | -------------------------------------------- |
+| `SLURM_SDK_DEV_MODE`           | Execution mode: `host`, `devcontainer`, or `ci` | Auto-detected                                |
+| `SLURM_HOST`                   | Slurm cluster hostname                          | `slurm` (devcontainer) or `127.0.0.1` (host) |
+| `SLURM_PORT`                   | Slurm SSH port                                  | `22` (devcontainer) or `2222` (host)         |
+| `REGISTRY_URL`                 | Container registry URL                          | `registry:5000`                              |
+| `SLURM_RUN_INTEGRATION`        | Enable integration tests                        | `0`                                          |
+| `SLURM_TEST_KEEP`              | Keep docker-compose services after tests        | Not set                                      |
+| `SLURM_TEST_COMPOSE_COMMAND`   | Override compose command                        | Auto-detected                                |
+| `SLURM_TEST_COMPOSE_NO_BUILD`  | Skip image rebuilds                             | Not set                                      |
+| `SLURM_TEST_CONTAINER_RUNTIME` | Force container runtime (`docker`/`podman`)     | Auto-detected                                |
 
 ## Troubleshooting
 
@@ -246,6 +248,22 @@ slurm_sdk/
 - Keep info-level logs concise; prefer debug level for detailed internals.
 - Use `slurm.logging.configure_logging()` for a pleasant default logging setup.
 
+### Markdown Formatting
+
+Markdown files are formatted using [mdformat](https://mdformat.readthedocs.io/). Run the formatter before committing documentation changes:
+
+```bash
+# Format markdown files (excludes docs/index.md which uses special MkDocs Material syntax)
+uv run mdformat docs/tutorials docs/how-to docs/explanation docs/reference \
+  docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md
+
+# Check formatting without modifying files
+uv run mdformat --check docs/tutorials docs/how-to docs/explanation docs/reference \
+  docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md
+```
+
+**Note:** `docs/index.md` uses MkDocs Material grid card syntax with `---` separators that mdformat would incorrectly convert. Edit this file manually.
+
 ## Submitting Changes
 
 1. Ensure all tests pass:
@@ -254,10 +272,19 @@ slurm_sdk/
    uv run pytest
    ```
 
-2. For integration changes, also run:
+1. For integration changes, also run:
 
    ```bash
    ./scripts/run-integration-tests.sh
    ```
 
-3. Update docs (`README.md`, examples) when adding features that affect public APIs.
+1. Format and lint your code:
+
+   ```bash
+   uv format
+   uv run ruff check --fix
+   uv run mdformat docs/tutorials docs/how-to docs/explanation docs/reference \
+     docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md
+   ```
+
+1. Update docs (`README.md`, examples) when adding features that affect public APIs.

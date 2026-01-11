@@ -93,13 +93,14 @@ if __name__ == "__main__":
 
 ## Documentation
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) - Development setup, testing, and contribution guidelines
+- [Contributing Guide](docs/CONTRIBUTING.md) - Development setup, testing, and contribution guidelines
 - [AGENTS.md](AGENTS.md) - Guide for AI agents working with this codebase
+- [Changelog](docs/CHANGELOG.md) - Release history and changes
 - [examples/](src/slurm/examples/) - Complete working examples including parallelization patterns
 
 ## Running on an ARM Mac (Apple Silicon)
 
-You can build and publish x86_64 (``linux/amd64```) images from an ARM Mac by
+You can build and publish x86_64 (\`\`linux/amd64\`\`\`) images from an ARM Mac by
 enabling QEMU emulation inside your container runtime. The example below shows
 the required one-time setup for Podman; Docker Desktop users can follow a
 similar flow using `docker buildx` (no additional configuration usually needed).
@@ -111,14 +112,14 @@ similar flow using `docker buildx` (no additional configuration usually needed).
    brew install qemu
    ```
 
-2. Make sure the Podman machine is created and running. If you have not
+1. Make sure the Podman machine is created and running. If you have not
    initialised it yet:
 
    ```sh
    podman machine init --now
    ```
 
-3. Register the QEMU static binaries inside the Podman machine so it can run
+1. Register the QEMU static binaries inside the Podman machine so it can run
    amd64 containers. This step reboots the VM and only needs to be performed
    once (repeat if you recreate the machine):
 
@@ -127,7 +128,7 @@ similar flow using `docker buildx` (no additional configuration usually needed).
    podman machine ssh sudo systemctl reboot
    ```
 
-4. After the machine restarts, confirm cross-building works:
+1. After the machine restarts, confirm cross-building works:
 
    ```sh
    podman build --platform linux/amd64 -t test-amd64 .

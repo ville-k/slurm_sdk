@@ -47,9 +47,11 @@ sequenceDiagram
 ```
 
 ## Execution loci
+
 Callbacks can be configured to run on the client or on the runner. The SDK checks `should_run_on_client` and `should_run_on_runner` to decide where each callback fires.
 
 ## Serialization rules
+
 Callbacks that need to run on the runner are pickled and shipped alongside the job script. Lightweight logging callbacks typically run only on the client.
 
 ## Typical uses

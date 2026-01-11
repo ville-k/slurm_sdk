@@ -16,7 +16,9 @@ This tutorial shows how to capture workflow structure and export it as a Graphvi
 ## What to expect
 
 - `workflow_graph.dot` and `workflow_graph.json` are written to the working directory.
+
 - The workflow prints a summary of submitted tasks and their relationships.
+
 - You can render the DOT file with Graphviz (optional):
 
   ```bash

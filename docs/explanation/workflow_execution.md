@@ -39,9 +39,9 @@ sequenceDiagram
 Step by step:
 
 1. The workflow job starts and the runner creates a `WorkflowContext`.
-2. Environment metadata is written into the workflow job directory (`.slurm_environment.json`).
-3. `SLURM_SDK_PACKAGING_CONFIG` is exported so child submissions inherit the container image.
-4. Child tasks write their outputs under `workflow_job_dir/tasks/<task-name>/<timestamp>/`.
+1. Environment metadata is written into the workflow job directory (`.slurm_environment.json`).
+1. `SLURM_SDK_PACKAGING_CONFIG` is exported so child submissions inherit the container image.
+1. Child tasks write their outputs under `workflow_job_dir/tasks/<task-name>/<timestamp>/`.
 
 ## Directory structure
 

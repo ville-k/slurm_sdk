@@ -14,10 +14,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run markdownlint
-        uses: DavidAnson/markdownlint-cli2-action@v19
-        with:
-          globs: |
-            **/*.md
-            !node_modules
-            !.claude/**
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Check markdown formatting
+        run: |
+          uv run mdformat --check \
+            docs/tutorials \
+            docs/how-to \
+            docs/explanation \
+            docs/reference \
+            docs/CHANGELOG.md \
+            docs/CONTRIBUTING.md \
+            README.md \
+            AGENTS.md
