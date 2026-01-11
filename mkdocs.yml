@@ -10,6 +10,9 @@ nav:
       - tutorials/index.md
       - Getting Started: tutorials/getting_started_hello_world.md
       - Container Basics: tutorials/container_basics_hello_container.md
+      - PyTorch Hello World: tutorials/hello_torch.md
+      - Map-Reduce Pattern: tutorials/map_reduce.md
+      - Parallelization Patterns: tutorials/parallelization_patterns.md
       - Workflow Graph Visualization: tutorials/workflow_graph_visualization.md
       - Parallel Train + Eval Workflow: tutorials/parallel-train-eval-workflow.md
   - How-To Guides:
