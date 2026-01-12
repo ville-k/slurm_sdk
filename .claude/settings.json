@@ -19,8 +19,17 @@
       "Bash(python:*)",
       "Bash(python3:*)",
       "Bash(uv run:*)",
+      "Bash(uv format:*)",
       "Bash(git diff:*)",
       "Bash(git mv:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git branch:*)",
+      "Bash(gh pr:*)",
+      "Bash(gh auth:*)",
       "Bash(docker:*)",
       "Bash(docker-compose:*)",
       "Bash(podman:*)",
@@ -29,7 +38,9 @@
       "Bash(for file in:*)",
       "Bash(do echo:*)",
       "Bash(done)",
-      "Bash(export:*)"
+      "Bash(export:*)",
+      "Bash(uv format:*)",
+      "Bash(tmux show-options:*)"
     ],
     "deny": [
       "Bash(rm:*)",
@@ -45,9 +56,12 @@
       "Bash(git reset:*)",
       "Bash(git clean:*)",
       "Bash(git checkout:*)",
-      "Bash(git push:*)",
       "Bash(git pull:*)",
-      "Bash(git merge:*)"
+      "Bash(git merge:*)",
+      "Bash(git push origin main:*)",
+      "Bash(git push origin master:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
     ]
   },
   "plugins": {

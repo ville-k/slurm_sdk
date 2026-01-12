@@ -22,6 +22,74 @@
 - `uv run mdformat docs/tutorials docs/how-to docs/explanation docs/reference docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md` formats markdown files (note: `docs/index.md` is excluded as it uses special MkDocs Material grid syntax).
 - `uv run mdformat --check docs/tutorials docs/how-to docs/explanation docs/reference docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md` checks markdown formatting without modifying files.
 
+## Agent Development Workflow
+
+When implementing a new feature, follow this workflow:
+
+### 1. Plan the Work
+
+Before writing code, understand the scope and design:
+
+- Read relevant existing code to understand patterns and conventions
+- Identify which modules need changes
+- Consider edge cases and error handling
+- Break complex features into smaller, testable increments
+
+### 2. Develop with Tests
+
+Write code and tests together, maintaining high coverage:
+
+- Write tests alongside implementation, not after
+- Run `uv run pytest` frequently to catch regressions early
+- Aim for comprehensive test coverage of new functionality
+- Use `uv run pytest -n auto` for faster parallel test execution
+- Keep the test suite passing at all times
+
+### 3. Add Documentation and Changelog
+
+When coding is complete:
+
+- Update or add documentation following the Diataxis framework
+- Add changelog entries to `docs/CHANGELOG.md` under `## [Unreleased]`
+- Ensure docstrings are complete for public APIs
+
+### 4. Lint and Validate
+
+Before committing, run all quality checks:
+
+```bash
+uv format
+uv run ruff check --fix
+uv run bandit -r src/ -ll
+uv run mdformat docs/tutorials docs/how-to docs/explanation docs/reference docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md
+uv run mkdocs build
+```
+
+Fix any errors or warnings before proceeding.
+
+### 5. Commit Changes
+
+Create a commit following Conventional Commits:
+
+- Use appropriate type: `feat`, `fix`, `docs`, `refactor`, `test`, etc.
+- Write a clear, concise description
+- Include body text explaining "why" for non-trivial changes
+- Reference related issues if applicable
+
+### 6. Create Pull Request
+
+**Once all completion criteria are met, immediately create a PR for review:**
+
+```bash
+git push -u origin <branch-name>
+gh pr create --fill
+```
+
+- Never push directly to `main` - all changes require code review
+- Push and create PR as soon as tests pass and linting is clean
+- The PR description should summarize changes and reference any related issues
+- Wait for CI to pass before requesting human review
+
 ## Coding Style & Naming Conventions
 
 - Use 4-space indentation and type hints throughout; the package ships `py.typed`.

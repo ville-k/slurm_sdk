@@ -1,13 +1,13 @@
 [project]
 name = "slurm-sdk"
-version = "0.4.4"
+version = "0.4.4-dev"
 description = "Pythonic SDK for Slurm."
 readme = "README.md"
 license = "MIT"
 authors = [
     { name = "Ville Kallioniemi", email = "ville.kallioniemi@gmail.com" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "paramiko>=3.5.1",
     "requests>=2.32.3",
@@ -25,6 +25,7 @@ packages = ["src/slurm"]
 [dependency-groups]
 dev = [
     "bandit>=1.7.0",
+    "legionnaire>=0.1.0",
     "mdformat>=0.7.22",
     "mdformat-frontmatter>=2.0.8",
     "mdformat-gfm>=0.4.1",
