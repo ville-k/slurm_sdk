@@ -122,6 +122,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Build Slurm container image
+        run: docker compose -f containers/docker-compose.yml build slurm
+
       - name: Start Slurm cluster and registry
         run: docker compose -f containers/docker-compose.yml up -d slurm registry
 
@@ -131,7 +134,7 @@ jobs:
           sleep 10
 
           echo "Container status:"
-          docker compose -f containers/docker-compose.yml ps
+          docker compose -f containers/docker-compose.yml ps -a
 
           echo ""
           echo "Waiting for Slurm SSH to be ready..."
@@ -147,6 +150,10 @@ jobs:
 
           echo ""
           echo "Timeout waiting for Slurm SSH after 120 seconds"
+          echo ""
+          echo "Container status:"
+          docker compose -f containers/docker-compose.yml ps -a
+          echo ""
           echo "Container logs:"
           docker compose -f containers/docker-compose.yml logs slurm
           exit 1
