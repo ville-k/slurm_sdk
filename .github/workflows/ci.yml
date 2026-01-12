@@ -74,7 +74,7 @@ jobs:
         run: uv sync --dev
 
       - name: Check code formatting
-        run: uv run ruff format --check src/ tests/
+        run: uv format --check
 
   security:
     name: Security Scan
