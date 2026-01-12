@@ -94,7 +94,8 @@ services:
 
 networks:
   slurm-dev-network:
-    driver: bridge
+    # Allow using pre-existing network (for CI) or create if not exists
+    external: true
     name: slurm-dev-network
 
 volumes:

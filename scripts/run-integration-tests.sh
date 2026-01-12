@@ -123,6 +123,8 @@ if services_running; then
     echo -e "${YELLOW}Services already running${NC}"
 else
     echo "Starting Slurm cluster and registry..."
+    # Create network if it doesn't exist (required since network is external in docker-compose)
+    $CONTAINER_CMD network create slurm-dev-network 2>/dev/null || true
     $COMPOSE_CMD -f "$COMPOSE_FILE" up -d slurm registry
 
     # Wait for services to be ready
