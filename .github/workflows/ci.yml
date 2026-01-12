@@ -125,21 +125,30 @@ jobs:
       - name: Start Slurm cluster and registry
         run: docker compose -f containers/docker-compose.yml up -d slurm registry
 
-      - name: Wait for Slurm SSH to be ready
+      - name: Wait for services to be ready
         run: |
-          echo "Waiting for Slurm SSH..."
-          max_attempts=60
-          attempt=0
-          while [[ $attempt -lt $max_attempts ]]; do
-            if docker exec slurm-test systemctl is-active sshd &>/dev/null; then
-              echo "Slurm SSH is ready"
+          echo "Waiting for containers to start..."
+          sleep 10
+
+          echo "Container status:"
+          docker compose -f containers/docker-compose.yml ps
+
+          echo ""
+          echo "Waiting for Slurm SSH to be ready..."
+          for i in $(seq 1 120); do
+            if docker exec slurm-test systemctl is-active sshd 2>/dev/null; then
+              echo ""
+              echo "Slurm SSH is ready after ${i} seconds"
               exit 0
             fi
             echo -n "."
             sleep 1
-            ((attempt++))
           done
-          echo "Timeout waiting for Slurm SSH"
+
+          echo ""
+          echo "Timeout waiting for Slurm SSH after 120 seconds"
+          echo "Container logs:"
+          docker compose -f containers/docker-compose.yml logs slurm
           exit 1
 
       - name: Enable oversubscription for workflow tests
