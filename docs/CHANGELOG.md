@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Unified CI workflow for pull requests with unit tests, linting, formatting, security scans, docs build, and integration tests (consolidates previous separate lint and security workflows)
 - SSH host key verification with configurable policies (`auto`, `warn`, `reject`)
 - Input validation module (`slurm.validation`) for job names, accounts, and partitions
 - Security documentation explaining the SDK's trust model and best practices
 - How-to guide for hardening SSH connections in production
-- Bandit security scanning as dev dependency and CI workflow
+- Bandit security scanning as dev dependency
 - Basic monitoring APIs for job status tracking
 - Mermaid diagrams throughout documentation for improved understanding:
   - Parallelization pattern diagrams (fan-out/fan-in, pipeline, sweep, dynamic dependencies)

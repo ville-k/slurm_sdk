@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run unit tests
+        run: uv run pytest tests/ --ignore=tests/integration -n auto
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: Check markdown formatting
+        run: |
+          uv run mdformat --check \
+            docs/tutorials \
+            docs/how-to \
+            docs/explanation \
+            docs/reference \
+            docs/CHANGELOG.md \
+            docs/CONTRIBUTING.md \
+            README.md \
+            AGENTS.md
+
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Check code formatting
+        run: uv run ruff format --check src/ tests/
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run Bandit security scan
+        run: uv run bandit -r src/ -ll -f txt
+
+  docs:
+    name: Documentation Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Build documentation
+        run: uv run mkdocs build --strict
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [unit-tests, lint, format, security, docs]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Start Slurm cluster and registry
+        run: docker compose -f containers/docker-compose.yml up -d slurm registry
+
+      - name: Wait for Slurm SSH to be ready
+        run: |
+          echo "Waiting for Slurm SSH..."
+          max_attempts=60
+          attempt=0
+          while [[ $attempt -lt $max_attempts ]]; do
+            if docker exec slurm-test systemctl is-active sshd &>/dev/null; then
+              echo "Slurm SSH is ready"
+              exit 0
+            fi
+            echo -n "."
+            sleep 1
+            ((attempt++))
+          done
+          echo "Timeout waiting for Slurm SSH"
+          exit 1
+
+      - name: Enable oversubscription for workflow tests
+        run: docker exec slurm-test scontrol update PartitionName=debug OverSubscribe=YES || true
+
+      - name: Build devcontainer
+        run: docker compose -f containers/docker-compose.yml build devcontainer
+
+      - name: Run integration tests
+        run: |
+          docker compose -f containers/docker-compose.yml run --rm \
+            -e SLURM_SDK_DEV_MODE=ci \
+            -e SLURM_HOST=slurm \
+            -e SLURM_PORT=22 \
+            -e REGISTRY_URL=registry:5000 \
+            devcontainer \
+            bash -c "cd /workspace && uv sync --dev --quiet && uv run pytest --run-integration tests/integration/ -v"
+
+      - name: Stop services
+        if: always()
+        run: docker compose -f containers/docker-compose.yml down -v
