@@ -188,7 +188,7 @@ jobs:
         run: docker exec slurm-test scontrol update PartitionName=debug OverSubscribe=YES || true
 
       - name: Build devcontainer
-        run: docker build -t slurm-sdk-dev:latest containers/dev
+        run: docker build -t slurm-sdk-dev:latest -f containers/dev/Containerfile containers/dev
 
       - name: Run integration tests
         run: |
