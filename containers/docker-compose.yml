@@ -71,6 +71,8 @@ services:
     container_name: slurm-test
     hostname: slurm-control
     privileged: true
+    # Use host cgroup namespace for systemd compatibility (required for cgroups v2)
+    cgroupns: host
     ports:
       - "2222:22"  # SSH from host
     networks:
