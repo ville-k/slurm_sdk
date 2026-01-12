@@ -122,11 +122,30 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Create docker network
+        run: docker network create slurm-dev-network || true
+
       - name: Build Slurm container image
         run: docker compose -f containers/docker-compose.yml build slurm
 
-      - name: Start Slurm cluster and registry
-        run: docker compose -f containers/docker-compose.yml up -d slurm registry
+      - name: Start registry
+        run: docker compose -f containers/docker-compose.yml up -d registry
+
+      - name: Start Slurm container
+        run: |
+          docker run -d \
+            --name slurm-test \
+            --hostname slurm-control \
+            --privileged \
+            --cgroupns=host \
+            --network slurm-dev-network \
+            --network-alias slurm \
+            --network-alias slurm-pyxis \
+            --network-alias slurm-control \
+            -p 2222:22 \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            slurm-integration:latest \
+            /sbin/init
 
       - name: Wait for services to be ready
         run: |
@@ -176,4 +195,8 @@ jobs:
 
       - name: Stop services
         if: always()
-        run: docker compose -f containers/docker-compose.yml down -v
+        run: |
+          docker stop slurm-test || true
+          docker rm slurm-test || true
+          docker compose -f containers/docker-compose.yml down -v || true
+          docker network rm slurm-dev-network || true
