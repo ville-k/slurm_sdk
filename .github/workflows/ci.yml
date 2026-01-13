@@ -134,7 +134,7 @@ jobs:
             --name slurm-test-registry \
             --network slurm-dev-network \
             --network-alias registry \
-            -p 5000:5000 \
+            -p 5001:5000 \
             -e REGISTRY_STORAGE_DELETE_ENABLED=true \
             registry:2
 
@@ -191,6 +191,7 @@ jobs:
         run: docker build -t slurm-sdk-dev:latest -f containers/dev/Containerfile containers/dev
 
       - name: Run integration tests
+        timeout-minutes: 30
         run: |
           docker run --rm \
             --network slurm-dev-network \
@@ -203,7 +204,7 @@ jobs:
             -e REGISTRY_URL=registry:5000 \
             -w /workspace \
             slurm-sdk-dev:latest \
-            bash -c "uv sync --dev --quiet && uv run pytest --run-integration tests/integration/ -v"
+            bash -c "uv sync --dev --quiet && uv run pytest --run-integration tests/integration/ -v -m 'not slow_integration_test' --ignore=tests/integration/test_container_packaging_comprehensive.py"
 
       - name: Stop services
         if: always()

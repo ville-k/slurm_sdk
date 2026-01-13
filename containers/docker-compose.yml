@@ -45,12 +45,12 @@ services:
 
   # Local container registry for testing
   # Accessible as "registry:5000" from other containers
-  # Accessible as "localhost:5000" from host
+  # Accessible as "localhost:5001" from host (5001 avoids macOS AirPlay conflict on port 5000)
   registry:
     image: registry:2
     container_name: slurm-test-registry
     ports:
-      - "5000:5000"
+      - "5001:5000"
     networks:
       - slurm-dev-network
     restart: unless-stopped
