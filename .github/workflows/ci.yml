@@ -1,0 +1,215 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run unit tests
+        run: uv run pytest tests/ --ignore=tests/integration -n auto
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: Check markdown formatting
+        run: |
+          uv run mdformat --check \
+            docs/tutorials \
+            docs/how-to \
+            docs/explanation \
+            docs/reference \
+            docs/CHANGELOG.md \
+            docs/CONTRIBUTING.md \
+            README.md \
+            AGENTS.md
+
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Check code formatting
+        run: uv format --check
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run Bandit security scan
+        run: uv run bandit -r src/ -ll -f txt
+
+  docs:
+    name: Documentation Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Build documentation
+        run: uv run mkdocs build --strict
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [unit-tests, lint, format, security, docs]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create docker network
+        run: docker network create slurm-dev-network || true
+
+      - name: Build Slurm container image
+        run: docker compose -f containers/docker-compose.yml build slurm
+
+      - name: Start registry
+        run: |
+          docker run -d \
+            --name slurm-test-registry \
+            --network slurm-dev-network \
+            --network-alias registry \
+            -p 5001:5000 \
+            -e REGISTRY_STORAGE_DELETE_ENABLED=true \
+            registry:2
+
+      - name: Start Slurm container
+        run: |
+          docker run -d \
+            --name slurm-test \
+            --hostname slurm-control \
+            --privileged \
+            --cgroupns=host \
+            --network slurm-dev-network \
+            --network-alias slurm \
+            --network-alias slurm-pyxis \
+            --network-alias slurm-control \
+            -p 2222:22 \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            slurm-integration:latest \
+            /sbin/init
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for containers to start..."
+          sleep 10
+
+          echo "Container status:"
+          docker compose -f containers/docker-compose.yml ps -a
+
+          echo ""
+          echo "Waiting for Slurm SSH to be ready..."
+          for i in $(seq 1 120); do
+            if docker exec slurm-test systemctl is-active sshd 2>/dev/null; then
+              echo ""
+              echo "Slurm SSH is ready after ${i} seconds"
+              exit 0
+            fi
+            echo -n "."
+            sleep 1
+          done
+
+          echo ""
+          echo "Timeout waiting for Slurm SSH after 120 seconds"
+          echo ""
+          echo "Container status:"
+          docker compose -f containers/docker-compose.yml ps -a
+          echo ""
+          echo "Container logs:"
+          docker compose -f containers/docker-compose.yml logs slurm
+          exit 1
+
+      - name: Enable oversubscription for workflow tests
+        run: docker exec slurm-test scontrol update PartitionName=debug OverSubscribe=YES || true
+
+      - name: Build devcontainer
+        run: docker build -t slurm-sdk-dev:latest -f containers/dev/Containerfile containers/dev
+
+      - name: Run integration tests
+        timeout-minutes: 30
+        run: |
+          docker run --rm \
+            --network slurm-dev-network \
+            --privileged \
+            -v ${{ github.workspace }}:/workspace:cached \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e SLURM_SDK_DEV_MODE=ci \
+            -e SLURM_HOST=slurm \
+            -e SLURM_PORT=22 \
+            -e REGISTRY_URL=registry:5000 \
+            -w /workspace \
+            slurm-sdk-dev:latest \
+            bash -c "uv sync --dev --quiet && uv run pytest --run-integration tests/integration/ -v -m 'not slow_integration_test' --ignore=tests/integration/test_container_packaging_comprehensive.py"
+
+      - name: Stop services
+        if: always()
+        run: |
+          docker stop slurm-test slurm-test-registry || true
+          docker rm slurm-test slurm-test-registry || true
+          docker compose -f containers/docker-compose.yml down -v || true
+          docker network rm slurm-dev-network || true
