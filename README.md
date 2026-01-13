@@ -33,6 +33,54 @@ if __name__ == "__main__":
         print(eval_job.get_result())
 ```
 
+### Workflow Orchestration
+
+Workflows run on the cluster and orchestrate multiple tasks, enabling complex pipelines that survive preemption and scheduling delays:
+
+```python
+from slurm import Cluster, task, workflow
+from slurm.workflow import WorkflowContext
+
+@task(time="00:05:00", mem="2G")
+def train_epoch(epoch: int, data_path: str) -> dict:
+    return {"epoch": epoch, "loss": 1.0 / (epoch + 1), "checkpoint": f"ckpt_{epoch}.pt"}
+
+@task(time="00:02:00", mem="1G")
+def evaluate(checkpoint: str) -> float:
+    return 0.85 + (int(checkpoint.split("_")[1].split(".")[0]) * 0.02)
+
+@workflow(time="01:00:00", mem="512M")
+def training_pipeline(epochs: int, data_path: str, ctx: WorkflowContext) -> dict:
+    """Multi-epoch training with evaluation after each epoch."""
+    results = []
+
+    for epoch in range(epochs):
+        # Submit training job
+        train_job = train_epoch(epoch=epoch, data_path=data_path)
+        train_result = train_job.get_result()
+
+        # Submit eval after training completes
+        eval_job = evaluate.after(train_job)(checkpoint=train_result["checkpoint"])
+        accuracy = eval_job.get_result()
+
+        results.append({"epoch": epoch, "loss": train_result["loss"], "accuracy": accuracy})
+
+    return {"results": results, "best_accuracy": max(r["accuracy"] for r in results)}
+
+if __name__ == "__main__":
+    cluster = Cluster(
+        backend_type="ssh",
+        hostname="login.hpc.example.com",
+        username="myuser",
+    )
+
+    with cluster:
+        # The workflow itself runs as a job on the cluster
+        job = training_pipeline(epochs=3, data_path="/data/train")
+        job.wait()
+        print(job.get_result())
+```
+
 ### Array Jobs for Parallel Processing
 
 ```python
