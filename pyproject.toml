@@ -1,6 +1,6 @@
 [project]
 name = "slurm-sdk"
-version = "0.4.4-dev"
+version = "0.4.5-dev"
 description = "Pythonic SDK for Slurm."
 readme = "README.md"
 license = "MIT"
@@ -9,11 +9,15 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "cyclopts>=3.0.0",
     "paramiko>=3.5.1",
     "requests>=2.32.3",
     "rich>=13.9.4",
     "tomli>=2.0.0; python_version < '3.11'",
 ]
+
+[project.scripts]
+slurm = "slurm.cli:main"
 
 [build-system]
 requires = ["hatchling"]
