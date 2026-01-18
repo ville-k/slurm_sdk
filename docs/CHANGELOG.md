@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `slurm` CLI command for job and cluster management:
+  - `slurm jobs list` - view jobs in the SLURM queue with color-coded states
+  - `slurm jobs show <job-id>` - display detailed job information
+  - `slurm cluster list` - list configured environments from Slurmfile (offline)
+  - `slurm cluster show` - view cluster partition information
+  - Rich output formatting with tables and panels
+  - User-friendly error handling with actionable hints
 - SSH host key verification with configurable policies (`auto`, `warn`, `reject`)
 - Input validation module (`slurm.validation`) for job names, accounts, and partitions
 - Security documentation explaining the SDK's trust model and best practices

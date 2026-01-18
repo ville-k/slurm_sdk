@@ -17,12 +17,14 @@ nav:
       - Parallel Train + Eval Workflow: tutorials/parallel-train-eval-workflow.md
   - How-To Guides:
       - how-to/index.md
+      - Using the CLI: how-to/cli.md
       - Container Dependencies (Map-Reduce): how-to/container_dependencies.md
       - Parallelization Patterns: how-to/parallelization_patterns.md
       - GPU Hello Torch: how-to/hello_torch.md
       - SSH Security: how-to/ssh_security.md
   - Reference:
       - reference/index.md
+      - CLI Reference: reference/cli.md
       - API Reference:
           - reference/api/index.md
           - Cluster: reference/api/cluster.md
