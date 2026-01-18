@@ -12,6 +12,14 @@ pip install slurm-sdk
 uv add slurm-sdk
 ```
 
+For TUI features (interactive dashboard and documentation viewer), install with the `tui` extra:
+
+```bash
+pip install slurm-sdk[tui]
+# or
+uv add slurm-sdk[tui]
+```
+
 ## Synopsis
 
 ```
@@ -163,6 +171,128 @@ This command connects to the cluster to retrieve partition information.
 | Timelimit   | Maximum job time                                     |
 
 Note: Partitions are aggregated by name. SLURM returns separate rows for each node state, but the CLI combines them to show one row per partition with the total node count and a summary of node states.
+
+### slurm dash
+
+Launch an interactive TUI dashboard for monitoring jobs and cluster status.
+
+!!! note "Requires TUI extra"
+    This command requires the TUI extra: `pip install slurm-sdk[tui]`
+
+```
+slurm dash [--env ENV] [--slurmfile PATH] [--refresh-interval SECONDS]
+```
+
+**Options:**
+
+| Option               | Short | Description                          | Default |
+| -------------------- | ----- | ------------------------------------ | ------- |
+| `--env`              | `-e`  | Environment name from Slurmfile      |         |
+| `--slurmfile`        | `-f`  | Path to Slurmfile                    |         |
+| `--refresh-interval` |       | Auto-refresh interval in seconds     | 30      |
+
+**Dashboard Layout:**
+
+The dashboard displays a two-pane layout:
+
+- **Left pane**: Navigation tree showing:
+  - My Jobs - your currently queued and running jobs
+  - Account Jobs - jobs from other users in your account
+  - Cluster Status - partition availability and node states
+
+- **Right pane**: Detail panel showing information for the selected item
+
+**Keyboard Shortcuts:**
+
+| Key       | Action                          |
+| --------- | ------------------------------- |
+| `↑`/`↓`   | Navigate the tree               |
+| `Enter`   | Expand/collapse tree node       |
+| `Tab`     | Switch focus between panes      |
+| `r`       | Manual refresh                  |
+| `a`       | Toggle auto-refresh on/off      |
+| `c`       | Cancel selected job             |
+| `q`       | Quit the dashboard              |
+
+**Refresh Behavior:**
+
+The dashboard uses a hybrid refresh approach:
+
+- Auto-refresh is enabled by default (every 30 seconds)
+- Press `a` to toggle auto-refresh on/off
+- Press `r` for immediate manual refresh
+- Last refresh time is shown in the status bar
+
+### slurm docs
+
+Browse SDK documentation in an interactive TUI viewer.
+
+!!! note "Requires TUI extra"
+    This command requires the TUI extra: `pip install slurm-sdk[tui]`
+
+```
+slurm docs [SEARCH] [--search QUERY]
+```
+
+**Arguments:**
+
+| Argument | Description                              |
+| -------- | ---------------------------------------- |
+| `SEARCH` | Optional search query (positional)       |
+
+**Options:**
+
+| Option     | Description                              |
+| ---------- | ---------------------------------------- |
+| `--search` | Search query to find in documentation    |
+
+**Viewer Layout:**
+
+The documentation viewer displays a two-pane layout:
+
+- **Left pane**: Navigation tree following the mkdocs.yml structure
+  - Tutorials
+  - How-To Guides
+  - Reference
+  - Explanation
+  - Community (Changelog, Contributing)
+
+- **Right pane**: Markdown content viewer with:
+  - Syntax-highlighted code blocks
+  - Table of contents
+  - Clickable internal links
+
+**Keyboard Shortcuts:**
+
+| Key       | Action                              |
+| --------- | ----------------------------------- |
+| `↑`/`↓`   | Navigate the tree                   |
+| `Enter`   | Open selected document              |
+| `/`       | Focus search input                  |
+| `Escape`  | Clear search and results            |
+| `n`       | Jump to next search result          |
+| `N`       | Jump to previous search result      |
+| `q`       | Quit the viewer                     |
+
+**Search Features:**
+
+- Full-text search across all documentation
+- Results show document title and context snippet
+- Search index is built on first use and cached
+- Live search as you type (after 2+ characters)
+
+**Examples:**
+
+```bash
+# Open documentation browser
+slurm docs
+
+# Search for "workflow" on startup
+slurm docs workflow
+
+# Search with explicit flag
+slurm docs --search "task decorator"
+```
 
 ## Environment Variables
 

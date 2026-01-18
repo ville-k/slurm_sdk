@@ -8,6 +8,8 @@ import cyclopts
 from rich.console import Console
 
 from .cluster import cluster_app
+from .dash import dash_app
+from .docs import docs_app
 from .jobs import jobs_app
 
 console = Console(stderr=True)
@@ -31,6 +33,8 @@ app = cyclopts.App(
 
 app.command(jobs_app)
 app.command(cluster_app)
+app.command(dash_app)
+app.command(docs_app)
 
 
 def _handle_error(e: Exception) -> None:
