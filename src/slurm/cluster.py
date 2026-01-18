@@ -1980,7 +1980,8 @@ class Cluster:
                 stderr_path = stderr_path_candidate
             if isinstance(stdout_path, str) and stdout_path:
                 base_name = os.path.basename(stdout_path)
-                m = re.match(r"^slurm_([A-Za-z0-9]+)\.out$", base_name)
+                # Match pre_submission_id format: {timestamp}_{unique_id} (e.g., 20260118_082719_cc6a2876)
+                m = re.match(r"^slurm_([A-Za-z0-9_]+)\.out$", base_name)
                 if m:
                     pre_submission_id = m.group(1)
         except Exception as e:

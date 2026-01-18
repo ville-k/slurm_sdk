@@ -53,7 +53,18 @@ def list_slurmfile_environments(
         if not isinstance(config, dict):
             continue
 
-        hostname = config.get("hostname", "")
+        # Look for hostname in multiple possible locations based on Slurmfile format
+        hostname = ""
+        # Format 1: config.hostname (simple/flat format)
+        if config.get("hostname"):
+            hostname = config["hostname"]
+        # Format 2: config.cluster.backend_config.hostname (standard format)
+        elif isinstance(config.get("cluster"), dict):
+            cluster_config = config["cluster"]
+            backend_config = cluster_config.get("backend_config", {})
+            if isinstance(backend_config, dict):
+                hostname = backend_config.get("hostname", "")
+
         environments.append(
             {
                 "name": name,
@@ -64,10 +75,20 @@ def list_slurmfile_environments(
         )
 
     if not environments:
-        if "hostname" in root_table or root_table.get("default"):
-            default_config = root_table.get("default", root_table)
-            if isinstance(default_config, dict):
-                hostname = default_config.get("hostname", "")
+        default_config = root_table.get("default", root_table)
+        if isinstance(default_config, dict):
+            # Same hostname lookup logic as above
+            hostname = ""
+            if default_config.get("hostname"):
+                hostname = default_config["hostname"]
+            elif isinstance(default_config.get("cluster"), dict):
+                cluster_config = default_config["cluster"]
+                backend_config = cluster_config.get("backend_config", {})
+                if isinstance(backend_config, dict):
+                    hostname = backend_config.get("hostname", "")
+
+            # Only add default if there's meaningful config
+            if hostname or default_config.get("cluster"):
                 environments.append(
                     {
                         "name": "default",

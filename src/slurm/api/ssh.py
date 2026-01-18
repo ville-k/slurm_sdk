@@ -779,10 +779,12 @@ class SSHCommandBackend(BackendBase):
             RuntimeError: If the command fails.
         """
         try:
-            # Use a simpler format that's faster to execute
-            # %A=JobID, %j=Name, %T=State, %u=User, %S=StartTime, %M=TimeUsed, %l=TimeLimit, %P=Partition, %a=Account
+            # %A=JobID, %j=Name, %T=State, %u=User, %S=StartTime, %M=TimeUsed,
+            # %l=TimeLimit, %P=Partition, %a=Account, %D=NumNodes, %r=Reason
             stdout, stderr, return_code = self._run_command(
-                "squeue -h -o '%A|%j|%T|%u|%S|%M|%l|%P|%a'", timeout=30, retry_count=2
+                "squeue -h -o '%A|%j|%T|%u|%S|%M|%l|%P|%a|%D|%r'",
+                timeout=30,
+                retry_count=2,
             )
 
             if return_code != 0:
@@ -795,7 +797,7 @@ class SSHCommandBackend(BackendBase):
                     continue
 
                 parts = line.split("|")
-                if len(parts) >= 9:
+                if len(parts) >= 11:
                     (
                         job_id,
                         job_name,
@@ -806,7 +808,9 @@ class SSHCommandBackend(BackendBase):
                         time_limit,
                         partition,
                         account,
-                    ) = parts[:9]
+                        num_nodes,
+                        reason,
+                    ) = parts[:11]
                     jobs.append(
                         {
                             "JOBID": job_id,
@@ -818,6 +822,8 @@ class SSHCommandBackend(BackendBase):
                             "TIME_LIMIT": time_limit,
                             "PARTITION": partition,
                             "ACCOUNT": account,
+                            "NODES": num_nodes,
+                            "REASON": reason,
                         }
                     )
 

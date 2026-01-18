@@ -11,6 +11,7 @@ from .cluster import cluster_app
 from .dash import dash_app
 from .docs import docs_app
 from .jobs import jobs_app
+from .mcp import mcp_app
 
 console = Console(stderr=True)
 
@@ -35,6 +36,7 @@ app.command(jobs_app)
 app.command(cluster_app)
 app.command(dash_app)
 app.command(docs_app)
+app.command(mcp_app)
 
 
 def _handle_error(e: Exception) -> None:

@@ -354,6 +354,11 @@ class ContainerPackagingStrategy(PackagingStrategy):
         srun_parts.extend(self.srun_args)
         srun_parts.append(f"--container-image={shlex.quote(self._image_reference)}")
 
+        # Add container name for attaching to the container later via `slurm jobs connect`
+        if job_id:
+            container_name = f"slurm-sdk-{job_id}"
+            srun_parts.append(f"--container-name={shlex.quote(container_name)}")
+
         if mounts:
             mount_value = ",".join(mounts)
             srun_parts.append(f'--container-mounts="{mount_value}"')

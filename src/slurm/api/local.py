@@ -496,10 +496,11 @@ class LocalBackend(BackendBase):
             RuntimeError: If the command fails
         """
         try:
-            # %A=JobID, %j=Name, %T=State, %u=User, %S=StartTime, %M=TimeUsed, %l=TimeLimit, %P=Partition, %a=Account
+            # %A=JobID, %j=Name, %T=State, %u=User, %S=StartTime, %M=TimeUsed,
+            # %l=TimeLimit, %P=Partition, %a=Account, %D=NumNodes, %r=Reason
             # Using list format (shell=False) - format string doesn't need shell quoting
             stdout, stderr, return_code = self._run_command(
-                ["squeue", "-h", "-o", "%A|%j|%T|%u|%S|%M|%l|%P|%a"], check=False
+                ["squeue", "-h", "-o", "%A|%j|%T|%u|%S|%M|%l|%P|%a|%D|%r"], check=False
             )
 
             if return_code != 0:
@@ -513,7 +514,7 @@ class LocalBackend(BackendBase):
                     continue
 
                 parts = line.split("|")
-                if len(parts) >= 9:
+                if len(parts) >= 11:
                     (
                         job_id,
                         job_name,
@@ -524,7 +525,9 @@ class LocalBackend(BackendBase):
                         time_limit,
                         partition,
                         account,
-                    ) = parts[:9]
+                        num_nodes,
+                        reason,
+                    ) = parts[:11]
                     jobs.append(
                         {
                             "JOBID": job_id,
@@ -536,6 +539,8 @@ class LocalBackend(BackendBase):
                             "TIME_LIMIT": time_limit,
                             "PARTITION": partition,
                             "ACCOUNT": account,
+                            "NODES": num_nodes,
+                            "REASON": reason,
                         }
                     )
 
