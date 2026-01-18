@@ -355,9 +355,13 @@ class ContainerPackagingStrategy(PackagingStrategy):
         srun_parts.append(f"--container-image={shlex.quote(self._image_reference)}")
 
         # Add container name for attaching to the container later via `slurm jobs connect`
+        # For array jobs, append the task ID to ensure unique container names per task
+        # Use double quotes (not shlex.quote) to allow shell variable expansion
         if job_id:
-            container_name = f"slurm-sdk-{job_id}"
-            srun_parts.append(f"--container-name={shlex.quote(container_name)}")
+            container_name = (
+                f"slurm-sdk-{job_id}${{SLURM_ARRAY_TASK_ID:+_$SLURM_ARRAY_TASK_ID}}"
+            )
+            srun_parts.append(f'--container-name="{container_name}"')
 
         if mounts:
             mount_value = ",".join(mounts)

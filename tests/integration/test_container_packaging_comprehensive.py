@@ -352,9 +352,9 @@ def test_output_dir_with_containers(
         with open(local_path, "r") as f:
             content = f.read()
 
-        assert (
-            content == "container packaging test data"
-        ), f"Unexpected content: {content}"
+        assert content == "container packaging test data", (
+            f"Unexpected content: {content}"
+        )
 
         # Cleanup
         import os
@@ -428,9 +428,9 @@ def test_job_script_persistence_with_containers(
 
         # Check for job script file (named with pattern: slurm_job_<id>_script.sh)
         ls_output = backend.execute_command(f"ls {job_dir}/")
-        assert (
-            "_script.sh" in ls_output
-        ), f"Job script not found in {job_dir}. Files: {ls_output}"
+        assert "_script.sh" in ls_output, (
+            f"Job script not found in {job_dir}. Files: {ls_output}"
+        )
 
 
 @pytest.mark.container_runtime
@@ -453,9 +453,9 @@ def test_job_get_script_with_containers(
         # Verify script contains expected elements
         assert script_content is not None, "get_script() returned None"
         assert len(script_content) > 0, "get_script() returned empty string"
-        assert (
-            "#!/bin/bash" in script_content or "#SBATCH" in script_content
-        ), "Script doesn't contain expected job script markers"
+        assert "#!/bin/bash" in script_content or "#SBATCH" in script_content, (
+            "Script doesn't contain expected job script markers"
+        )
 
 
 # ============================================================================
