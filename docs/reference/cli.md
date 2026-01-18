@@ -177,7 +177,7 @@ Note: Partitions are aggregated by name. SLURM returns separate rows for each no
 Launch an interactive TUI dashboard for monitoring jobs and cluster status.
 
 !!! note "Requires TUI extra"
-    This command requires the TUI extra: `pip install slurm-sdk[tui]`
+This command requires the TUI extra: `pip install slurm-sdk[tui]`
 
 ```
 slurm dash [--env ENV] [--slurmfile PATH] [--refresh-interval SECONDS]
@@ -185,17 +185,18 @@ slurm dash [--env ENV] [--slurmfile PATH] [--refresh-interval SECONDS]
 
 **Options:**
 
-| Option               | Short | Description                          | Default |
-| -------------------- | ----- | ------------------------------------ | ------- |
-| `--env`              | `-e`  | Environment name from Slurmfile      |         |
-| `--slurmfile`        | `-f`  | Path to Slurmfile                    |         |
-| `--refresh-interval` |       | Auto-refresh interval in seconds     | 30      |
+| Option               | Short | Description                      | Default |
+| -------------------- | ----- | -------------------------------- | ------- |
+| `--env`              | `-e`  | Environment name from Slurmfile  |         |
+| `--slurmfile`        | `-f`  | Path to Slurmfile                |         |
+| `--refresh-interval` |       | Auto-refresh interval in seconds | 30      |
 
 **Dashboard Layout:**
 
 The dashboard displays a two-pane layout:
 
 - **Left pane**: Navigation tree showing:
+
   - My Jobs - your currently queued and running jobs
   - Account Jobs - jobs from other users in your account
   - Cluster Status - partition availability and node states
@@ -204,15 +205,15 @@ The dashboard displays a two-pane layout:
 
 **Keyboard Shortcuts:**
 
-| Key       | Action                          |
-| --------- | ------------------------------- |
-| `↑`/`↓`   | Navigate the tree               |
-| `Enter`   | Expand/collapse tree node       |
-| `Tab`     | Switch focus between panes      |
-| `r`       | Manual refresh                  |
-| `a`       | Toggle auto-refresh on/off      |
-| `c`       | Cancel selected job             |
-| `q`       | Quit the dashboard              |
+| Key     | Action                     |
+| ------- | -------------------------- |
+| `↑`/`↓` | Navigate the tree          |
+| `Enter` | Expand/collapse tree node  |
+| `Tab`   | Switch focus between panes |
+| `r`     | Manual refresh             |
+| `a`     | Toggle auto-refresh on/off |
+| `c`     | Cancel selected job        |
+| `q`     | Quit the dashboard         |
 
 **Refresh Behavior:**
 
@@ -228,7 +229,7 @@ The dashboard uses a hybrid refresh approach:
 Browse SDK documentation in an interactive TUI viewer.
 
 !!! note "Requires TUI extra"
-    This command requires the TUI extra: `pip install slurm-sdk[tui]`
+This command requires the TUI extra: `pip install slurm-sdk[tui]`
 
 ```
 slurm docs [SEARCH] [--search QUERY]
@@ -236,21 +237,22 @@ slurm docs [SEARCH] [--search QUERY]
 
 **Arguments:**
 
-| Argument | Description                              |
-| -------- | ---------------------------------------- |
-| `SEARCH` | Optional search query (positional)       |
+| Argument | Description                        |
+| -------- | ---------------------------------- |
+| `SEARCH` | Optional search query (positional) |
 
 **Options:**
 
-| Option     | Description                              |
-| ---------- | ---------------------------------------- |
-| `--search` | Search query to find in documentation    |
+| Option     | Description                           |
+| ---------- | ------------------------------------- |
+| `--search` | Search query to find in documentation |
 
 **Viewer Layout:**
 
 The documentation viewer displays a two-pane layout:
 
 - **Left pane**: Navigation tree following the mkdocs.yml structure
+
   - Tutorials
   - How-To Guides
   - Reference
@@ -258,21 +260,21 @@ The documentation viewer displays a two-pane layout:
   - Community (Changelog, Contributing)
 
 - **Right pane**: Markdown content viewer with:
+
   - Syntax-highlighted code blocks
   - Table of contents
   - Clickable internal links
 
 **Keyboard Shortcuts:**
 
-| Key       | Action                              |
-| --------- | ----------------------------------- |
-| `↑`/`↓`   | Navigate the tree                   |
-| `Enter`   | Open selected document              |
-| `/`       | Focus search input                  |
-| `Escape`  | Clear search and results            |
-| `n`       | Jump to next search result          |
-| `N`       | Jump to previous search result      |
-| `q`       | Quit the viewer                     |
+| Key      | Action                           |
+| -------- | -------------------------------- |
+| `↑`/`↓`  | Navigate tree or search results  |
+| `Enter`  | Open selected document/result    |
+| `/`      | Show and focus search input      |
+| `Escape` | Clear search and hide search bar |
+| `Tab`    | Switch focus between panes       |
+| `q`      | Quit the viewer                  |
 
 **Search Features:**
 

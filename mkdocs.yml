@@ -36,6 +36,7 @@ nav:
   - Explanation:
       - explanation/index.md
       - System Overview: explanation/system_overview.md
+      - CLI and TUI: explanation/cli-and-tui.md
       - Slurm Concepts: explanation/slurm_concepts.md
       - Container Packaging: explanation/container_packaging.md
       - Workflow Execution: explanation/workflow_execution.md

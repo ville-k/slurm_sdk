@@ -5,6 +5,7 @@ Understanding-oriented documentation that explains how Slurm SDK is structured u
 ## Topics
 
 - [System Overview](system_overview.md) - Architecture and component overview
+- [CLI and TUI](cli-and-tui.md) - Command-line and interactive interface design
 - [Slurm Concepts](slurm_concepts.md) - Key Slurm concepts for newcomers
 - [Container Packaging](container_packaging.md) - How container images are built and deployed
 - [Workflow Execution](workflow_execution.md) - How workflows are scheduled and run
