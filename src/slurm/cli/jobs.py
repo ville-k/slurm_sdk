@@ -209,7 +209,17 @@ def connect_job(
     # Add container flags if applicable
     if is_container_job and not no_container:
         if pre_submission_id:
-            container_name = f"slurm-sdk-{pre_submission_id}"
+            # For array jobs, include the array task ID in the container name
+            # Array job IDs have format "jobid_taskid" (e.g., "1336_2")
+            array_task_id = None
+            if "_" in job_id:
+                array_task_id = job_id.split("_")[-1]
+
+            if array_task_id:
+                container_name = f"slurm-sdk-{pre_submission_id}_{array_task_id}"
+            else:
+                container_name = f"slurm-sdk-{pre_submission_id}"
+
             srun_cmd.append(f"--container-name={container_name}")
             console.print(f"[cyan]Connecting to container in job {job_id}...[/cyan]")
             console.print(f"[dim]Container: {container_name}[/dim]")

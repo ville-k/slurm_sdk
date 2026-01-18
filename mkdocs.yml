@@ -18,6 +18,7 @@ nav:
   - How-To Guides:
       - how-to/index.md
       - Using the CLI: how-to/cli.md
+      - Remote Debugging: how-to/remote-debugging.md
       - Container Dependencies (Map-Reduce): how-to/container_dependencies.md
       - Parallelization Patterns: how-to/parallelization_patterns.md
       - GPU Hello Torch: how-to/hello_torch.md

@@ -22,10 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Keyboard navigation: `/` to search, arrow keys and Enter for results
     - Documentation bundled with package for offline access
 - Container-aware job connection: `slurm jobs connect` now automatically attaches to the container running inside a job when using `container` packaging:
-  - Containers are named `slurm-sdk-{pre_submission_id}` at submission time
+  - Containers are named `slurm-sdk-{pre_submission_id}` at submission time (with `_{task_id}` suffix for array jobs)
   - Connect command detects container jobs and uses `--container-name` flag to attach
   - New `--no-container` flag to bypass container attachment and connect to bare node
   - Multi-node job support with interactive node selection prompt
+  - Array job support: each array task gets a unique container name to prevent collisions
 - `slurm jobs cancel` command to cancel running or pending jobs:
   - Shows job name and state before cancelling
   - Prompts for confirmation (use `--force` to skip)
