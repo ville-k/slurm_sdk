@@ -47,6 +47,7 @@ class TestCLIHelp:
         captured = capsys.readouterr()
         assert "jobs" in captured.out
         assert "cluster" in captured.out
+        assert "mcp" in captured.out
 
     def test_version(self, capsys):
         """Test --version flag."""
@@ -63,6 +64,9 @@ class TestCLIHelp:
         captured = capsys.readouterr()
         assert "list" in captured.out
         assert "show" in captured.out
+        assert "watch" in captured.out
+        assert "connect" in captured.out
+        assert "debug" in captured.out
 
     def test_cluster_help(self, capsys):
         """Test cluster subcommand help."""
@@ -73,6 +77,18 @@ class TestCLIHelp:
         captured = capsys.readouterr()
         assert "list" in captured.out
         assert "show" in captured.out
+        assert "watch" in captured.out
+        assert "connect" in captured.out
+
+    def test_mcp_help(self, capsys):
+        """Test mcp subcommand help."""
+        with pytest.raises(SystemExit) as exc_info:
+            app(["mcp", "--help"])
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "run" in captured.out
+        assert "status" in captured.out
 
     def test_jobs_list_help(self, capsys):
         """Test jobs list help shows parameters."""
@@ -83,6 +99,82 @@ class TestCLIHelp:
         captured = capsys.readouterr()
         assert "--env" in captured.out
         assert "--slurmfile" in captured.out
+
+    def test_jobs_watch_help(self, capsys):
+        """Test jobs watch help shows parameters."""
+        with pytest.raises(SystemExit) as exc_info:
+            app(["jobs", "watch", "--help"])
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "--account" in captured.out
+        assert "--poll-interval" in captured.out
+
+    def test_jobs_connect_help(self, capsys):
+        """Test jobs connect help shows parameters."""
+        with pytest.raises(SystemExit) as exc_info:
+            app(["jobs", "connect", "--help"])
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "--node" in captured.out
+        assert "job-id" in captured.out.lower() or "JOB-ID" in captured.out
+
+    def test_jobs_cancel_help(self, capsys):
+        """Test jobs cancel help shows parameters."""
+        with pytest.raises(SystemExit) as exc_info:
+            app(["jobs", "cancel", "--help"])
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "--force" in captured.out
+        assert "job-id" in captured.out.lower() or "JOB-ID" in captured.out
+
+    def test_jobs_debug_help(self, capsys):
+        """Test jobs debug help shows parameters."""
+        with pytest.raises(SystemExit) as exc_info:
+            app(["jobs", "debug", "--help"])
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "--port" in captured.out
+        assert "--wait" in captured.out
+
+    def test_cluster_watch_help(self, capsys):
+        """Test cluster watch help shows parameters."""
+        with pytest.raises(SystemExit) as exc_info:
+            app(["cluster", "watch", "--help"])
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "--account" in captured.out
+        assert "--poll-interval" in captured.out
+
+    def test_cluster_connect_help(self, capsys):
+        """Test cluster connect help shows parameters."""
+        with pytest.raises(SystemExit) as exc_info:
+            app(["cluster", "connect", "--help"])
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "--slurmfile" in captured.out
+
+    def test_mcp_run_help(self, capsys):
+        """Test mcp run help shows parameters."""
+        with pytest.raises(SystemExit) as exc_info:
+            app(["mcp", "run", "--help"])
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "--transport" in captured.out
+        assert "--port" in captured.out
+        assert "--host" in captured.out
+
+    def test_mcp_status_help(self, capsys):
+        """Test mcp status help."""
+        with pytest.raises(SystemExit) as exc_info:
+            app(["mcp", "status", "--help"])
+        assert exc_info.value.code == 0
 
     def test_cluster_list_help(self, capsys):
         """Test cluster list help shows parameters."""

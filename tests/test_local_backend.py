@@ -204,9 +204,9 @@ def test_cancel_job_failure(mock_run, backend):
 @patch("subprocess.run")
 def test_get_queue(mock_run, backend):
     """Test getting job queue."""
-    # Format: JOBID|NAME|STATE|USER|START_TIME|TIME|TIME_LIMIT|PARTITION|ACCOUNT
+    # Format: JOBID|NAME|STATE|USER|START_TIME|TIME|TIME_LIMIT|PARTITION|ACCOUNT|NODES|REASON
     mock_run.return_value = MagicMock(
-        stdout="101|job1|RUNNING|user|2024-01-01T00:00:00|0:05|1:00:00|normal|account1\n102|job2|PENDING|user|N/A|0:00|2:00:00|gpu|account2\n",
+        stdout="101|job1|RUNNING|user|2024-01-01T00:00:00|0:05|1:00:00|normal|account1|2|None\n102|job2|PENDING|user|N/A|0:00|2:00:00|gpu|account2|1|Resources\n",
         stderr="",
         returncode=0,
     )
@@ -216,8 +216,10 @@ def test_get_queue(mock_run, backend):
     assert len(queue) == 2
     assert queue[0]["JOBID"] == "101"
     assert queue[0]["STATE"] == "RUNNING"
+    assert queue[0]["NODES"] == "2"
     assert queue[1]["JOBID"] == "102"
     assert queue[1]["STATE"] == "PENDING"
+    assert queue[1]["REASON"] == "Resources"
 
 
 @patch("subprocess.run")

@@ -15,11 +15,13 @@ from .callbacks import (
     WorkflowCallbackContext,
     WorkflowTaskSubmitContext,
 )
+from .debug import DebugCallback
 
 __all__ = [
     "BaseCallback",
     "BenchmarkCallback",
     "CompletedContext",
+    "DebugCallback",
     "ExecutionLocus",
     "JobStatusUpdatedContext",
     "LoggerCallback",

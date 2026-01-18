@@ -21,13 +21,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - SQLite FTS5-powered full-text search with prefix matching and context snippets
     - Keyboard navigation: `/` to search, arrow keys and Enter for results
     - Documentation bundled with package for offline access
+- Container-aware job connection: `slurm jobs connect` now automatically attaches to the container running inside a job when using `container` packaging:
+  - Containers are named `slurm-sdk-{pre_submission_id}` at submission time
+  - Connect command detects container jobs and uses `--container-name` flag to attach
+  - New `--no-container` flag to bypass container attachment and connect to bare node
+  - Multi-node job support with interactive node selection prompt
+- `slurm jobs cancel` command to cancel running or pending jobs:
+  - Shows job name and state before cancelling
+  - Prompts for confirmation (use `--force` to skip)
+  - Handles terminal states gracefully
 - `slurm` CLI command for job and cluster management:
   - `slurm jobs list` - view jobs in the SLURM queue with color-coded states
   - `slurm jobs show <job-id>` - display detailed job information
+  - `slurm jobs watch` - live dashboard for monitoring jobs in real-time
+  - `slurm jobs connect <job-id>` - attach interactive shell to running jobs
+  - `slurm jobs debug <job-id>` - attach debugger to running jobs with SSH port forwarding
   - `slurm cluster list` - list configured environments from Slurmfile (offline)
   - `slurm cluster show` - view cluster partition information
+  - `slurm cluster watch` - live dashboard for monitoring cluster partition utilization
+  - `slurm cluster connect` - open SSH session to cluster login node
   - Rich output formatting with tables and panels
   - User-friendly error handling with actionable hints
+- MCP (Model Context Protocol) server for AI assistant integration:
+  - `slurm mcp run` - start MCP server exposing SLURM SDK APIs
+  - `slurm mcp status` - display MCP server configuration
+  - Tools: `list_jobs`, `get_job`, `cancel_job`, `list_partitions`, `list_environments`
+  - Resources: `slurm://queue`, `slurm://jobs/{id}`, `slurm://partitions`, `slurm://config`
+  - Supports stdio (Claude Desktop) and HTTP transports
+- `DebugCallback` for enabling debugpy debugging in SLURM jobs:
+  - Configurable via Slurmfile or environment variables (`DEBUGPY_PORT`, `DEBUGPY_WAIT`)
+  - Automatic debugpy setup when jobs start on compute nodes
+  - Integration with `slurm jobs debug` CLI command
 - SSH host key verification with configurable policies (`auto`, `warn`, `reject`)
 - Modular runner architecture with dedicated modules for argument loading, callbacks,
   context injection, placeholder resolution, result saving, and workflow building
@@ -85,6 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed potential issue with `update_job_metadata` when job ID is None (now defaults to "unknown")
 - Replaced Linux-only `flock` with cross-platform `mkdir`-based locking in wheel
   packaging for macOS compatibility
+- `Cluster.get_job()` now correctly extracts `pre_submission_id` from stdout path for jobs with timestamp-based IDs (e.g., `20260118_090851_0f492fb`)
 - Type annotations added to public APIs to resolve mkdocstrings warnings:
   - `Cluster.from_file()`, `Cluster.add_argparse_args()`, `Cluster.from_args()`, `Cluster.submit()`
   - `task()` and `workflow()` decorator return types
