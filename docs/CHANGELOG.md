@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Interactive TUI commands (requires `pip install slurm-sdk[tui]`):
+  - `slurm dash` - Interactive dashboard for monitoring jobs and cluster status
+    - Two-pane layout with navigation tree and detail panel
+    - Displays user's jobs, account jobs, and partition status
+    - Hybrid refresh: auto-refresh when focused, toggleable with 'a' key
+    - Job cancellation support with keyboard shortcut
+  - `slurm docs` - Documentation viewer with full-text search
+    - Browsable navigation tree following mkdocs.yml structure
+    - Markdown rendering with syntax highlighting
+    - SQLite FTS5-powered full-text search with prefix matching and context snippets
+    - Keyboard navigation: `/` to search, arrow keys and Enter for results
+    - Documentation bundled with package for offline access
 - `slurm` CLI command for job and cluster management:
   - `slurm jobs list` - view jobs in the SLURM queue with color-coded states
   - `slurm jobs show <job-id>` - display detailed job information

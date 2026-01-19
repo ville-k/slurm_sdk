@@ -1,14 +1,15 @@
 # How to Use the slurm CLI
 
-This guide shows how to use the `slurm` command-line interface to manage jobs and view cluster information.
+This guide shows how to use the `slurm` command-line interface to manage jobs, view cluster information, and use the interactive TUI applications.
 
 ## Problem
 
-You want to check job status, view cluster partitions, or list configured environments without writing Python code.
+You want to check job status, view cluster partitions, browse documentation, or monitor your cluster without writing Python code.
 
 ## Prerequisites
 
 - The slurm-sdk package installed (`pip install slurm-sdk` or `uv add slurm-sdk`)
+- For TUI features: install with `pip install slurm-sdk[tui]`
 - A Slurmfile in your project (for most commands)
 - SSH access to your cluster (for job and partition queries)
 
@@ -100,6 +101,35 @@ slurm cluster list --slurmfile /path/to/Slurmfile
 slurm jobs list -f ~/projects/ml/Slurmfile
 ```
 
+### 8. Launch the interactive dashboard
+
+Monitor jobs and cluster status in a terminal UI:
+
+```bash
+slurm dash
+```
+
+Navigate with arrow keys, press `Enter` to expand sections, and use `Tab` to switch between panes. Press `r` to refresh data manually, or `a` to toggle auto-refresh.
+
+To cancel a running job, select it in the tree and press `c`.
+
+### 9. Browse documentation offline
+
+Open the interactive documentation viewer:
+
+```bash
+slurm docs
+```
+
+Press `/` to search, use arrow keys to navigate results, and press `Enter` to open a document. Press `Escape` to clear the search.
+
+You can also start with a search query:
+
+```bash
+slurm docs workflow
+slurm docs --search "task decorator"
+```
+
 ## Verification
 
 Check that the CLI is working:
@@ -120,6 +150,8 @@ slurm cluster list
 | `slurm cluster show`   | Show partition information  | Yes                 |
 | `slurm jobs list`      | List jobs in queue          | Yes                 |
 | `slurm jobs show <id>` | Show job details            | Yes                 |
+| `slurm dash`           | Interactive dashboard (TUI) | Yes                 |
+| `slurm docs`           | Documentation viewer (TUI)  | No                  |
 
 ## Common options
 
