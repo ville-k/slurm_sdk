@@ -4,14 +4,8 @@ This package contains the internal runner script executed by Slurm jobs
 to run Python tasks.
 """
 
-# Re-export from the implementation module for backwards compatibility
-from slurm._runner_impl import (
-    _bind_workflow_context,
-    _function_wants_workflow_context,
-    _run_callbacks,
-    _write_environment_metadata,
-    main,
-)
+# Re-export main entry point from the implementation module
+from slurm._runner_impl import main
 
 # Also export from new modules (public API)
 from slurm.runner.argument_loader import (
@@ -64,12 +58,7 @@ from slurm.runner.main import (
 __all__ = [
     # Main entry point
     "main",
-    # Legacy underscore-prefixed names (backwards compatibility)
-    "_run_callbacks",
-    "_function_wants_workflow_context",
-    "_bind_workflow_context",
-    "_write_environment_metadata",
-    # New public API
+    # Public API
     "run_callbacks",
     "function_wants_workflow_context",
     "bind_workflow_context",

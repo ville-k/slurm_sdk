@@ -1,11 +1,10 @@
 """Unit tests for runner module helper functions.
 
 Tests for:
-- _run_callbacks()
-- _function_wants_workflow_context()
-- _bind_workflow_context()
-- _write_environment_metadata()
-- runner.callbacks.run_callbacks() (new module)
+- run_callbacks()
+- function_wants_workflow_context()
+- bind_workflow_context()
+- write_environment_metadata()
 """
 
 import json
@@ -17,17 +16,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from slurm.callbacks.callbacks import BaseCallback
-from slurm.runner import (
-    _bind_workflow_context,
-    _function_wants_workflow_context,
-    _run_callbacks,
-    _write_environment_metadata,
-)
 from slurm.runner.callbacks import run_callbacks
 from slurm.runner.context_manager import (
     bind_workflow_context,
     function_wants_workflow_context,
 )
+from slurm.runner.result_saver import write_environment_metadata
 from slurm.runner.argument_loader import (
     RunnerArgs,
     create_argument_parser,
@@ -54,13 +48,12 @@ from slurm.runner.placeholder import (
 from slurm.runner.result_saver import (
     save_result,
     update_job_metadata,
-    write_environment_metadata,
 )
 from slurm.workflow import WorkflowContext
 
 
 class TestRunCallbacks:
-    """Tests for _run_callbacks helper function."""
+    """Tests for run_callbacks helper function."""
 
     def test_run_callbacks_calls_method_on_all_callbacks(self):
         """Test that method is called on all callbacks."""
@@ -69,7 +62,7 @@ class TestRunCallbacks:
         callback2 = MagicMock(spec=BaseCallback)
         callback2.should_run_on_runner.return_value = True
 
-        _run_callbacks(
+        run_callbacks(
             [callback1, callback2], "on_begin_run_job_ctx", "arg1", kwarg="val"
         )
 
@@ -91,7 +84,7 @@ class TestRunCallbacks:
                 self.method_called = True
 
         callback = TestCallback()
-        _run_callbacks([callback], "on_submitted_ctx", "arg")
+        run_callbacks([callback], "on_submitted_ctx", "arg")
 
         assert callback.method_called is False
 
@@ -114,13 +107,13 @@ class TestRunCallbacks:
         callback2 = TrackingCallback()
 
         # Should not raise, and callback2 should still be called
-        _run_callbacks([callback1, callback2], "on_begin_run_job_ctx", "arg")
+        run_callbacks([callback1, callback2], "on_begin_run_job_ctx", "arg")
 
         assert callback2.called_with == (("arg",), {})
 
     def test_run_callbacks_empty_list(self):
         """Test that empty callback list works."""
-        _run_callbacks([], "on_begin_run_job_ctx", "arg")
+        run_callbacks([], "on_begin_run_job_ctx", "arg")
         # Should not raise
 
     def test_run_callbacks_without_should_run_on_runner(self):
@@ -129,82 +122,15 @@ class TestRunCallbacks:
         # No should_run_on_runner attribute
         del callback.should_run_on_runner
 
-        _run_callbacks([callback], "test_method", "arg")
+        run_callbacks([callback], "test_method", "arg")
 
         callback.test_method.assert_called_once_with("arg")
-
-
-class TestRunCallbacksModule:
-    """Tests for the new runner.callbacks module."""
-
-    def test_run_callbacks_from_module(self):
-        """Test that run_callbacks from the module works the same as _run_callbacks."""
-
-        class TrackingCallback(BaseCallback):
-            def __init__(self):
-                super().__init__()
-                self.called_with = None
-
-            def on_begin_run_job_ctx(self, *args, **kwargs):
-                self.called_with = (args, kwargs)
-
-        callback = TrackingCallback()
-        run_callbacks([callback], "on_begin_run_job_ctx", "arg1", key="val")
-
-        assert callback.called_with == (("arg1",), {"key": "val"})
-
-    def test_run_callbacks_module_catches_exceptions(self):
-        """Test that module function catches exceptions."""
-
-        class ErrorCallback(BaseCallback):
-            def on_begin_run_job_ctx(self, *args, **kwargs):
-                raise RuntimeError("Error!")
-
-        # Should not raise
-        run_callbacks([ErrorCallback()], "on_begin_run_job_ctx", "arg")
-
-
-class TestContextManagerModule:
-    """Tests for the new runner.context_manager module."""
-
-    def test_function_wants_workflow_context_from_module(self):
-        """Test that function_wants_workflow_context from module works."""
-
-        def func_with_ctx(x: int, ctx: WorkflowContext) -> int:
-            return x
-
-        def func_without_ctx(x: int, y: str) -> int:
-            return x
-
-        assert function_wants_workflow_context(func_with_ctx) is True
-        assert function_wants_workflow_context(func_without_ctx) is False
-
-    def test_bind_workflow_context_from_module(self, tmp_path):
-        """Test that bind_workflow_context from module works."""
-        from slurm.cluster import Cluster
-
-        cluster = object.__new__(Cluster)
-        workflow_ctx = WorkflowContext(
-            cluster=cluster,
-            workflow_job_id="test_123",
-            workflow_job_dir=tmp_path / "workflow",
-            shared_dir=tmp_path / "workflow" / "shared",
-            local_mode=True,
-        )
-
-        def func(x: int, ctx: WorkflowContext) -> int:
-            return x
-
-        args, kwargs, injected = bind_workflow_context(func, (10,), {}, workflow_ctx)
-
-        assert injected is True
-        assert kwargs["ctx"] is workflow_ctx
 
 
 class TestResultSaverModule:
     """Tests for the new runner.result_saver module."""
 
-    def test_write_environment_metadata_from_module(self, tmp_path):
+    def testwrite_environment_metadata_from_module(self, tmp_path):
         """Test write_environment_metadata from module."""
         job_dir = tmp_path / "job"
         job_dir.mkdir()
@@ -301,7 +227,7 @@ class TestResultSaverModule:
 
 
 class TestFunctionWantsWorkflowContext:
-    """Tests for _function_wants_workflow_context helper function."""
+    """Tests for function_wants_workflow_context helper function."""
 
     def test_detects_workflow_context_by_annotation(self):
         """Test detection by WorkflowContext type annotation."""
@@ -309,7 +235,7 @@ class TestFunctionWantsWorkflowContext:
         def func(x: int, ctx: WorkflowContext) -> int:
             return x
 
-        assert _function_wants_workflow_context(func) is True
+        assert function_wants_workflow_context(func) is True
 
     def test_detects_workflow_context_by_string_annotation(self):
         """Test detection by string 'WorkflowContext' annotation."""
@@ -317,7 +243,7 @@ class TestFunctionWantsWorkflowContext:
         def func(x: int, ctx: "WorkflowContext") -> int:
             return x
 
-        assert _function_wants_workflow_context(func) is True
+        assert function_wants_workflow_context(func) is True
 
     def test_detects_workflow_context_by_ctx_parameter_name(self):
         """Test detection by 'ctx' parameter name."""
@@ -325,7 +251,7 @@ class TestFunctionWantsWorkflowContext:
         def func(x: int, ctx) -> int:
             return x
 
-        assert _function_wants_workflow_context(func) is True
+        assert function_wants_workflow_context(func) is True
 
     def test_detects_workflow_context_by_context_parameter_name(self):
         """Test detection by 'context' parameter name."""
@@ -333,7 +259,7 @@ class TestFunctionWantsWorkflowContext:
         def func(x: int, context) -> int:
             return x
 
-        assert _function_wants_workflow_context(func) is True
+        assert function_wants_workflow_context(func) is True
 
     def test_detects_workflow_context_by_workflow_context_parameter_name(self):
         """Test detection by 'workflow_context' parameter name."""
@@ -341,7 +267,7 @@ class TestFunctionWantsWorkflowContext:
         def func(x: int, workflow_context) -> int:
             return x
 
-        assert _function_wants_workflow_context(func) is True
+        assert function_wants_workflow_context(func) is True
 
     def test_returns_false_for_no_context_parameter(self):
         """Test returns False when no context parameter."""
@@ -349,7 +275,7 @@ class TestFunctionWantsWorkflowContext:
         def func(x: int, y: str) -> int:
             return x
 
-        assert _function_wants_workflow_context(func) is False
+        assert function_wants_workflow_context(func) is False
 
     def test_returns_false_for_job_context_annotation(self):
         """Test returns False for JobContext annotation (not WorkflowContext)."""
@@ -359,16 +285,16 @@ class TestFunctionWantsWorkflowContext:
         def func(x: int, job_ctx: JobContext) -> int:
             return x
 
-        assert _function_wants_workflow_context(func) is False
+        assert function_wants_workflow_context(func) is False
 
     def test_handles_inspection_errors(self):
         """Test gracefully handles functions that can't be inspected."""
         # Built-in functions can't always be inspected
-        assert _function_wants_workflow_context(len) is False
+        assert function_wants_workflow_context(len) is False
 
 
 class TestBindWorkflowContext:
-    """Tests for _bind_workflow_context helper function."""
+    """Tests for bind_workflow_context helper function."""
 
     def create_workflow_context(self, tmp_path: Path) -> WorkflowContext:
         """Create a mock WorkflowContext for testing."""
@@ -390,7 +316,7 @@ class TestBindWorkflowContext:
         def func(x: int, ctx: WorkflowContext) -> int:
             return x
 
-        args, kwargs, injected = _bind_workflow_context(func, (10,), {}, workflow_ctx)
+        args, kwargs, injected = bind_workflow_context(func, (10,), {}, workflow_ctx)
 
         assert injected is True
         assert args == (10,)
@@ -404,7 +330,7 @@ class TestBindWorkflowContext:
         def func(x: int, ctx) -> int:
             return x
 
-        args, kwargs, injected = _bind_workflow_context(func, (10,), {}, workflow_ctx)
+        args, kwargs, injected = bind_workflow_context(func, (10,), {}, workflow_ctx)
 
         assert injected is True
         assert "ctx" in kwargs
@@ -416,7 +342,7 @@ class TestBindWorkflowContext:
         def func(x: int, context) -> int:
             return x
 
-        args, kwargs, injected = _bind_workflow_context(func, (10,), {}, workflow_ctx)
+        args, kwargs, injected = bind_workflow_context(func, (10,), {}, workflow_ctx)
 
         assert injected is True
         assert "context" in kwargs
@@ -428,7 +354,7 @@ class TestBindWorkflowContext:
         def func(x: int, workflow_context) -> int:
             return x
 
-        args, kwargs, injected = _bind_workflow_context(func, (10,), {}, workflow_ctx)
+        args, kwargs, injected = bind_workflow_context(func, (10,), {}, workflow_ctx)
 
         assert injected is True
         assert "workflow_context" in kwargs
@@ -441,7 +367,7 @@ class TestBindWorkflowContext:
         def func(x: int, ctx: WorkflowContext) -> int:
             return x
 
-        args, kwargs, injected = _bind_workflow_context(
+        args, kwargs, injected = bind_workflow_context(
             func, (10,), {"ctx": existing_ctx}, workflow_ctx
         )
 
@@ -455,7 +381,7 @@ class TestBindWorkflowContext:
         def func(x: int, y: str) -> int:
             return x
 
-        args, kwargs, injected = _bind_workflow_context(
+        args, kwargs, injected = bind_workflow_context(
             func, (10,), {"y": "hello"}, workflow_ctx
         )
 
@@ -469,7 +395,7 @@ class TestBindWorkflowContext:
         def func(x: int, y: str, ctx: WorkflowContext) -> int:
             return x
 
-        args, kwargs, injected = _bind_workflow_context(
+        args, kwargs, injected = bind_workflow_context(
             func, (10,), {"y": "hello"}, workflow_ctx
         )
 
@@ -479,14 +405,14 @@ class TestBindWorkflowContext:
 
 
 class TestWriteEnvironmentMetadata:
-    """Tests for _write_environment_metadata helper function."""
+    """Tests for write_environment_metadata helper function."""
 
     def test_writes_metadata_file(self, tmp_path):
         """Test that metadata file is created."""
         job_dir = tmp_path / "job"
         job_dir.mkdir()
 
-        _write_environment_metadata(
+        write_environment_metadata(
             job_dir=str(job_dir),
             packaging_type="wheel",
             job_id="12345",
@@ -502,7 +428,7 @@ class TestWriteEnvironmentMetadata:
         job_dir = tmp_path / "job"
         job_dir.mkdir()
 
-        _write_environment_metadata(
+        write_environment_metadata(
             job_dir=str(job_dir),
             packaging_type="container",
             job_id="12345",
@@ -526,7 +452,7 @@ class TestWriteEnvironmentMetadata:
         job_dir = tmp_path / "job"
         job_dir.mkdir()
 
-        _write_environment_metadata(
+        write_environment_metadata(
             job_dir=str(job_dir),
             packaging_type="wheel",
         )
@@ -547,7 +473,7 @@ class TestWriteEnvironmentMetadata:
         job_dir = tmp_path / "job"
         job_dir.mkdir()
 
-        _write_environment_metadata(
+        write_environment_metadata(
             job_dir=str(job_dir),
             packaging_type="wheel",
         )
@@ -566,7 +492,7 @@ class TestWriteEnvironmentMetadata:
         job_dir = tmp_path / "job"
         job_dir.mkdir()
 
-        _write_environment_metadata(
+        write_environment_metadata(
             job_dir=str(job_dir),
             packaging_type="wheel",
             job_id="12345",
@@ -588,7 +514,7 @@ class TestWriteEnvironmentMetadata:
         job_dir = tmp_path / "job"
         job_dir.mkdir()
 
-        _write_environment_metadata(
+        write_environment_metadata(
             job_dir=str(job_dir),
             packaging_type="none",
         )
@@ -607,7 +533,7 @@ class TestWriteEnvironmentMetadata:
         job_dir = tmp_path / "nonexistent"
 
         # Should not raise - just logs warning
-        _write_environment_metadata(
+        write_environment_metadata(
             job_dir=str(job_dir),
             packaging_type="wheel",
         )
@@ -618,7 +544,7 @@ class TestWriteEnvironmentMetadata:
         job_dir.mkdir()
 
         with patch.dict(os.environ, {"VIRTUAL_ENV": "/path/to/venv"}):
-            _write_environment_metadata(
+            write_environment_metadata(
                 job_dir=str(job_dir),
                 packaging_type="wheel",
             )
@@ -640,7 +566,7 @@ class TestWriteEnvironmentMetadata:
         with patch.dict(os.environ, env, clear=False):
             # Also need to clear VIRTUAL_ENV if set
             os.environ.pop("VIRTUAL_ENV", None)
-            _write_environment_metadata(
+            write_environment_metadata(
                 job_dir=str(job_dir),
                 packaging_type="container",
             )

@@ -185,12 +185,8 @@ def update_job_metadata(
         logger.warning("Failed to save metadata: %s", e)
 
 
-# Aliases for backwards compatibility
-_write_environment_metadata = write_environment_metadata
-
 __all__ = [
     "write_environment_metadata",
     "save_result",
     "update_job_metadata",
-    "_write_environment_metadata",
 ]

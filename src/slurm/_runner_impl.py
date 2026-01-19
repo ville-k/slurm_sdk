@@ -345,7 +345,7 @@ def main():
 
         # Save result and metadata
         save_result(args.output_file, result)
-        update_job_metadata(args.output_file, job_id, end_time)
+        update_job_metadata(args.output_file, job_id or "unknown", end_time)
 
         # Call success callbacks
         _call_success_callbacks(

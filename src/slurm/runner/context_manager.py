@@ -119,15 +119,9 @@ def bind_workflow_context(
         return args, kwargs, False
 
 
-# Aliases for backwards compatibility (prefixed with underscore)
-_function_wants_workflow_context = function_wants_workflow_context
-_bind_workflow_context = bind_workflow_context
-
 __all__ = [
     "function_wants_workflow_context",
     "bind_workflow_context",
-    "_function_wants_workflow_context",
-    "_bind_workflow_context",
     # Re-exported from runtime
     "_function_wants_job_context",
     "_bind_job_context",

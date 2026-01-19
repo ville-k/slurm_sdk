@@ -29,8 +29,8 @@ from .argument_loader import (
 )
 from .callbacks import run_callbacks
 from .context_manager import (
-    _bind_workflow_context,
-    _function_wants_workflow_context,
+    bind_workflow_context,
+    function_wants_workflow_context,
 )
 from .result_saver import write_environment_metadata
 from .workflow_builder import (
@@ -175,14 +175,14 @@ def handle_workflow_context_injection(
     Returns:
         Tuple of (args, kwargs, workflow_setup_result or None).
     """
-    if not _function_wants_workflow_context(func):
+    if not function_wants_workflow_context(func):
         return task_args, task_kwargs, None
 
     # Set up workflow execution environment
     setup_result = setup_workflow_execution(job_id, job_dir)
 
     # Bind workflow context to function
-    task_args, task_kwargs, injected = _bind_workflow_context(
+    task_args, task_kwargs, injected = bind_workflow_context(
         func, task_args, task_kwargs, setup_result.workflow_context
     )
 
