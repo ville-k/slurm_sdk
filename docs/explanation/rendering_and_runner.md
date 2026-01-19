@@ -37,10 +37,28 @@ flowchart TB
 
 ## Runner (`slurm.runner`)
 
-- Loads task arguments and keyword arguments from the job directory.
-- Injects `JobContext` or `WorkflowContext` when requested.
-- Executes the task and serializes results to disk.
-- Emits callback events for workflow begin/end and job completion.
+The runner is organized as a package with focused modules:
+
+| Module             | Responsibility                                             |
+| ------------------ | ---------------------------------------------------------- |
+| `argument_loader`  | Parse CLI args, restore sys.path, load task arguments      |
+| `callbacks`        | Execute callback methods on registered callbacks           |
+| `context_manager`  | Detect and inject JobContext/WorkflowContext               |
+| `placeholder`      | Resolve JobResultPlaceholder objects to actual values      |
+| `result_saver`     | Serialize results and update job metadata                  |
+| `workflow_builder` | Create clusters and WorkflowContext for workflow execution |
+| `main`             | Orchestration helpers and function loading                 |
+
+Key responsibilities:
+
+- Loads task arguments and keyword arguments from the job directory
+- Injects `JobContext` or `WorkflowContext` when requested
+- Resolves `JobResultPlaceholder` dependencies from upstream jobs
+- Executes the task and serializes results to disk
+- Emits callback events for workflow begin/end and job completion
+
+The package maintains backwards compatibility—`from slurm.runner import main` and
+`python -m slurm.runner` continue to work as before.
 
 ## Debugging tips
 

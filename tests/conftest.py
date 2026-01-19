@@ -4,12 +4,20 @@ import sys
 import pytest
 
 
-# Ensure 'src' is on sys.path for package imports in tests
-TESTS_DIR = os.path.dirname(__file__)
+# Ensure 'src' and 'tests/helpers' are on sys.path for package imports in tests
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(TESTS_DIR, os.pardir))
 SRC_DIR = os.path.join(PROJECT_ROOT, "src")
+HELPERS_DIR = os.path.join(TESTS_DIR, "helpers")
+
+# Add directories as absolute paths so they work when runner changes working directory
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
+if HELPERS_DIR not in sys.path:
+    sys.path.insert(0, HELPERS_DIR)
+# Also add tests dir so test modules can be imported by the runner
+if TESTS_DIR not in sys.path:
+    sys.path.insert(0, TESTS_DIR)
 
 
 def _env_truthy(name: str) -> bool:

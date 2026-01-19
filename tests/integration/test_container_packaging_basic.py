@@ -16,7 +16,7 @@ from tests.integration import container_test_tasks
 @pytest.mark.slow_integration_test
 def test_basic_container_task_execution(
     slurm_pyxis_cluster,
-    local_registry,  # registry:5000 (requires /etc/hosts on host, not in devcontainer)
+    local_registry,  # registry:20002 (requires /etc/hosts on host, not in devcontainer)
     tmp_path,
 ):
     """Test that a task runs successfully in a container via Pyxis."""
@@ -55,7 +55,7 @@ ENV PYTHONPATH=/workspace:$PYTHONPATH
 @pytest.mark.slow_integration_test
 def test_container_with_dependencies(
     slurm_pyxis_cluster,
-    local_registry,  # registry:5000 (requires /etc/hosts on host, not in devcontainer)
+    local_registry,  # registry:20002 (requires /etc/hosts on host, not in devcontainer)
     tmp_path,
 ):
     """Test container task with Python dependencies (numpy)."""

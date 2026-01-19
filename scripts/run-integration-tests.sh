@@ -150,7 +150,7 @@ $COMPOSE_CMD -f "$COMPOSE_FILE" run --rm \
     -e SLURM_SDK_DEV_MODE=ci \
     -e SLURM_HOST=slurm \
     -e SLURM_PORT=22 \
-    -e REGISTRY_URL=registry:5000 \
+    -e REGISTRY_URL=registry:20002 \
     devcontainer \
     bash -c "cd /workspace && uv sync --dev --quiet && uv run pytest ${PYTEST_ARGS[*]}"
 TEST_EXIT_CODE=$?

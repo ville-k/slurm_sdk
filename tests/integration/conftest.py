@@ -251,7 +251,7 @@ def slurm_cluster(slurm_cluster_config, tmp_path):
 # Container Packaging Fixtures (Pyxis/enroot)
 # ============================================================================
 
-REGISTRY_PORT = 5000
+REGISTRY_PORT = 20002
 
 
 def _wait_for_port(host: str, port: int, timeout: int = 30) -> bool:
@@ -431,8 +431,8 @@ def docker_compose_project(request):
                 container_runtime = "docker"  # Default fallback
 
         return {
-            "registry_url": "registry:5000",
-            "registry_url_container": "registry:5000",
+            "registry_url": "registry:20002",
+            "registry_url_container": "registry:20002",
             "container_runtime": container_runtime,
             "compose_cmd": ["docker", "compose"],  # Assume docker compose
             "pyxis_hostname": hostname,
@@ -590,8 +590,8 @@ def docker_compose_project(request):
     )
 
     info = {
-        "registry_url": "registry:5000",
-        "registry_url_container": "registry:5000",
+        "registry_url": "registry:20002",
+        "registry_url_container": "registry:20002",
         "container_runtime": container_runtime,
         "compose_cmd": compose_cmd,
         "pyxis_hostname": hostname,
@@ -629,7 +629,7 @@ def local_registry(docker_compose_project):
     """Return registry URL, checking that /etc/hosts is configured.
 
     Returns:
-        str: Registry URL (e.g., "registry:5000")
+        str: Registry URL (e.g., "registry:20002")
     """
     import socket
 
@@ -642,7 +642,7 @@ def local_registry(docker_compose_project):
         print("\nWhen running tests from your host machine, run:")
         print("  echo '127.0.0.1 registry' | sudo tee -a /etc/hosts")
         print("\nThis allows both host (pushing) and Slurm container (pulling)")
-        print("to resolve 'registry:5000' to the same registry service.")
+        print("to resolve 'registry:20002' to the same registry service.")
         print("\nAlternatively, run tests inside the devcontainer where Docker")
         print("DNS handles resolution automatically.")
         print("=" * 70 + "\n")

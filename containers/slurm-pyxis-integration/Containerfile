@@ -119,7 +119,7 @@ RUN mkdir -p /etc/containers \
 
 # Configure test registries as insecure for HTTP-only access
 # This allows enroot and podman to pull from the local registry
-RUN printf '\n# Test registry configuration\n[[registry]]\nlocation = "registry:5000"\ninsecure = true\n\n[[registry]]\nlocation = "localhost:5000"\ninsecure = true\n\n[[registry]]\nlocation = "host.docker.internal:5000"\ninsecure = true\n\n[[registry]]\nlocation = "localregistry.test:5000"\ninsecure = true\n' >> /etc/containers/registries.conf
+RUN printf '\n# Test registry configuration\n[[registry]]\nlocation = "registry:20002"\ninsecure = true\n\n[[registry]]\nlocation = "localhost:20002"\ninsecure = true\n\n[[registry]]\nlocation = "host.docker.internal:20002"\ninsecure = true\n\n[[registry]]\nlocation = "localregistry.test:20002"\ninsecure = true\n' >> /etc/containers/registries.conf
 
 # Copy Slurm configuration
 COPY slurm.conf /etc/slurm/slurm.conf

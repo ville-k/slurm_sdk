@@ -121,7 +121,7 @@ def test_workflow_context_list_task_runs_empty(tmp_path):
 
 def test_workflow_function_wants_context():
     """Test detecting if workflow function wants WorkflowContext."""
-    from slurm.runner import _function_wants_workflow_context
+    from slurm.runner import function_wants_workflow_context
 
     @workflow
     def workflow_with_ctx(ctx: WorkflowContext) -> int:
@@ -144,20 +144,20 @@ def test_workflow_function_wants_context():
         return x + 1
 
     # These should want context
-    assert _function_wants_workflow_context(workflow_with_ctx.unwrapped)
-    assert _function_wants_workflow_context(workflow_with_ctx_annotation.unwrapped)
-    assert _function_wants_workflow_context(workflow_with_context_param.unwrapped)
-    assert _function_wants_workflow_context(
+    assert function_wants_workflow_context(workflow_with_ctx.unwrapped)
+    assert function_wants_workflow_context(workflow_with_ctx_annotation.unwrapped)
+    assert function_wants_workflow_context(workflow_with_context_param.unwrapped)
+    assert function_wants_workflow_context(
         workflow_with_workflow_context_param.unwrapped
     )
 
     # This should not want context
-    assert not _function_wants_workflow_context(workflow_without_ctx.unwrapped)
+    assert not function_wants_workflow_context(workflow_without_ctx.unwrapped)
 
 
 def test_workflow_context_injection():
     """Test WorkflowContext injection into workflow function."""
-    from slurm.runner import _bind_workflow_context
+    from slurm.runner import bind_workflow_context
 
     def workflow_func(x: int, ctx: WorkflowContext) -> int:
         return x + 1
@@ -172,7 +172,7 @@ def test_workflow_context_injection():
     )
 
     # Inject context
-    args, kwargs, injected = _bind_workflow_context(
+    args, kwargs, injected = bind_workflow_context(
         workflow_func, (10,), {}, workflow_ctx
     )
 
@@ -184,7 +184,7 @@ def test_workflow_context_injection():
 
 def test_workflow_context_injection_already_provided():
     """Test that context is not injected if already provided."""
-    from slurm.runner import _bind_workflow_context
+    from slurm.runner import bind_workflow_context
 
     def workflow_func(x: int, ctx: WorkflowContext) -> int:
         return x + 1
@@ -207,7 +207,7 @@ def test_workflow_context_injection_already_provided():
     )
 
     # Context already provided in kwargs
-    args, kwargs, injected = _bind_workflow_context(
+    args, kwargs, injected = bind_workflow_context(
         workflow_func, (10,), {"ctx": another_ctx}, workflow_ctx
     )
 
@@ -217,7 +217,7 @@ def test_workflow_context_injection_already_provided():
 
 def test_workflow_context_injection_by_name():
     """Test context injection works with different parameter names."""
-    from slurm.runner import _bind_workflow_context
+    from slurm.runner import bind_workflow_context
 
     cluster = object.__new__(Cluster)
     workflow_ctx = WorkflowContext(
@@ -232,7 +232,7 @@ def test_workflow_context_injection_by_name():
     def workflow_with_context(x: int, context: WorkflowContext) -> int:
         return x + 1
 
-    args, kwargs, injected = _bind_workflow_context(
+    args, kwargs, injected = bind_workflow_context(
         workflow_with_context, (10,), {}, workflow_ctx
     )
     assert injected is True
@@ -244,7 +244,7 @@ def test_workflow_context_injection_by_name():
     ) -> int:
         return x + 1
 
-    args, kwargs, injected = _bind_workflow_context(
+    args, kwargs, injected = bind_workflow_context(
         workflow_with_workflow_context, (10,), {}, workflow_ctx
     )
     assert injected is True

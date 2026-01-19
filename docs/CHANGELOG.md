@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Rich output formatting with tables and panels
   - User-friendly error handling with actionable hints
 - SSH host key verification with configurable policies (`auto`, `warn`, `reject`)
+- Modular runner architecture with dedicated modules for argument loading, callbacks,
+  context injection, placeholder resolution, result saving, and workflow building
 - Input validation module (`slurm.validation`) for job names, accounts, and partitions
 - Security documentation explaining the SDK's trust model and best practices
 - How-to guide for hardening SSH connections in production
@@ -33,11 +35,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refactored `slurm.runner` from monolithic module into focused package with 7 modules
+
+- Removed legacy underscore-prefixed function exports from `slurm.runner` module:
+
+  - `_run_callbacks` → `run_callbacks`
+  - `_function_wants_workflow_context` → `function_wants_workflow_context`
+  - `_bind_workflow_context` → `bind_workflow_context`
+  - `_write_environment_metadata` → `write_environment_metadata`
+
+- Integration test registry port changed from 5000 to 20002 to avoid conflicts with
+  common services (e.g., macOS AirPlay Receiver)
+
 - Local backend now uses `shell=False` for SLURM commands (more secure)
+
 - Default SSH host key policy changed from `auto` to `warn` (logs warning for unknown hosts)
+
 - Job script permissions now default to `0o750` (configurable via `script_permissions`)
+
 - SSH passwords are cleared from memory immediately after successful authentication
+
 - Documentation restructured to follow Diataxis framework with four distinct types:
+
   - Renamed `docs/guides/` to `docs/how-to/` for consistency
   - Moved architecture content from `docs/reference/architecture/` to `docs/explanation/`
   - Updated navigation in `mkdocs.yml` to reflect new structure
@@ -50,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed potential issue with `update_job_metadata` when job ID is None (now defaults to "unknown")
+- Replaced Linux-only `flock` with cross-platform `mkdir`-based locking in wheel
+  packaging for macOS compatibility
 - Type annotations added to public APIs to resolve mkdocstrings warnings:
   - `Cluster.from_file()`, `Cluster.add_argparse_args()`, `Cluster.from_args()`, `Cluster.submit()`
   - `task()` and `workflow()` decorator return types
