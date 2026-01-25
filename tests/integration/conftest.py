@@ -706,8 +706,20 @@ def sdk_on_pyxis_cluster(docker_compose_project) -> Path:
         capture_output=True,
     )
 
+    # Include docs and mkdocs.yml required by pyproject.toml force-include for bundled docs
     tar_proc = subprocess.Popen(
-        ["tar", "-cf", "-", "-C", str(sdk_root), "src", "pyproject.toml", "README.md"],
+        [
+            "tar",
+            "-cf",
+            "-",
+            "-C",
+            str(sdk_root),
+            "src",
+            "pyproject.toml",
+            "README.md",
+            "docs",
+            "mkdocs.yml",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,

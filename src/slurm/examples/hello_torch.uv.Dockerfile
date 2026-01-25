@@ -18,8 +18,9 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /uvx /bin/
 WORKDIR /app
 
 # Add project files
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md mkdocs.yml ./
 COPY src/ src/
+COPY docs/ docs/
 
 # Install the project into /opt/venv
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
