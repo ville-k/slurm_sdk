@@ -66,6 +66,7 @@ addopts = [
 ]
 markers = [
     "integration_test: marks tests as integration tests",
-    "container_packaging: marks tests that require container packaging infrastructure (Pyxis/enroot)",
     "slow_integration_test: marks tests as slow integration tests",
+    "container_runtime: marks tests that run containers using prebuilt images",
+    "container_build: marks tests that build containers from Dockerfiles",
 ]
