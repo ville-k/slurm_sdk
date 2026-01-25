@@ -16,8 +16,9 @@ RUN apt-get update \
 RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Copy the project into the build context.
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md mkdocs.yml ./
 COPY src/ src/
+COPY docs/ docs/
 
 RUN pip install .
 
