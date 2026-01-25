@@ -39,9 +39,9 @@ def test_job_script_persisted_in_job_directory(slurm_cluster):
         assert "slurm.runner" in script_content
     else:
         # For local backend, check directly
-        assert expected_script_path.exists(), (
-            f"Script not found at {expected_script_path}"
-        )
+        assert (
+            expected_script_path.exists()
+        ), f"Script not found at {expected_script_path}"
 
         # Verify script content via get_script()
         script_content = job.get_script()

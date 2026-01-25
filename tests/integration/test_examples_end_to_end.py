@@ -1,3 +1,10 @@
+"""End-to-end integration tests for example scripts.
+
+Most tests use wheel packaging for speed. Container packaging tests are marked
+with @pytest.mark.container_build and kept to 1-2 smoke tests to validate
+container integration without excessive build overhead.
+"""
+
 import subprocess
 import sys
 from pathlib import Path
@@ -41,7 +48,7 @@ def _run_example(
     module: str,
     slurm_config: dict,
     *,
-    packaging: str = "none",
+    packaging: str = "wheel",
     extra_args: Optional[Iterable[str]] = None,
     timeout: int = 600,
 ) -> subprocess.CompletedProcess:
@@ -70,32 +77,99 @@ def _run_example(
     return result
 
 
-@pytest.mark.container_packaging
-def test_hello_world_example(
-    slurm_pyxis_cluster_config, sdk_on_pyxis_cluster, local_registry
-):
+# ============================================================================
+# Wheel Packaging Tests (fast, no container builds)
+# ============================================================================
+
+
+def test_hello_world_example_wheel(slurm_pyxis_cluster_config, sdk_on_pyxis_cluster):
+    """Test hello_world example with wheel packaging."""
     result = _run_example(
         "slurm.examples.hello_world",
         slurm_pyxis_cluster_config,
-        packaging="container",
-        extra_args=[
-            "--packaging-registry",
-            "registry:20002/hello-world",
-            "--packaging-platform",
-            _default_platform(),
-            "--packaging",
-            "container",
-            "--packaging-tls-verify",
-            "false",
-        ],
+        packaging="wheel",
     )
     assert "Result:" in result.stdout
 
 
-@pytest.mark.container_packaging
+def test_map_reduce_example(slurm_pyxis_cluster_config, sdk_on_pyxis_cluster):
+    """Test map-reduce workflow with wheel packaging."""
+    result = _run_example(
+        "slurm.examples.map_reduce",
+        slurm_pyxis_cluster_config,
+        packaging="wheel",
+        extra_args=["--num-chunks", "3"],
+    )
+    assert "Map-Reduce workflow completed successfully" in result.stdout
+
+
+def test_parallelization_patterns_example(
+    slurm_pyxis_cluster_config, sdk_on_pyxis_cluster
+):
+    """Test parallelization patterns with wheel packaging."""
+    result = _run_example(
+        "slurm.examples.parallelization_patterns",
+        slurm_pyxis_cluster_config,
+        packaging="wheel",
+        extra_args=["--pattern", "all"],
+        timeout=900,  # All patterns need more time
+    )
+    assert "Pattern 1: Fan-out/Fan-in" in result.stdout
+    assert "Pattern 2: Pipeline with Parallel Stages" in result.stdout
+    assert "Pattern 3: Hyperparameter Sweep" in result.stdout
+    assert "Pattern 4: Dynamic Dependencies" in result.stdout
+
+
+def test_workflow_graph_visualization_example(
+    slurm_pyxis_cluster_config, sdk_on_pyxis_cluster
+):
+    """Test workflow graph visualization with wheel packaging."""
+    result = _run_example(
+        "slurm.examples.workflow_graph_visualization",
+        slurm_pyxis_cluster_config,
+        packaging="wheel",
+        extra_args=["--timeout", "300"],
+        timeout=600,
+    )
+    assert "Workflow completed!" in result.stdout
+
+
+def test_parallel_train_eval_workflow_example(
+    slurm_pyxis_cluster_config, sdk_on_pyxis_cluster
+):
+    """Test parallel train/eval workflow with wheel packaging."""
+    result = _run_example(
+        "slurm.examples.parallel_train_eval.workflow",
+        slurm_pyxis_cluster_config,
+        packaging="wheel",
+        extra_args=[
+            "--epochs",
+            "2",
+            "--epoch-steps",
+            "5",
+            "--steps-per-job-cap",
+            "3",
+        ],
+        timeout=600,
+    )
+    output = result.stdout + result.stderr
+    assert "Workflow complete. State file:" in output
+
+
+# ============================================================================
+# Container Packaging Smoke Tests (validates container integration)
+# ============================================================================
+
+
+@pytest.mark.container_build
 def test_hello_container_example(
     slurm_pyxis_cluster_config, sdk_on_pyxis_cluster, local_registry
 ):
+    """Smoke test: hello_container with container packaging.
+
+    This test validates that container packaging works end-to-end.
+    It builds an image from the example's Dockerfile and runs in Pyxis.
+    """
     result = _run_example(
         "slurm.examples.hello_container",
         slurm_pyxis_cluster_config,
@@ -114,92 +188,14 @@ def test_hello_container_example(
     assert "Result:" in result.stdout
 
 
-def test_map_reduce_example(slurm_pyxis_cluster_config, sdk_on_pyxis_cluster):
-    result = _run_example(
-        "slurm.examples.map_reduce",
-        slurm_pyxis_cluster_config,
-        packaging="container",
-        extra_args=[
-            "--num-chunks",
-            "3",
-            "--packaging-registry",
-            "registry:20002/map-reduce",
-            "--packaging-platform",
-            _default_platform(),
-            "--packaging",
-            "container",
-            "--packaging-tls-verify",
-            "false",
-        ],
-    )
-    assert "Map-Reduce workflow completed successfully" in result.stdout
-
-
-def test_parallelization_patterns_example(
-    slurm_pyxis_cluster_config, sdk_on_pyxis_cluster
-):
-    result = _run_example(
-        "slurm.examples.parallelization_patterns",
-        slurm_pyxis_cluster_config,
-        packaging="container",
-        extra_args=[
-            "--pattern",
-            "all",
-            "--packaging-registry",
-            "registry:20002/parallel-patterns",
-            "--packaging-platform",
-            _default_platform(),
-            "--packaging",
-            "container",
-            "--packaging-tls-verify",
-            "false",
-        ],
-        timeout=900,  # All patterns need more time
-    )
-    assert "Pattern 1: Fan-out/Fan-in" in result.stdout
-    assert "Pattern 2: Pipeline with Parallel Stages" in result.stdout
-    assert "Pattern 3: Hyperparameter Sweep" in result.stdout
-    assert "Pattern 4: Dynamic Dependencies" in result.stdout
-
-
-@pytest.mark.container_packaging
-def test_hello_torch_example(slurm_pyxis_cluster_config, sdk_on_pyxis_cluster):
-    result = _run_example(
-        "slurm.examples.hello_torch",
-        slurm_pyxis_cluster_config,
-        packaging="container",
-        extra_args=[
-            "--packaging-registry",
-            "registry:20002/parallel-patterns",
-            "--packaging-platform",
-            _default_platform(),
-            "--packaging",
-            "container",
-            "--packaging-tls-verify",
-            "false",
-        ],
-    )
-    assert "Job failed" not in result.stdout
-
-
-def test_workflow_graph_visualization_example_wheel(
-    slurm_pyxis_cluster_config, sdk_on_pyxis_cluster
-):
-    """Test workflow with wheel packaging (simpler, no containers)."""
-    result = _run_example(
-        "slurm.examples.workflow_graph_visualization",
-        slurm_pyxis_cluster_config,
-        packaging="wheel",
-        extra_args=["--timeout", "300"],
-        timeout=600,
-    )
-    assert "Workflow completed!" in result.stdout
-
-
-@pytest.mark.container_packaging
-def test_workflow_graph_visualization_example(
+@pytest.mark.container_build
+def test_workflow_graph_visualization_container(
     slurm_pyxis_cluster_config, sdk_on_pyxis_cluster, local_registry
 ):
+    """Smoke test: workflow graph visualization with container packaging.
+
+    This test validates that complex workflows work with container packaging.
+    """
     result = _run_example(
         "slurm.examples.workflow_graph_visualization",
         slurm_pyxis_cluster_config,
@@ -217,24 +213,3 @@ def test_workflow_graph_visualization_example(
         timeout=600,
     )
     assert "Workflow completed!" in result.stdout
-
-
-def test_parallel_train_eval_workflow_example(
-    slurm_pyxis_cluster_config, sdk_on_pyxis_cluster
-):
-    result = _run_example(
-        "slurm.examples.parallel_train_eval.workflow",
-        slurm_pyxis_cluster_config,
-        packaging="wheel",
-        extra_args=[
-            "--epochs",
-            "2",
-            "--epoch-steps",
-            "5",
-            "--steps-per-job-cap",
-            "3",
-        ],
-        timeout=600,
-    )
-    output = result.stdout + result.stderr
-    assert "Workflow complete. State file:" in output

@@ -85,17 +85,34 @@ def _docker_cli_available() -> bool:
 DOCKER_CLI_AVAILABLE = _docker_cli_available()
 
 
-@pytest.fixture(autouse=True)
-def skip_container_packaging_without_docker(request):
-    """Skip container_packaging tests if docker CLI is not available.
+# ============================================================================
+# Container Test Markers
+# ============================================================================
+#
+# We distinguish two types of container tests:
+#
+# - container_runtime: Tests that RUN containers but use prebuilt images.
+#   These can run without docker CLI if images are already in the registry.
+#
+# - container_build: Tests that BUILD containers from Dockerfiles.
+#   These require docker/podman CLI access to build and push images.
+#
 
-    Container packaging tests build Docker images locally, which requires
-    docker CLI access to the host daemon. When running inside a devcontainer
-    without proper socket access, these tests cannot run.
+
+@pytest.fixture(autouse=True)
+def skip_container_build_without_docker(request):
+    """Skip container_build tests if docker CLI is not available.
+
+    container_build tests require docker/podman CLI to build images from
+    Dockerfiles. container_runtime tests use prebuilt images and only need
+    docker CLI for the prebuilt_integration_image fixture.
     """
-    marker = request.node.get_closest_marker("container_packaging")
-    if marker is not None and not DOCKER_CLI_AVAILABLE:
-        pytest.skip("Docker CLI not available (required for container packaging tests)")
+    if DOCKER_CLI_AVAILABLE:
+        return  # Docker CLI available, no need to skip
+
+    marker = request.node.get_closest_marker("container_build")
+    if marker is not None:
+        pytest.skip("Docker CLI not available (required for container_build tests)")
 
 
 def _get_slurm_connection_info() -> Tuple[str, int]:
@@ -870,3 +887,185 @@ def slurm_pyxis_cluster(slurm_pyxis_cluster_config: Dict, tmp_path: Path):
     slurmfile_path.write_text(content, encoding="utf-8")
 
     return Cluster.from_env(slurmfile_path, env="default")
+
+
+# ============================================================================
+# Prebuilt Integration Test Image Fixture
+# ============================================================================
+
+
+def _get_integration_test_dockerfile() -> str:
+    """Return the Dockerfile content for the integration test base image.
+
+    Includes numpy for tests that verify dependency handling.
+    """
+    return """FROM python:3.11-slim
+
+WORKDIR /workspace
+COPY pyproject.toml README.md mkdocs.yml ./
+COPY src/ src/
+COPY docs/ docs/
+COPY tests/__init__.py tests/__init__.py
+COPY tests/integration/__init__.py tests/integration/__init__.py
+COPY tests/integration/container_test_tasks.py tests/integration/
+
+RUN pip install --no-cache-dir . numpy
+
+# Tests module isn't installed as a package, so add to PYTHONPATH
+ENV PYTHONPATH=/workspace:$PYTHONPATH
+"""
+
+
+def _detect_host_platform() -> str:
+    """Detect the host platform for container builds.
+
+    Returns platform in Docker format (e.g., 'linux/amd64', 'linux/arm64').
+    """
+    import platform
+
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return "linux/arm64"
+    elif machine in ("x86_64", "amd64"):
+        return "linux/amd64"
+    else:
+        # Default to amd64 for unknown architectures
+        return "linux/amd64"
+
+
+def _is_podman_masquerading_as_docker(runtime: str) -> bool:
+    """Check if docker command is actually podman (common on macOS).
+
+    On macOS with podman-docker or Docker Desktop using podman backend,
+    the 'docker' command might be podman. We need to detect this to use
+    the correct push flags for insecure registries.
+    """
+    if runtime != "docker":
+        return False
+
+    try:
+        # Check docker info for podman-specific fields
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        output = result.stdout.lower()
+        # Look for podman-specific indicators in docker info output
+        if "buildahversion" in output or "podman" in output:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+@pytest.fixture(scope="session")
+def prebuilt_integration_image(docker_compose_project, local_registry, request):
+    """Build and push a shared integration test image once per session.
+
+    This fixture builds once at session start and all tests reuse the same image.
+
+    Returns:
+        dict: Image information including:
+            - image_ref: Full image reference (registry:port/name:tag)
+            - tag: The tag used
+            - platform: The build platform
+    """
+    if not DOCKER_CLI_AVAILABLE:
+        pytest.skip("Docker CLI not available (required for prebuilt image)")
+
+    project_root = Path(__file__).parent.parent.parent
+    tag = f"session-{os.getpid()}"
+    image_name = "slurm-sdk/integration-test"
+    image_ref = f"{local_registry}/{image_name}:{tag}"
+    platform = _detect_host_platform()
+
+    # Determine which container runtime to use
+    container_runtime = docker_compose_project["container_runtime"]
+
+    # Write Dockerfile
+    dockerfile_path = project_root / "integration_test.Dockerfile"
+    dockerfile_path.write_text(_get_integration_test_dockerfile())
+
+    try:
+        print(f"\nBuilding integration test image: {image_ref}")
+
+        # Build the image
+        build_cmd = [
+            container_runtime,
+            "build",
+            "-t",
+            image_ref,
+            "-f",
+            str(dockerfile_path),
+            "--platform",
+            platform,
+            str(project_root),
+        ]
+
+        result = subprocess.run(
+            build_cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+
+        if result.returncode != 0:
+            pytest.fail(
+                f"Failed to build integration test image:\n"
+                f"Command: {' '.join(build_cmd)}\n"
+                f"stderr: {result.stderr}\n"
+                f"stdout: {result.stdout}"
+            )
+
+        print(f"Pushing integration test image: {image_ref}")
+
+        # Detect if docker is actually podman (common on macOS)
+        is_podman = container_runtime == "podman" or _is_podman_masquerading_as_docker(
+            container_runtime
+        )
+
+        # Push the image with appropriate flags for insecure registry
+        push_cmd = [container_runtime, "push"]
+        if is_podman:
+            # Podman needs explicit flags for insecure registry and Docker format
+            push_cmd.extend(["--tls-verify=false", "--format", "v2s2"])
+        push_cmd.append(image_ref)
+
+        result = subprocess.run(
+            push_cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+        if result.returncode != 0:
+            hint = ""
+            if not is_podman and "server gave HTTP response to HTTPS" in result.stderr:
+                hint = (
+                    "\n\nHint: Docker requires insecure registry configuration.\n"
+                    "Add to /etc/docker/daemon.json:\n"
+                    '  {"insecure-registries": ["registry:20002"]}\n'
+                    "Then restart Docker."
+                )
+            pytest.fail(
+                f"Failed to push integration test image:\n"
+                f"Command: {' '.join(push_cmd)}\n"
+                f"stderr: {result.stderr}\n"
+                f"stdout: {result.stdout}{hint}"
+            )
+
+        print(f"Integration test image ready: {image_ref}")
+
+    finally:
+        # Clean up Dockerfile
+        if dockerfile_path.exists():
+            dockerfile_path.unlink()
+
+    return {
+        "image_ref": image_ref,
+        "tag": tag,
+        "platform": platform,
+    }

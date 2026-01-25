@@ -158,10 +158,10 @@ uv run pytest --run-integration tests/integration/test_container_packaging*.py -
 uv run pytest --run-integration tests/integration/test_container_packaging_basic.py::test_basic_container_task_execution -v
 ```
 
-**Skipping container tests:**
+**Skipping container build tests:**
 
 ```bash
-uv run pytest --run-integration -v -m "not container_packaging"
+uv run pytest --run-integration -v -m "not container_build"
 ```
 
 ## Environment Variables

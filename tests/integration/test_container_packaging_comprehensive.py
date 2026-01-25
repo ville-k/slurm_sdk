@@ -3,8 +3,9 @@
 Tests workflow, callback, output directory, and script persistence scenarios
 using container packaging to achieve parity with wheel packaging tests.
 
-NOTE: These tests use a shared Docker image (built once per session) to avoid
-the overhead of building separate images for each test.
+NOTE: These tests use a shared Docker image (built once per session via the
+prebuilt_integration_image fixture) to avoid the overhead of building
+separate images for each test.
 """
 
 from __future__ import annotations
@@ -24,16 +25,40 @@ from tests.integration import container_test_tasks
 
 
 # ============================================================================
-# Shared Dockerfile Fixture (Built Once Per Session)
+# Helper to create container packaging config from prebuilt image
+# ============================================================================
+
+
+def _container_config(prebuilt_image: dict) -> dict:
+    """Return common container packaging kwargs for tests using prebuilt image.
+
+    Args:
+        prebuilt_image: The prebuilt_integration_image fixture dict
+
+    Returns:
+        dict: Kwargs to pass to task/workflow decorators
+    """
+    return {
+        "packaging": "container",
+        "packaging_image": prebuilt_image["image_ref"],
+        "packaging_push": False,  # Already pushed by fixture
+        "packaging_platform": prebuilt_image["platform"],
+        "packaging_tls_verify": False,
+    }
+
+
+# ============================================================================
+# Legacy Dockerfile Fixture (for build pipeline validation test)
 # ============================================================================
 
 
 @pytest.fixture(scope="session")
 def shared_comprehensive_dockerfile():
-    """Create a shared Dockerfile for all comprehensive tests.
+    """Create a shared Dockerfile for build pipeline validation tests.
 
-    Built once per test session to avoid redundant image builds.
-    Creates Dockerfile in project root for proper build context.
+    This fixture is only used by tests that specifically validate the
+    container build pipeline (test_container_build_pipeline_validation).
+    Most tests should use prebuilt_integration_image instead.
     """
     project_root = Path(__file__).parent.parent.parent
     dockerfile_path = project_root / "comprehensive_test.Dockerfile"
@@ -66,26 +91,22 @@ ENV PYTHONPATH=/workspace:$PYTHONPATH
 # ============================================================================
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_workflow_with_param_no_context(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test containerized workflow with parameter but NO WorkflowContext.
 
     This isolates whether the issue is with parameters in general
     or specifically with WorkflowContext.
     """
+    config = _container_config(prebuilt_integration_image)
     containerized_workflow = workflow(
         time="00:02:00",
         mem="512M",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.workflow_with_param_no_context.unwrapped)
 
     with slurm_pyxis_cluster:
@@ -95,26 +116,22 @@ def test_workflow_with_param_no_context(
         assert result == 15, f"Expected 15 (5*3), got {result}"
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_workflow_with_context(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test containerized workflow WITH WorkflowContext parameter.
 
     This tests that workflows with WorkflowContext complete properly
     and don't hang due to unclosed SSH connections.
     """
+    config = _container_config(prebuilt_integration_image)
     containerized_workflow = workflow(
         time="00:02:00",
         mem="512M",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.simple_value_workflow.unwrapped)
 
     with slurm_pyxis_cluster:
@@ -124,27 +141,22 @@ def test_workflow_with_context(
         assert result == 20, f"Expected 20 (10*2), got {result}"
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_minimal_containerized_workflow(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test the absolute minimal containerized workflow for debugging.
 
     This workflow takes no parameters and just returns a constant.
     Used to isolate workflow completion issues with container packaging.
     """
-    # Wrap the minimal workflow with container packaging
+    config = _container_config(prebuilt_integration_image)
     containerized_workflow = workflow(
         time="00:02:00",
         mem="512M",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.minimal_workflow.unwrapped)
 
     with slurm_pyxis_cluster:
@@ -187,23 +199,18 @@ def test_minimal_containerized_workflow(
 # ============================================================================
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_simple_task_with_containers(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test that simple tasks execute correctly with container packaging."""
-    # Containerize the add task
+    config = _container_config(prebuilt_integration_image)
     container_add = task(
         time="00:01:00",
         mem="512M",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.container_add)
 
     with slurm_pyxis_cluster:
@@ -214,33 +221,24 @@ def test_simple_task_with_containers(
         assert result == 15, f"Expected 15, got {result}"
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_multiple_tasks_with_containers(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test executing multiple containerized tasks sequentially."""
-    # Containerize tasks
+    config = _container_config(prebuilt_integration_image)
     container_add = task(
         time="00:01:00",
         mem="512M",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.container_add)
 
     container_multiply = task(
         time="00:01:00",
         mem="512M",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.container_multiply)
 
     with slurm_pyxis_cluster:
@@ -258,23 +256,18 @@ def test_multiple_tasks_with_containers(
         assert result2 == 30, f"Expected 30, got {result2}"
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_exception_handling_with_containers(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test exception handling in containerized tasks."""
-    # Containerize failing task
+    config = _container_config(prebuilt_integration_image)
     container_failing_task = task(
         time="00:01:00",
         mem="512M",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.container_failing_task)
 
     with slurm_pyxis_cluster:
@@ -291,23 +284,17 @@ def test_exception_handling_with_containers(
 # ============================================================================
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_callbacks_with_containers(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test that callbacks work correctly with container packaging."""
     logging.basicConfig(level=logging.INFO)
 
-    hello_containerized = task(
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
-    )(container_test_tasks.hello_container.unwrapped)
+    config = _container_config(prebuilt_integration_image)
+    hello_containerized = task(**config)(container_test_tasks.hello_container.unwrapped)
 
     # Create callbacks
     benchmark = BenchmarkCallback()
@@ -333,22 +320,17 @@ def test_callbacks_with_containers(
 # ============================================================================
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_output_dir_with_containers(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test output directory functionality with container packaging."""
-
-    write_output_containerized = task(
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
-    )(container_test_tasks.write_output_file.unwrapped)
+    config = _container_config(prebuilt_integration_image)
+    write_output_containerized = task(**config)(
+        container_test_tasks.write_output_file.unwrapped
+    )
 
     with slurm_pyxis_cluster:
         # Write output file and get the path back
@@ -370,9 +352,9 @@ def test_output_dir_with_containers(
         with open(local_path, "r") as f:
             content = f.read()
 
-        assert content == "container packaging test data", (
-            f"Unexpected content: {content}"
-        )
+        assert (
+            content == "container packaging test data"
+        ), f"Unexpected content: {content}"
 
         # Cleanup
         import os
@@ -380,21 +362,17 @@ def test_output_dir_with_containers(
         os.unlink(local_path)
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_output_dir_path_correctness_with_containers(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test that output_dir paths are correctly set with container packaging."""
-    get_output_dir_containerized = task(
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
-    )(container_test_tasks.get_output_dir_path.unwrapped)
+    config = _container_config(prebuilt_integration_image)
+    get_output_dir_containerized = task(**config)(
+        container_test_tasks.get_output_dir_path.unwrapped
+    )
 
     with slurm_pyxis_cluster:
         job = slurm_pyxis_cluster.submit(get_output_dir_containerized)()
@@ -430,21 +408,15 @@ def test_output_dir_path_correctness_with_containers(
 # ============================================================================
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_job_script_persistence_with_containers(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test that job scripts are persisted with container packaging."""
-    hello_containerized = task(
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
-    )(container_test_tasks.hello_container.unwrapped)
+    config = _container_config(prebuilt_integration_image)
+    hello_containerized = task(**config)(container_test_tasks.hello_container.unwrapped)
 
     with slurm_pyxis_cluster:
         job = slurm_pyxis_cluster.submit(hello_containerized)()
@@ -456,26 +428,20 @@ def test_job_script_persistence_with_containers(
 
         # Check for job script file (named with pattern: slurm_job_<id>_script.sh)
         ls_output = backend.execute_command(f"ls {job_dir}/")
-        assert "_script.sh" in ls_output, (
-            f"Job script not found in {job_dir}. Files: {ls_output}"
-        )
+        assert (
+            "_script.sh" in ls_output
+        ), f"Job script not found in {job_dir}. Files: {ls_output}"
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_job_get_script_with_containers(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test that job.get_script() retrieves persisted script with container packaging."""
-    hello_containerized = task(
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
-    )(container_test_tasks.hello_container.unwrapped)
+    config = _container_config(prebuilt_integration_image)
+    hello_containerized = task(**config)(container_test_tasks.hello_container.unwrapped)
 
     with slurm_pyxis_cluster:
         job = slurm_pyxis_cluster.submit(hello_containerized)()
@@ -487,9 +453,9 @@ def test_job_get_script_with_containers(
         # Verify script contains expected elements
         assert script_content is not None, "get_script() returned None"
         assert len(script_content) > 0, "get_script() returned empty string"
-        assert "#!/bin/bash" in script_content or "#SBATCH" in script_content, (
-            "Script doesn't contain expected job script markers"
-        )
+        assert (
+            "#!/bin/bash" in script_content or "#SBATCH" in script_content
+        ), "Script doesn't contain expected job script markers"
 
 
 # ============================================================================
@@ -497,12 +463,11 @@ def test_job_get_script_with_containers(
 # ============================================================================
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_workflow_submitting_tasks(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test containerized workflow that submits child tasks.
 
@@ -511,15 +476,11 @@ def test_workflow_submitting_tasks(
     2. Child tasks receive the packaging config via SLURM_SDK_PACKAGING_CONFIG
     3. Child tasks reuse the parent's container image (no rebuild)
     """
-
+    config = _container_config(prebuilt_integration_image)
     containerized_workflow = workflow(
         time="00:05:00",
         mem="1G",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.simple_container_workflow.unwrapped)
 
     with slurm_pyxis_cluster:
@@ -531,27 +492,22 @@ def test_workflow_submitting_tasks(
         assert result == 30, f"Expected 30, got {result}"
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_workflow_with_inheriting_tasks(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test containerized workflow with tasks using inherit packaging.
 
     This tests that tasks with packaging='inherit' correctly receive
     and use the parent workflow's container configuration.
     """
-
+    config = _container_config(prebuilt_integration_image)
     containerized_workflow = workflow(
         time="00:05:00",
         mem="1G",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.simple_inheriting_workflow.unwrapped)
 
     with slurm_pyxis_cluster:
@@ -562,23 +518,18 @@ def test_workflow_with_inheriting_tasks(
         assert result == 15, f"Expected 15, got {result}"
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_failing_workflow_with_containers(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
     """Test that failing containerized workflows report errors correctly."""
-
+    config = _container_config(prebuilt_integration_image)
     containerized_workflow = workflow(
         time="00:05:00",
         mem="1G",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.failing_container_workflow.unwrapped)
 
     with slurm_pyxis_cluster:
@@ -589,45 +540,39 @@ def test_failing_workflow_with_containers(
         assert not job.is_successful(), "Expected workflow to fail but it succeeded"
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.slow_integration_test
 def test_workflow_with_different_child_container(
     slurm_pyxis_cluster,
-    local_registry,
-    shared_comprehensive_dockerfile,
+    prebuilt_integration_image,
 ):
-    """Test workflow using with_dependencies to pre-build a child task's container.
+    """Test workflow using with_dependencies with child tasks using same container.
 
     This tests the with_dependencies() API which allows workflows to have
-    child tasks with different containers than the parent workflow.
+    child tasks whose containers are pre-prepared before the workflow runs.
 
-    The workflow uses container A, but calls a task that needs container B.
-    Using with_dependencies(), we pre-build container B before submitting
-    the workflow.
+    Both workflow and child task use the same prebuilt image but with
+    different tags to verify the with_dependencies mechanism works.
     """
+    config = _container_config(prebuilt_integration_image)
 
-    # Create the workflow with its container config
+    # Create the workflow with prebuilt image
     containerized_workflow = workflow(
         time="00:05:00",
         mem="1G",
-        packaging="container",
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",
-        packaging_tls_verify=False,
+        **config,
     )(container_test_functions.workflow_with_dependency_task.unwrapped)
 
-    # Create the task with its own container config (different tag)
+    # Create the task with same prebuilt image (using with_options to set a distinct tag)
     task_with_container = container_test_functions.task_with_own_container.with_options(
-        packaging_dockerfile=str(shared_comprehensive_dockerfile),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_tag="child-v1",
-        packaging_platform="linux/arm64",
+        packaging_image=prebuilt_integration_image["image_ref"],
+        packaging_push=False,
+        packaging_platform=prebuilt_integration_image["platform"],
         packaging_tls_verify=False,
     )
 
     with slurm_pyxis_cluster:
-        # Use with_dependencies to pre-build the child task's container
+        # Use with_dependencies to ensure the child task's container is ready
         job = slurm_pyxis_cluster.submit(
             containerized_workflow.with_dependencies([task_with_container])
         )(3)
@@ -637,3 +582,42 @@ def test_workflow_with_different_child_container(
         # workflow_with_dependency_task: task_with_own_container(x) * 10, then container_add(result, 5)
         # (3 * 10) + 5 = 35
         assert result == 35, f"Expected 35, got {result}"
+
+
+# ============================================================================
+# Build Pipeline Validation Test (keeps one Dockerfile build test)
+# ============================================================================
+
+
+@pytest.mark.container_build
+@pytest.mark.slow_integration_test
+def test_container_build_pipeline_validation(
+    slurm_pyxis_cluster,
+    local_registry,
+    shared_comprehensive_dockerfile,
+):
+    """Validate that container build from Dockerfile still works.
+
+    This test exercises the full container build pipeline:
+    1. Build image from Dockerfile
+    2. Push to registry
+    3. Run task in container
+
+    Most other tests use a prebuilt image for speed; this test ensures
+    the build pipeline remains functional.
+    """
+    # Use Dockerfile-based container packaging
+    hello_containerized = task(
+        packaging="container",
+        packaging_dockerfile=str(shared_comprehensive_dockerfile),
+        packaging_registry=f"{local_registry}/test/",
+        packaging_tag="build-pipeline-test",
+        packaging_platform="linux/arm64",
+        packaging_tls_verify=False,
+    )(container_test_tasks.hello_container.unwrapped)
+
+    with slurm_pyxis_cluster:
+        job = slurm_pyxis_cluster.submit(hello_containerized)()
+        assert job.wait(timeout=300), f"Job did not complete: {job.get_stderr()}"
+        result = job.get_result()
+        assert "Hello from" in result

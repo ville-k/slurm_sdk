@@ -2,6 +2,9 @@
 
 Tests advanced scenarios like array jobs and volume mounts using Pyxis and enroot
 with the SDK's container packaging functionality.
+
+NOTE: These tests use a shared prebuilt image (built once per session via the
+prebuilt_integration_image fixture) to avoid redundant image builds.
 """
 
 from __future__ import annotations
@@ -12,38 +15,28 @@ from slurm.decorators import task
 from tests.integration import container_test_tasks
 
 
-@pytest.mark.container_packaging
+def _container_config(prebuilt_image: dict, **extra) -> dict:
+    """Return common container packaging kwargs for tests using prebuilt image."""
+    config = {
+        "packaging": "container",
+        "packaging_image": prebuilt_image["image_ref"],
+        "packaging_push": False,
+        "packaging_platform": prebuilt_image["platform"],
+        "packaging_tls_verify": False,
+    }
+    config.update(extra)
+    return config
+
+
+@pytest.mark.container_runtime
 @pytest.mark.integration_test
 def test_array_job_with_containers(
     slurm_pyxis_cluster,
-    local_registry,  # registry:20002 (requires /etc/hosts on host, not in devcontainer)
-    tmp_path,
+    prebuilt_integration_image,
 ):
     """Test array jobs using container packaging."""
-    dockerfile_path = tmp_path / "array_test.Dockerfile"
-    dockerfile_path.write_text("""FROM python:3.11-slim
-
-WORKDIR /workspace
-COPY pyproject.toml README.md mkdocs.yml ./
-COPY src/ src/
-COPY docs/ docs/
-COPY tests/__init__.py tests/__init__.py
-COPY tests/integration/__init__.py tests/integration/__init__.py
-COPY tests/integration/container_test_tasks.py tests/integration/
-
-RUN pip install --no-cache-dir .
-
-# Tests module isn't installed as a package, so add to PYTHONPATH
-ENV PYTHONPATH=/workspace:$PYTHONPATH
-""")
-
-    process_item_packaged = task(
-        packaging="container",
-        packaging_dockerfile=str(dockerfile_path),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",  # Apple Silicon host
-        packaging_tls_verify=False,  # Local registry uses HTTP
-    )(container_test_tasks.process_item.unwrapped)
+    config = _container_config(prebuilt_integration_image)
+    process_item_packaged = task(**config)(container_test_tasks.process_item.unwrapped)
 
     with slurm_pyxis_cluster:
         items = [1, 2, 3, 4, 5]
@@ -53,12 +46,11 @@ ENV PYTHONPATH=/workspace:$PYTHONPATH
         assert results == [2, 4, 6, 8, 10], f"Unexpected results: {results}"
 
 
-@pytest.mark.container_packaging
+@pytest.mark.container_runtime
 @pytest.mark.integration_test
 def test_container_with_mounts(
     slurm_pyxis_cluster,
-    local_registry,  # registry:20002 (requires /etc/hosts on host, not in devcontainer)
-    tmp_path,
+    prebuilt_integration_image,
 ):
     """Test container with volume mounts."""
     # Volume mounts must reference paths on the cluster, not the local machine
@@ -71,31 +63,14 @@ def test_container_with_mounts(
         f"echo 'test data from mounted volume' > {remote_test_file}"
     )
 
-    dockerfile_path = tmp_path / "mount_test.Dockerfile"
-    dockerfile_path.write_text("""FROM python:3.11-slim
-
-WORKDIR /workspace
-COPY pyproject.toml README.md mkdocs.yml ./
-COPY src/ src/
-COPY docs/ docs/
-COPY tests/__init__.py tests/__init__.py
-COPY tests/integration/__init__.py tests/integration/__init__.py
-COPY tests/integration/container_test_tasks.py tests/integration/
-
-RUN pip install --no-cache-dir .
-
-# Tests module isn't installed as a package, so add to PYTHONPATH
-ENV PYTHONPATH=/workspace:$PYTHONPATH
-""")
-
-    read_mounted_file_packaged = task(
-        packaging="container",
-        packaging_dockerfile=str(dockerfile_path),
-        packaging_registry=f"{local_registry}/test/",
-        packaging_platform="linux/arm64",  # Apple Silicon host
-        packaging_tls_verify=False,  # Local registry uses HTTP
+    # Use prebuilt image with volume mount
+    config = _container_config(
+        prebuilt_integration_image,
         packaging_mounts=[f"{remote_data_dir}:/data:ro"],
-    )(container_test_tasks.read_mounted_file.unwrapped)
+    )
+    read_mounted_file_packaged = task(**config)(
+        container_test_tasks.read_mounted_file.unwrapped
+    )
 
     try:
         with slurm_pyxis_cluster:

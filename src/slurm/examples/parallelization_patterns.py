@@ -498,12 +498,29 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
 
-    cluster = Cluster.from_args(
-        args,
-        callbacks=[RichLoggerCallback()],
-        default_packaging="container",
-        default_packaging_dockerfile="src/slurm/examples/map_reduce.Dockerfile",
-    )
+    # Build cluster kwargs
+    cluster_kwargs = {
+        "callbacks": [RichLoggerCallback()],
+    }
+
+    # Only set default packaging/dockerfile if the user didn't specify packaging via --packaging
+    # This allows tests to specify packaging="wheel" without building containers
+    packaging_arg = getattr(args, "packaging", None)
+    if packaging_arg is None:
+        # No --packaging argument provided, use container as default
+        cluster_kwargs["default_packaging"] = "container"
+        cluster_kwargs["default_packaging_dockerfile"] = (
+            "src/slurm/examples/map_reduce.Dockerfile"
+        )
+    elif packaging_arg == "container":
+        # Container packaging specified, but no Dockerfile set yet - set it
+        if not getattr(args, "packaging_dockerfile", None):
+            cluster_kwargs["default_packaging_dockerfile"] = (
+                "src/slurm/examples/map_reduce.Dockerfile"
+            )
+    # If --packaging was provided with another value (wheel, none), don't set defaults
+
+    cluster = Cluster.from_args(args, **cluster_kwargs)
 
     # Pattern dispatch
     patterns = {
