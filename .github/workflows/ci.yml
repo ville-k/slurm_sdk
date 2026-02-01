@@ -155,6 +155,11 @@ jobs:
             slurm-integration:latest \
             /sbin/init
 
+          # Pre-create cgroup directories for slurmd stepd scope
+          sleep 5
+          docker exec slurm-test mkdir -p /sys/fs/cgroup/system.slice/slurm-control_slurmstepd.scope/system || true
+          docker exec slurm-test chown -R slurm:slurm /sys/fs/cgroup/system.slice/slurm-control_slurmstepd.scope || true
+
       - name: Wait for Slurm services
         run: |
           echo "Waiting for containers to initialize..."
