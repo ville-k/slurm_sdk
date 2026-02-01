@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - How-to guide for hardening SSH connections in production
 - Bandit security scanning as dev dependency and CI workflow
 - GitHub Actions CI workflow for running unit tests on PRs and main branch pushes
+- Integration tests in CI with Docker-based Slurm cluster, gated by unit tests, lint, and security checks
 - Basic monitoring APIs for job status tracking
 - Mermaid diagrams throughout documentation for improved understanding:
   - Parallelization pattern diagrams (fan-out/fan-in, pipeline, sweep, dynamic dependencies)
