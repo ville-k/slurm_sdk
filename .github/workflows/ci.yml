@@ -207,12 +207,30 @@ jobs:
 
           echo ""
           echo "=== Verifying cluster with test job ==="
-          docker exec slurm-test su - slurm -c "sbatch --wrap='echo hello' --wait" || {
-            echo "Test job failed!"
+          # Submit a test job with a 30-second timeout
+          docker exec slurm-test su - slurm -c "timeout 30 sbatch --wrap='echo hello' --wait" || {
+            echo "Test job failed or timed out!"
+            echo ""
+            echo "=== squeue (pending jobs) ==="
+            docker exec slurm-test squeue -a || true
+            echo ""
+            echo "=== sacct (recent jobs) ==="
+            docker exec slurm-test sacct -a || true
+            echo ""
             echo "=== slurmd journal ==="
             docker exec slurm-test journalctl -u slurmd --no-pager -n 100 || true
+            echo ""
             echo "=== slurmctld journal ==="
             docker exec slurm-test journalctl -u slurmctld --no-pager -n 100 || true
+            echo ""
+            echo "=== /var/log/slurm contents ==="
+            docker exec slurm-test ls -la /var/log/slurm/ || true
+            echo ""
+            echo "=== slurmd log ==="
+            docker exec slurm-test cat /var/log/slurm/slurmd.log 2>/dev/null | tail -50 || true
+            echo ""
+            echo "=== slurmctld log ==="
+            docker exec slurm-test cat /var/log/slurm/slurmctld.log 2>/dev/null | tail -50 || true
             exit 1
           }
           echo "Test job succeeded!"
