@@ -161,7 +161,7 @@ jobs:
           sleep 10
 
           echo "=== Checking systemd services ==="
-          for service in munge sshd slurmctld slurmd; do
+          for service in munge sshd slurmctld; do
             echo -n "Waiting for $service..."
             for i in $(seq 1 120); do
               if docker exec slurm-test systemctl is-active $service >/dev/null 2>&1; then
@@ -170,14 +170,40 @@ jobs:
               fi
               if [ $i -eq 120 ]; then
                 echo " TIMEOUT"
-                echo "=== $service status ==="
                 docker exec slurm-test systemctl status $service || true
-                echo "=== $service journal ==="
-                docker exec slurm-test journalctl -u $service --no-pager -n 50 || true
               fi
               echo -n "."
               sleep 1
             done
+          done
+
+          # Check slurmd separately with verbose output
+          echo -n "Waiting for slurmd..."
+          for i in $(seq 1 30); do
+            if docker exec slurm-test systemctl is-active slurmd >/dev/null 2>&1; then
+              echo " ready"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo " TIMEOUT - trying manual start with debug output"
+              echo "=== slurmd status ==="
+              docker exec slurm-test systemctl status slurmd || true
+              echo ""
+              echo "=== Trying to run slurmd manually with verbose output ==="
+              docker exec slurm-test /usr/sbin/slurmd -D -vvv 2>&1 &
+              sleep 5
+              echo ""
+              echo "=== slurm.conf ==="
+              docker exec slurm-test cat /etc/slurm/slurm.conf || true
+              echo ""
+              echo "=== Checking if proctrack/linuxproc plugin exists ==="
+              docker exec slurm-test ls -la /usr/lib/slurm-wlm/ | grep proctrack || true
+              echo ""
+              echo "=== All available proctrack plugins ==="
+              docker exec slurm-test find /usr -name "*proctrack*" 2>/dev/null || true
+            fi
+            echo -n "."
+            sleep 1
           done
 
           echo ""
