@@ -160,19 +160,62 @@ jobs:
           echo "Waiting for containers to initialize..."
           sleep 10
 
-          echo "Waiting for SSH to be ready..."
-          for i in $(seq 1 120); do
-            if docker exec slurm-test systemctl is-active sshd >/dev/null 2>&1; then
-              echo "SSH is ready"
-              break
-            fi
-            echo -n "."
-            sleep 1
+          echo "=== Checking systemd services ==="
+          for service in munge sshd slurmctld slurmd; do
+            echo -n "Waiting for $service..."
+            for i in $(seq 1 120); do
+              if docker exec slurm-test systemctl is-active $service >/dev/null 2>&1; then
+                echo " ready"
+                break
+              fi
+              if [ $i -eq 120 ]; then
+                echo " TIMEOUT"
+                echo "=== $service status ==="
+                docker exec slurm-test systemctl status $service || true
+                echo "=== $service journal ==="
+                docker exec slurm-test journalctl -u $service --no-pager -n 50 || true
+              fi
+              echo -n "."
+              sleep 1
+            done
           done
 
           echo ""
-          echo "Container status:"
+          echo "=== Container status ==="
           docker ps -a
+
+          echo ""
+          echo "=== Slurm node state ==="
+          # Wait for node to be in IDLE state
+          echo -n "Waiting for node to be IDLE..."
+          for i in $(seq 1 60); do
+            state=$(docker exec slurm-test sinfo -h -o "%T" 2>/dev/null || echo "unknown")
+            if [ "$state" = "idle" ]; then
+              echo " ready (state: $state)"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo " TIMEOUT (state: $state)"
+              echo "=== sinfo output ==="
+              docker exec slurm-test sinfo || true
+              echo "=== scontrol show node ==="
+              docker exec slurm-test scontrol show node || true
+            fi
+            echo -n "."
+            sleep 2
+          done
+
+          echo ""
+          echo "=== Verifying cluster with test job ==="
+          docker exec slurm-test su - slurm -c "sbatch --wrap='echo hello' --wait" || {
+            echo "Test job failed!"
+            echo "=== slurmd journal ==="
+            docker exec slurm-test journalctl -u slurmd --no-pager -n 100 || true
+            echo "=== slurmctld journal ==="
+            docker exec slurm-test journalctl -u slurmctld --no-pager -n 100 || true
+            exit 1
+          }
+          echo "Test job succeeded!"
 
           # Enable oversubscription for workflow tests
           docker exec slurm-test scontrol update PartitionName=debug OverSubscribe=YES || true
