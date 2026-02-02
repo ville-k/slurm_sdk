@@ -123,6 +123,7 @@ RUN printf '\n# Test registry configuration\n[[registry]]\nlocation = "registry:
 
 # Copy Slurm configuration
 COPY slurm.conf /etc/slurm/slurm.conf
+COPY cgroup.conf /etc/slurm/cgroup.conf
 
 EXPOSE 22
 
