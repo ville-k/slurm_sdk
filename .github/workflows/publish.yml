@@ -1,0 +1,84 @@
+name: Publish to PyPI
+
+on:
+  # Manual trigger from GitHub UI or gh CLI
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version type to publish'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - release
+      dry_run:
+        description: 'Dry run (build only, no upload)'
+        required: false
+        default: false
+        type: boolean
+
+  # Auto-publish on GitHub release
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Build and Publish
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for PyPI trusted publishing
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Validate version for release
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.version_type == 'release')
+        run: |
+          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "Version in pyproject.toml: $VERSION"
+
+          if [[ "$VERSION" == *"-dev"* ]] || [[ "$VERSION" == *"-alpha"* ]] || [[ "$VERSION" == *"-beta"* ]]; then
+            echo "::error::Release version should not contain -dev, -alpha, or -beta suffix"
+            echo "::error::Current version: $VERSION"
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Validate version for dev
+        if: github.event_name == 'workflow_dispatch' && inputs.version_type == 'dev'
+        run: |
+          VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "Version in pyproject.toml: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Build package
+        run: |
+          uv build
+          echo "Built packages:"
+          ls -la dist/
+
+      - name: Check package contents
+        run: |
+          uv run python -m zipfile -l dist/*.whl | head -50
+          echo "..."
+          uv run python -m tarfile -l dist/*.tar.gz | head -50
+
+      - name: Publish to PyPI
+        if: ${{ !inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "::notice::Dry run completed - packages were built but not uploaded"
+          echo "Would have published:"
+          ls -la dist/
