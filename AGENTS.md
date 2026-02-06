@@ -118,11 +118,12 @@ Production releases require a clean version number and updated changelog:
    version = "0.4.5"  # was "0.4.5-dev"
    ```
 
-2. **Update changelog** in `docs/CHANGELOG.md`:
+1. **Update changelog** in `docs/CHANGELOG.md`:
+
    - Move entries from `## [Unreleased]` to new section `## [0.4.5] - YYYY-MM-DD`
    - Keep an empty `## [Unreleased]` section at the top
 
-3. **Commit, tag, and create GitHub release**:
+1. **Commit, tag, and create GitHub release**:
 
    ```bash
    git add pyproject.toml docs/CHANGELOG.md
@@ -134,7 +135,7 @@ Production releases require a clean version number and updated changelog:
 
    The GitHub release event automatically triggers PyPI publishing.
 
-4. **Prepare for next development cycle**:
+1. **Prepare for next development cycle**:
 
    ```bash
    # Update version to next dev version
