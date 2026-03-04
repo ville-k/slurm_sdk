@@ -622,6 +622,14 @@ class Job(Generic[T]):
                     f"Failed to load or deserialize local result from {local_result_path}: {e}"
                 ) from e
 
+    def get(self, timeout: Optional[float] = None) -> T:
+        """Return result using generalized invocation reference semantics."""
+        return self.get_result(timeout=timeout)
+
+    def scheduler_dependencies(self) -> list[str]:
+        """Return scheduler dependency identifiers for this job."""
+        return [self.id]
+
     def wait(self, timeout: Optional[float] = None, poll_interval: float = 5.0) -> bool:
         """Block until the job reaches a terminal state (completed, failed, cancelled, etc.).
 

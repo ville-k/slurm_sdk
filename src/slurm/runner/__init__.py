@@ -24,6 +24,7 @@ from slurm.runner.context_manager import (
     function_wants_workflow_context,
 )
 from slurm.runner.placeholder import (
+    register_placeholder_resolver,
     resolve_placeholder,
     resolve_task_arguments,
 )
@@ -67,6 +68,7 @@ __all__ = [
     "update_job_metadata",
     "resolve_placeholder",
     "resolve_task_arguments",
+    "register_placeholder_resolver",
     # Argument parsing and loading
     "RunnerArgs",
     "create_argument_parser",

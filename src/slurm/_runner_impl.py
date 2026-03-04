@@ -44,8 +44,6 @@ from slurm.runner.argument_loader import (
 from slurm.runner.callbacks import run_callbacks
 
 # Note: _function_wants_workflow_context and _bind_workflow_context are defined
-# locally in this file for backwards compatibility. The runner.context_manager
-# module also exports them.
 from slurm.runner.main import (
     execute_task,
     get_environment_snapshot,
@@ -54,109 +52,12 @@ from slurm.runner.main import (
     handle_workflow_context_injection,
     load_function,
 )
+from slurm.runner.context_manager import function_wants_workflow_context
 from slurm.runner.placeholder import resolve_placeholder
 from slurm.runner.result_saver import save_result, update_job_metadata
 from slurm.runner.workflow_builder import teardown_workflow_execution
 
 logger = logging.getLogger("slurm.runner")
-
-
-def _run_callbacks(callbacks: List[BaseCallback], method_name: str, *args, **kwargs):
-    """Helper function to run a specific method on a list of callbacks, catching errors."""
-    for callback in callbacks:
-        if hasattr(
-            callback, "should_run_on_runner"
-        ) and not callback.should_run_on_runner(method_name):
-            continue
-        try:
-            method = getattr(callback, method_name)
-            method(*args, **kwargs)
-        except Exception as e:
-            logger.warning(
-                f"Runner: Error executing callback {type(callback).__name__}.{method_name}: {e}"
-            )
-
-
-def _function_wants_workflow_context(func):
-    """Check if function expects a WorkflowContext parameter."""
-    import inspect
-
-    try:
-        sig = inspect.signature(func)
-        for param in sig.parameters.values():
-            # Check by annotation
-            annotation = param.annotation
-            if annotation != inspect.Parameter.empty:
-                if annotation is WorkflowContext:
-                    return True
-                # Check string annotations
-                if isinstance(annotation, str) and "WorkflowContext" in annotation:
-                    return True
-                # Check name attribute
-                if (
-                    hasattr(annotation, "__name__")
-                    and annotation.__name__ == "WorkflowContext"
-                ):
-                    return True
-            # Check by parameter name
-            if param.name in ("ctx", "context", "workflow_context"):
-                return True
-        return False
-    except Exception:
-        return False
-
-
-def _bind_workflow_context(func, args, kwargs, workflow_context):
-    """Inject workflow_context into function if it expects it.
-
-    Returns (args, kwargs, injected).
-    """
-    import inspect
-
-    try:
-        sig = inspect.signature(func)
-        params = list(sig.parameters.values())
-
-        # Find the parameter that wants WorkflowContext
-        target_param = None
-        for param in params:
-            annotation = param.annotation
-            # Check by annotation
-            if annotation != inspect.Parameter.empty:
-                if annotation is WorkflowContext:
-                    target_param = param
-                    break
-                if isinstance(annotation, str) and "WorkflowContext" in annotation:
-                    target_param = param
-                    break
-                if (
-                    hasattr(annotation, "__name__")
-                    and annotation.__name__ == "WorkflowContext"
-                ):
-                    target_param = param
-                    break
-            # Check by parameter name
-            if param.name in ("ctx", "context", "workflow_context"):
-                target_param = param
-                break
-
-        if target_param is None:
-            return args, kwargs, False
-
-        param_name = target_param.name
-
-        # If already provided, don't inject
-        if param_name in kwargs:
-            return args, kwargs, False
-
-        # Inject as keyword argument
-        new_kwargs = dict(kwargs)
-        new_kwargs[param_name] = workflow_context
-        return args, new_kwargs, True
-
-    except Exception as e:
-        logger.warning(f"Error binding workflow context: {e}")
-        return args, kwargs, False
 
 
 def _write_environment_metadata(
@@ -290,7 +191,7 @@ def main():
             task_args, task_kwargs = handle_job_context_injection(
                 func, task_args, task_kwargs, job_context, args.module, args.function
             )
-        elif _function_wants_workflow_context(func):
+        elif function_wants_workflow_context(func):
             # WorkflowContext injection - sets up cluster and context
             task_args, task_kwargs, workflow_setup_result = (
                 handle_workflow_context_injection(

@@ -9,6 +9,8 @@ Start here if you're new to the SDK:
 
 - [Getting Started: Hello World](getting_started_hello_world.md) - Submit your
   first Slurm job
+- [Write a Custom Task Decorator](custom-task-decorator.md) - Encapsulate
+  policy and middleware in reusable decorators
 - [Container Basics](container_basics_hello_container.md) - Package tasks in
   containers
 
@@ -30,6 +32,8 @@ Scale your workloads across nodes:
 
 Build complex multi-stage pipelines:
 
+- [Cache-Aware Decorators](cache-aware-decorators.md) - Compose idempotent replay
+  semantics without polluting task business code
 - [Workflow Graph Visualization](workflow_graph_visualization.md) - Track and
   visualize workflow structure
 - [Parallel Train + Eval Workflow](parallel-train-eval-workflow.md) - Production-

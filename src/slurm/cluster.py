@@ -42,6 +42,16 @@ from .errors import (
 logger = logging.getLogger(__name__)
 
 
+def _is_tasklike(value: Any) -> bool:
+    """Return True when object has required task submission surface."""
+    return (
+        hasattr(value, "func")
+        and callable(getattr(value, "func"))
+        and hasattr(value, "sbatch_options")
+        and hasattr(value, "packaging")
+    )
+
+
 class _JobStatusPoller(threading.Thread):
     """Background thread that emits JobStatusUpdated callbacks."""
 
@@ -260,8 +270,8 @@ class SubmittableWorkflow:
         )
 
         for task in self._dependent_tasks:
-            if not isinstance(task, SlurmTask):
-                logger.warning(f"Skipping non-SlurmTask dependency: {type(task)}")
+            if not _is_tasklike(task):
+                logger.warning(f"Skipping non task-like dependency: {type(task)}")
                 continue
 
             # Get the task's packaging config
@@ -1450,8 +1460,22 @@ class Cluster:
             else:
                 # For local backends, write directly
                 os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+                merged_metadata = dict(metadata)
+                if os.path.exists(metadata_path):
+                    try:
+                        with open(metadata_path, "r") as existing_file:
+                            existing_metadata = json.load(existing_file)
+                        if isinstance(existing_metadata, dict):
+                            merged_metadata = dict(existing_metadata)
+                            merged_metadata.update(metadata)
+                    except Exception as read_error:
+                        logger.debug(
+                            "[%s] Failed reading existing metadata.json for merge: %s",
+                            pre_submission_id,
+                            read_error,
+                        )
                 with open(metadata_path, "w") as f:
-                    json.dump(metadata, f, indent=2)
+                    json.dump(merged_metadata, f, indent=2)
         except Exception as exc:
             logger.warning(
                 "[%s] Failed to write metadata.json: %s", pre_submission_id, exc
@@ -1619,7 +1643,7 @@ class Cluster:
 
     def submit(
         self,
-        task_func: SlurmTask,
+        task_func: Any,
         packaging_config: Optional[Dict[str, Any]] = None,
         after: Optional[Union[Job, List[Job]]] = None,
         **sbatch_options: Any,
@@ -1743,10 +1767,11 @@ class Cluster:
                 dependency_str = "afterok:" + ":".join(job_ids)
                 normalized_overrides["dependency"] = dependency_str
 
-        if not isinstance(task_func, SlurmTask):
+        if not _is_tasklike(task_func):
             raise ValueError(
-                f"Expected SlurmTask instance, got {type(task_func).__name__}. "
-                f"Did you forget to use the @task decorator?"
+                "Expected task-like object with .func/.sbatch_options/.packaging, "
+                f"got {type(task_func).__name__}. "
+                "Did you forget to use the @task decorator?"
             )
 
         func_to_render = task_func.func
@@ -2056,9 +2081,11 @@ class Cluster:
             ...     job = my_task("arg")  # Automatically submits
             ...     result = job.get_result()
         """
-        from .context import _set_active_context
+        from .context import _set_active_context, _set_active_runtime
+        from .core.runtime import ClusterRuntime
 
         self._context_token = _set_active_context(self)
+        self._runtime_token = _set_active_runtime(ClusterRuntime())
         return self
 
     def __exit__(self, *args) -> bool:
@@ -2071,11 +2098,14 @@ class Cluster:
         Returns:
             False to propagate any exception that occurred.
         """
-        from .context import _reset_active_context
+        from .context import _reset_active_context, _reset_active_runtime
 
         if hasattr(self, "_context_token"):
             _reset_active_context(self._context_token)
             delattr(self, "_context_token")
+        if hasattr(self, "_runtime_token"):
+            _reset_active_runtime(self._runtime_token)
+            delattr(self, "_runtime_token")
         return False
 
     def diagnose(self) -> Dict[str, Any]:

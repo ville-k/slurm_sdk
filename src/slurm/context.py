@@ -10,7 +10,7 @@ to indicate they are not part of the public API.
 """
 
 import contextvars
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from .cluster import Cluster
@@ -22,6 +22,12 @@ if TYPE_CHECKING:
 _cluster_context: contextvars.ContextVar[
     Optional[Union["Cluster", "WorkflowContext"]]
 ] = contextvars.ContextVar("cluster_context", default=None)
+
+# Context variable for active invocation runtime
+_invocation_runtime: contextvars.ContextVar[Optional[Any]] = contextvars.ContextVar(
+    "invocation_runtime",
+    default=None,
+)
 
 
 def _get_active_context() -> Optional[Union["Cluster", "WorkflowContext"]]:
@@ -69,3 +75,19 @@ def _clear_active_context() -> None:
     This is primarily useful for testing to ensure a clean state.
     """
     _cluster_context.set(None)
+    _invocation_runtime.set(None)
+
+
+def _get_active_runtime() -> Optional[Any]:
+    """Get active invocation runtime, if one is bound in context."""
+    return _invocation_runtime.get()
+
+
+def _set_active_runtime(runtime: Optional[Any]) -> contextvars.Token:
+    """Set active invocation runtime and return token for reset."""
+    return _invocation_runtime.set(runtime)
+
+
+def _reset_active_runtime(token: contextvars.Token) -> None:
+    """Reset active invocation runtime using token."""
+    _invocation_runtime.reset(token)

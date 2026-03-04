@@ -263,7 +263,11 @@ def test_after_raises_on_non_job_argument():
     import pytest
 
     with pytest.raises(
-        TypeError, match=".after\\(\\) expects Job or ArrayJob arguments"
+        TypeError,
+        match=(
+            ".after\\(\\) expects Job, ArrayJob, or a dependency reference "
+            "implementing scheduler_dependencies\\(\\)"
+        ),
     ):
         task_a.after("not_a_job")
 

@@ -156,6 +156,29 @@ def test_parallel_train_eval_workflow_example(
     assert "Workflow complete. State file:" in output
 
 
+def test_cached_pipeline_workflow_example(
+    slurm_pyxis_cluster_config, sdk_on_pyxis_cluster
+):
+    """Test cache-aware custom decorator workflow example with wheel packaging."""
+    result = _run_example(
+        "slurm.examples.cached_pipeline.workflow",
+        slurm_pyxis_cluster_config,
+        packaging="wheel",
+        extra_args=[
+            "--dataset",
+            "tiny-imagenet",
+            "--epoch",
+            "3",
+            "--scale",
+            "2",
+        ],
+        timeout=600,
+    )
+    output = result.stdout + result.stderr
+    assert "Workflow complete. Cache state file:" in output
+    assert "Replay cache hit: True" in output
+
+
 # ============================================================================
 # Container Packaging Smoke Tests (validates container integration)
 # ============================================================================

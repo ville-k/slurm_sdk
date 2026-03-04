@@ -12,6 +12,22 @@ except Exception:
     __version__ = "unknown"
 
 from .cluster import Cluster
+from .core import (
+    DependencyRef,
+    InvocationRef,
+    InvocationRuntime,
+    JobRef,
+    LoggingMiddleware,
+    RefPlaceholder,
+    TaskHandle,
+    TaskLike,
+    TaskMiddleware,
+    TaskSpec,
+    WorkflowHandle,
+    WorkflowLike,
+    task_decorator,
+    workflow_decorator,
+)
 from .decorators import task, workflow
 from .job import Job
 from .task import SlurmTask
@@ -43,6 +59,20 @@ __all__ = [
     "ArrayJob",
     "Cluster",
     "SlurmTask",
+    "TaskHandle",
+    "WorkflowHandle",
+    "TaskLike",
+    "WorkflowLike",
+    "InvocationRef",
+    "DependencyRef",
+    "InvocationRuntime",
+    "TaskSpec",
+    "TaskMiddleware",
+    "LoggingMiddleware",
+    "JobRef",
+    "RefPlaceholder",
+    "task_decorator",
+    "workflow_decorator",
     "JobContext",
     "WorkflowContext",
     # Callbacks

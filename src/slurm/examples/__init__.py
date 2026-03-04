@@ -7,6 +7,7 @@ User-Facing Examples:
     - hello_world.py: Basic task submission example
     - hello_container.py: Container-based task example
     - hello_torch.py: PyTorch-based task example
+    - cached_pipeline/: Cache-aware custom task/workflow decorators
     - map_reduce.py: Array jobs with map/reduce patterns
     - parallelization_patterns.py: Various parallelization strategies
     - workflow_graph_visualization.py: Workflow dependency visualization

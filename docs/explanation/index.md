@@ -9,5 +9,6 @@ Understanding-oriented documentation that explains how Slurm SDK is structured u
 - [Slurm Concepts](slurm_concepts.md) - Key Slurm concepts for newcomers
 - [Container Packaging](container_packaging.md) - How container images are built and deployed
 - [Workflow Execution](workflow_execution.md) - How workflows are scheduled and run
+- [Cache-Aware Decorators](cache-aware-decorators.md) - Why replay semantics fit runtime/decorator composition
 - [Rendering and Runner](rendering_and_runner.md) - Script generation and job execution
 - [Callbacks and Events](callbacks_and_events.md) - Lifecycle hooks and observability

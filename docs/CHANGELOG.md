@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Generalized task/workflow API primitives under `slurm.core`, including:
+  - Protocols: `TaskLike`, `WorkflowLike`, `InvocationRef`, `DependencyRef`,
+    `InvocationRuntime`
+  - Handles: `TaskHandle`, `WorkflowHandle`, and immutable `TaskSpec`
+  - Authoring helpers: `task_decorator(...)`, `workflow_decorator(...)`
+  - Middleware contracts and default runtimes for context-driven invocation
+- Reference placeholder extensibility with `RefPlaceholder` and resolver
+  registration hooks in the runner.
+- Example-scoped fluent high-availability extension APIs:
+  `ha_task`, `ha_workflow`, `ha_runtime`, and `ResultRef`.
+- New docs for custom decorator authoring, runtime/middleware contracts, and
+  generalized API migration.
+- New cache-aware custom decorator example (`slurm.examples.cached_pipeline`)
+  with tutorial, explanation doc, and end-to-end integration coverage.
+
+### Changed
+
+- `@task` and `@workflow` now produce generalized handle types that preserve
+  fluent clone semantics while remaining compatible with existing submit flows.
+- Task invocation now routes through context-bound runtimes in cluster and
+  workflow execution contexts.
+- `Cluster.submit(...)` now accepts protocol-compatible task-like wrappers
+  instead of requiring a concrete `SlurmTask` instance.
+
+### Fixed
+
+- Placeholder result resolution now handles generalized references and local
+  synchronous backend metadata layouts more robustly.
+- Metadata writing now preserves existing runner-produced metadata when local
+  synchronous backends complete before client-side metadata write.
+
 ## [0.4.5] - 2026-02-05
 
 ### Added

@@ -444,6 +444,7 @@ class WorkflowSetupResult:
     workflow_context: Any
     parent_packaging_type: str
     context_token: Any
+    runtime_token: Any = None
 
 
 def setup_workflow_execution(
@@ -482,12 +483,17 @@ def setup_workflow_execution(
 
     # Activate context
     context_token = activate_workflow_context(workflow_context)
+    from slurm.context import _set_active_runtime
+    from slurm.core.runtime import WorkflowRuntime
+
+    runtime_token = _set_active_runtime(WorkflowRuntime())
 
     return WorkflowSetupResult(
         cluster=cluster,
         workflow_context=workflow_context,
         parent_packaging_type=final_packaging_type,
         context_token=context_token,
+        runtime_token=runtime_token,
     )
 
 
@@ -553,13 +559,13 @@ def cleanup_cluster_connections(
         logger.warning(f"Error cleaning up cluster backend: {e}")
 
 
-def deactivate_workflow_context(context_token: Any) -> None:
+def deactivate_workflow_context(context_token: Any, runtime_token: Any = None) -> None:
     """Deactivate the workflow context.
 
     Args:
         context_token: The token returned from activate_workflow_context.
     """
-    from slurm.context import _reset_active_context
+    from slurm.context import _reset_active_context, _reset_active_runtime
 
     if context_token is not None:
         try:
@@ -567,6 +573,12 @@ def deactivate_workflow_context(context_token: Any) -> None:
             logger.debug("Workflow context deactivated")
         except Exception as e:
             logger.debug(f"Error deactivating workflow context: {e}")
+    if runtime_token is not None:
+        try:
+            _reset_active_runtime(runtime_token)
+            logger.debug("Workflow runtime deactivated")
+        except Exception as e:
+            logger.debug(f"Error deactivating workflow runtime: {e}")
 
 
 def teardown_workflow_execution(
@@ -582,7 +594,7 @@ def teardown_workflow_execution(
         connection_timeout: Timeout for closing SSH connections.
     """
     # Deactivate context first
-    deactivate_workflow_context(setup_result.context_token)
+    deactivate_workflow_context(setup_result.context_token, setup_result.runtime_token)
 
     # Clean up SSH connections
     cleanup_cluster_connections(setup_result.cluster, timeout=connection_timeout)

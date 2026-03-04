@@ -15,7 +15,8 @@ try:
 except ImportError:
     from typing_extensions import ParamSpec
 
-from .task import SlurmTask, normalize_sbatch_options
+from .core.handles import TaskHandle, WorkflowHandle
+from .task import normalize_sbatch_options
 
 # Type variables for generic signatures
 P = ParamSpec("P")  # For parameter types
@@ -46,7 +47,7 @@ def workflow(
     *,
     time: str = "01:00:00",
     **sbatch_kwargs: Any,
-) -> Union[SlurmTask, Callable[[Callable[..., Any]], SlurmTask]]:
+) -> Union[WorkflowHandle, Callable[[Callable[..., Any]], WorkflowHandle]]:
     """Decorator for workflow orchestrator tasks.
 
     Workflows are special tasks that can submit other tasks. They automatically
@@ -89,11 +90,18 @@ def workflow(
     """
 
     # Use the @task decorator with workflow-specific settings
-    def decorator(inner: Callable[..., Any]) -> SlurmTask:
+    def decorator(inner: Callable[..., Any]) -> WorkflowHandle:
         task_instance = task(inner, time=time, **sbatch_kwargs)
-        # Mark this task as a workflow
-        task_instance._is_workflow = True
-        return task_instance
+        return WorkflowHandle(
+            func=task_instance.func,
+            sbatch_options=task_instance.sbatch_options.copy(),
+            packaging=task_instance.packaging.copy()
+            if task_instance.packaging
+            else None,
+            middleware=getattr(task_instance, "middleware", tuple()),
+            flags={"is_workflow": True},
+            **task_instance.slurm_options,
+        )
 
     if callable(func):
         return decorator(func)
@@ -122,7 +130,7 @@ def task(
     *,
     packaging: str = "auto",
     **sbatch_kwargs: Any,
-) -> Union[SlurmTask, Callable[[Callable[..., Any]], SlurmTask]]:
+) -> Union[TaskHandle, Callable[[Callable[..., Any]], TaskHandle]]:
     """Decorator for defining a Python function as a Slurm task.
 
     This decorator wraps your function in a SlurmTask object, capturing SBATCH
@@ -264,11 +272,11 @@ def task(
     # Build packaging configuration dict from string + kwargs
     effective_packaging = _parse_packaging_config(packaging, packaging_kwargs)
 
-    def decorator(inner: Callable[..., Any]) -> SlurmTask:
+    def decorator(inner: Callable[..., Any]) -> TaskHandle:
         effective_options = dict(normalized_kwargs)
         if not effective_options.get("job_name"):
             effective_options["job_name"] = inner.__name__
-        return SlurmTask(
+        return TaskHandle(
             inner,
             effective_options,
             effective_packaging,

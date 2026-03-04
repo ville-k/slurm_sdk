@@ -6,6 +6,7 @@ These pages are generated directly from the source using mkdocstrings. They trac
 
 - [Cluster](cluster.md)
 - [Tasks and Workflows](tasks_workflows.md)
+- [Runtime and Middleware](runtime_middleware.md)
 - [Jobs and Arrays](jobs_arrays.md)
 - [Callbacks](callbacks.md)
 - [Packaging (Container)](packaging_container.md)

@@ -305,3 +305,14 @@ cat /path/from/output/metrics/epoch_000.json
   multiple jobs.
 - How to launch evaluation in parallel without blocking training.
 - How to use `WorkflowContext.shared_dir` to keep all artifacts in one place.
+
+## Extension variant: HA decorators and runtime
+
+The high-availability example now uses extension-scoped decorators and runtime
+composition (`ha_task`, `ha_workflow`, `ha_runtime`) instead of SDK-internal
+train/eval-specific hooks:
+
+- `src/slurm/examples/high_availability_training/ha/fluent.py`
+- `src/slurm/examples/high_availability_training/train_task.py`
+- `src/slurm/examples/high_availability_training/eval_task.py`
+- `src/slurm/examples/high_availability_training/workflow.py`
