@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- How-to guide for creating custom task and workflow decorators using existing
+  `@task`, `@workflow`, and `with_options()` APIs
+
 ## [0.4.5] - 2026-02-05
 
 ### Added
