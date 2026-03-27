@@ -23,6 +23,7 @@ nav:
       - Parallelization Patterns: how-to/parallelization_patterns.md
       - GPU Hello Torch: how-to/hello_torch.md
       - SSH Security: how-to/ssh_security.md
+      - Custom Task Decorators: how-to/custom-task-decorators.md
   - Reference:
       - reference/index.md
       - CLI Reference: reference/cli.md
