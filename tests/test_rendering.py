@@ -126,6 +126,49 @@ def test_render_job_script_handles_arbitrary_directives(tmp_path):
     assert "#SBATCH --reservation=debug" in script
 
 
+def test_render_job_script_quotes_job_name(tmp_path):
+    """Job names should be quoted in SBATCH directives."""
+    script = render_job_script(
+        task_func=sample_func,
+        task_args=(),
+        task_kwargs={},
+        task_definition={
+            "job_name": "my/job:v2",
+            "time": "00:01:00",
+        },
+        sbatch_overrides={},
+        packaging_strategy=DummyStrategy({}),
+        target_job_dir=str(tmp_path),
+        pre_submission_id="quote123",
+        callbacks=[BaseCallback()],
+    )
+
+    assert "#SBATCH --job-name=" in script
+    # shlex.quote wraps names containing special chars
+    assert "my/job:v2" in script
+
+
+def test_render_job_script_rejects_invalid_job_name(tmp_path):
+    """Job names with disallowed characters should raise ValueError."""
+    import pytest
+
+    with pytest.raises(ValueError, match="invalid characters"):
+        render_job_script(
+            task_func=sample_func,
+            task_args=(),
+            task_kwargs={},
+            task_definition={
+                "job_name": "bad name with spaces",
+                "time": "00:01:00",
+            },
+            sbatch_overrides={},
+            packaging_strategy=DummyStrategy({}),
+            target_job_dir=str(tmp_path),
+            pre_submission_id="bad123",
+            callbacks=[BaseCallback()],
+        )
+
+
 def test_render_container_job_with_uv_run_python(tmp_path):
     """Test that container packaging with 'uv run python' renders correctly."""
     from slurm.packaging.container import ContainerPackagingStrategy

@@ -79,10 +79,11 @@ class SSHCommandBackend(BackendBase):
             gss_host: The target name for GSS-API authentication.
             disabled_algorithms: Dictionary of disabled algorithms by type.
             job_base_dir: The base directory for job-related files.
-            host_key_policy: Policy for handling unknown SSH host keys:
-                - "auto": Automatically accept and save unknown keys (less secure)
-                - "warn": Log a warning but accept unknown keys (default)
-                - "reject": Reject connections to unknown hosts (most secure)
+            host_key_policy: Policy for handling unknown SSH host keys.
+                Defaults to "reject" which requires the host to be in
+                known_hosts. Use "warn" to accept unknown keys with a
+                logged warning, or "auto" to silently accept and save
+                unknown keys (least secure).
         """
         self.hostname = hostname
         self.username = username

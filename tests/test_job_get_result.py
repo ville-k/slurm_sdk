@@ -1,5 +1,7 @@
+import os
 import pickle
 import pytest
+from unittest.mock import patch
 from slurm.job import Job
 from slurm.rendering import RESULT_FILENAME
 from slurm.errors import DownloadError
@@ -16,6 +18,16 @@ class FakeSSHBackend:
         # Simulate remote file existing by copying from a known local path
         with open(remote_path, "rb") as src, open(local_path, "wb") as dst:
             dst.write(src.read())
+
+
+class FailingSSHBackend:
+    """Backend that raises on download_file to test cleanup."""
+
+    def get_job_status(self, job_id: str):
+        return {"JobState": "COMPLETED", "ExitCode": "0:0"}
+
+    def download_file(self, remote_path: str, local_path: str):
+        raise OSError("Simulated SSH download failure")
 
 
 class DummyCluster:
@@ -82,3 +94,37 @@ def test_job_get_result_failure_after_wait_reports_failure(monkeypatch, tmp_path
     assert "did not succeed" in message
     assert "within timeout" not in message
     assert "child stderr" in message
+
+
+def test_get_result_ssh_cleans_up_temp_file_on_download_failure(tmp_path):
+    """Temp file must be removed even when SSH download raises."""
+    backend = FailingSSHBackend()
+    cluster = DummyCluster(backend)
+    job = Job(
+        id="42",
+        cluster=cluster,
+        target_job_dir=str(tmp_path),
+        pre_submission_id="cleanup_test",
+    )
+
+    created_paths = []
+    original_ntf = __import__("tempfile").NamedTemporaryFile
+
+    def tracking_ntf(**kwargs):
+        tf = original_ntf(**kwargs)
+        created_paths.append(tf.name)
+        return tf
+
+    # Patch isinstance so FailingSSHBackend is treated as SSHCommandBackend,
+    # and track temp files created during the download attempt.
+    with (
+        patch("slurm.job.SSHCommandBackend", new=FailingSSHBackend),
+        patch("tempfile.NamedTemporaryFile", side_effect=tracking_ntf),
+    ):
+        with pytest.raises(DownloadError):
+            job.get_result()
+
+    # The finally block should have cleaned up all temp files
+    assert created_paths, "Expected a temp file to be created"
+    for path in created_paths:
+        assert not os.path.exists(path), f"Temp file was not cleaned up: {path}"
