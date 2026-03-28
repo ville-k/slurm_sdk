@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file operations and explicit resource cleanup
 - Pickle version headers for cross-version mismatch detection; result files now
   include Python version and SDK version metadata, with clear warnings on mismatch
+- SSH lazy reconnection on transport errors (automatic retry once) and explicit
+  `cluster.reconnect()` for long-lived sessions (e.g. Jupyter notebooks)
+- `reconnect()` method on `BackendBase` interface (no-op for local backend)
 
 ### Changed
 

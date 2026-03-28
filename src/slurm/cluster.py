@@ -1222,6 +1222,21 @@ class Cluster:
             self.backend.close()
         return False
 
+    def reconnect(self) -> None:
+        """Re-establish the backend connection.
+
+        Useful for recovering from stale SSH connections in long-lived
+        sessions (e.g. Jupyter notebooks after laptop sleep). For local
+        backends this is a no-op.
+
+        Example:
+            >>> cluster = Cluster.from_env("production")
+            >>> # ... some time passes, laptop sleeps ...
+            >>> cluster.reconnect()  # re-establish SSH
+            >>> job = cluster.submit(my_task)(args)
+        """
+        self.backend.reconnect()
+
     # -------------------------------------------------------------------
     # Diagnostics
     # -------------------------------------------------------------------

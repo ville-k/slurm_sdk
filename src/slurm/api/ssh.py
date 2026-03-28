@@ -900,6 +900,14 @@ class SSHCommandBackend(BackendBase):
                 )
             ) from e
 
+    # Transport-level errors that are safe to retry after reconnecting.
+    # Auth and host-key errors indicate configuration problems, not stale connections.
+    _RETRYABLE_ERRORS = (paramiko.SSHException, socket.error, EOFError, OSError)
+    _NON_RETRYABLE_ERRORS = (
+        paramiko.AuthenticationException,
+        paramiko.BadHostKeyException,
+    )
+
     def close(self) -> None:
         """Close SSH and SFTP connections and clean up remote resources."""
         if hasattr(self, "remote_temp_dir"):
@@ -912,11 +920,35 @@ class SSHCommandBackend(BackendBase):
                 self.sftp.close()
             except Exception as e:
                 logger.debug(f"Error closing SFTP connection: {e}")
+            self.sftp = None
         if hasattr(self, "client") and self.client:
             try:
                 self.client.close()
             except Exception as e:
                 logger.debug(f"Error closing SSH connection: {e}")
+            self.client = None
+
+    def reconnect(self) -> None:
+        """Close and re-establish the SSH connection.
+
+        Useful for recovering from stale connections in long-lived sessions
+        (e.g. Jupyter notebooks after laptop sleep).
+        """
+        logger.info("Reconnecting SSH session to %s", self.hostname)
+        # Close without cleaning remote_temp_dir (it may still be valid)
+        if hasattr(self, "sftp") and self.sftp:
+            try:
+                self.sftp.close()
+            except Exception:
+                pass
+            self.sftp = None
+        if hasattr(self, "client") and self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+            self.client = None
+        self._connect()
 
     def __del__(self):
         """Clean up resources when the object is destroyed."""
@@ -966,12 +998,25 @@ class SSHCommandBackend(BackendBase):
         """
         Execute a command on the remote host.
 
+        If the connection is stale, automatically reconnects and retries once.
+
         Args:
             command: The command to execute
 
         Returns:
             The command output
         """
+        try:
+            return self._execute_command_inner(command)
+        except self._NON_RETRYABLE_ERRORS:
+            raise
+        except self._RETRYABLE_ERRORS as e:
+            logger.warning("SSH transport error, reconnecting: %s", e)
+            self.reconnect()
+            return self._execute_command_inner(command)
+
+    def _execute_command_inner(self, command: str) -> str:
+        """Execute a command without retry logic."""
         if not self.client:
             self._connect()
 
@@ -997,12 +1042,24 @@ class SSHCommandBackend(BackendBase):
         """
         Download a file from the remote host.
 
+        If the connection is stale, automatically reconnects and retries once.
+
         Args:
             remote_path: The path to the remote file.
             local_path: The path to the local file.
         """
         try:
-            # Ensure local directory exists
+            self._download_file_inner(remote_path, local_path)
+        except self._NON_RETRYABLE_ERRORS:
+            raise
+        except self._RETRYABLE_ERRORS as e:
+            logger.warning("SSH transport error during download, reconnecting: %s", e)
+            self.reconnect()
+            self._download_file_inner(remote_path, local_path)
+
+    def _download_file_inner(self, remote_path, local_path):
+        """Download without retry logic."""
+        try:
             local_dir = os.path.dirname(local_path)
             if local_dir:
                 os.makedirs(local_dir, exist_ok=True)
@@ -1012,25 +1069,31 @@ class SSHCommandBackend(BackendBase):
             sftp.get(remote_path, local_path)
             logger.debug("Successfully downloaded %s to %s", remote_path, local_path)
         except Exception as e:
-            # More specific error handling (e.g., file not found)
             logger.error(
                 "Error downloading file %s to %s: %s", remote_path, local_path, e
             )
-            # Re-raise the specific exception type if possible, or a generic runtime error
             if isinstance(e, FileNotFoundError) or (
                 hasattr(e, "errno") and e.errno == 2
-            ):  # paramiko might raise IOError with errno 2
+            ):
                 raise FileNotFoundError(f"Remote file not found: {remote_path}") from e
             raise RuntimeError(f"Failed to download file: {e}") from e
 
     def _get_sftp_client(self):
-        """Helper to get an SFTP client."""
+        """Helper to get an SFTP client, reconnecting if needed."""
         if not self.client:
-            self._connect()  # Ensure connection is active
+            self._connect()
         if not self.client:
             raise RuntimeError("SSH client not connected.")
 
         try:
+            return self.client.open_sftp()
+        except self._NON_RETRYABLE_ERRORS:
+            raise
+        except self._RETRYABLE_ERRORS as e:
+            logger.warning("SFTP session failed, reconnecting: %s", e)
+            self.reconnect()
+            if not self.client:
+                raise RuntimeError("SSH client not connected after reconnect.") from e
             return self.client.open_sftp()
         except Exception as e:
             logger.error(f"Failed to open SFTP session: {e}")
