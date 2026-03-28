@@ -391,6 +391,8 @@ def create_job_object(
         sbatch_options=dict(effective_sbatch_options),
         stdout_path=stdout_path,
         stderr_path=stderr_path,
+        backend=cluster.backend,
+        on_completed=cluster._emit_completed_context,
     )
 
 

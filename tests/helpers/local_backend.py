@@ -10,6 +10,8 @@ from slurm.errors import BackendCommandError
 class LocalBackend:
     """A minimal local backend suitable for tests."""
 
+    hostname = "localhost"
+
     def __init__(self, job_base_dir: str = None):
         self.job_base_dir = job_base_dir or os.path.join(
             tempfile.gettempdir(), "slurm_jobs"
@@ -123,6 +125,12 @@ class LocalBackend:
                 }
             ]
         }
+
+    def download_file(self, remote_path: str, local_path: str) -> None:
+        """Copy a file locally (no network transfer for test backend)."""
+        import shutil
+
+        shutil.copy2(remote_path, local_path)
 
     def write_file(self, file_path: str, content: str) -> None:
         """Write string content to a local file."""

@@ -17,6 +17,9 @@ class BackendBase(abc.ABC):
     Concrete implementations include REST API, local command-line, and SSH-based backends.
     """
 
+    hostname: str = "localhost"
+    """Hostname of the target system. SSH backends override via instance attribute."""
+
     @abc.abstractmethod
     def submit_job(
         self,
@@ -174,6 +177,27 @@ class BackendBase(abc.ABC):
                   False if backend is local (direct file access).
         """
         pass
+
+    def download_file(self, remote_path: str, local_path: str) -> None:
+        """Download/copy a file from the target system to a local path.
+
+        For remote backends (SSH), this transfers the file over the network.
+        For local backends, this copies the file locally.
+
+        The default implementation performs a local file copy, suitable for
+        backends where the filesystem is directly accessible.
+
+        Args:
+            remote_path: Absolute path to the source file on the target system.
+            local_path: Absolute path to the destination file on the local system.
+
+        Raises:
+            FileNotFoundError: If the source file does not exist.
+            RuntimeError: If the copy/download fails.
+        """
+        import shutil
+
+        shutil.copy2(remote_path, local_path)
 
     def write_file(self, file_path: str, content: str) -> None:
         """Write string content to a file on the target system.

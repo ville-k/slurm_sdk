@@ -5,10 +5,7 @@ import time
 import os
 import threading
 
-from typing import Optional, Any, Dict, TYPE_CHECKING, TypeVar, Generic
-
-# Import backend types needed for isinstance checks
-from .api.ssh import SSHCommandBackend
+from typing import Optional, Any, Callable, Dict, TYPE_CHECKING, TypeVar, Generic
 
 # Use TYPE_CHECKING to avoid circular imports
 if TYPE_CHECKING:
@@ -109,13 +106,17 @@ class Job(Generic[T]):
         sbatch_options: Optional[Dict[str, Any]] = None,
         stdout_path: Optional[str] = None,
         stderr_path: Optional[str] = None,
+        *,
+        backend: Any = None,
+        on_completed: Optional[Callable] = None,
     ):
         """
         Initialize a Job object.
 
         Args:
             id: The Slurm job ID
-            cluster: The cluster the job is running on
+            cluster: The cluster the job is running on. Kept for backward
+                compatibility; prefer passing ``backend`` directly.
             task_func: The task function that was submitted
             args: The positional arguments passed to the task function
             kwargs: The keyword arguments passed to the task function
@@ -124,9 +125,13 @@ class Job(Generic[T]):
             sbatch_options: The SBATCH options used for this job's submission.
             stdout_path: Scheduler stdout path for this job, if known.
             stderr_path: Scheduler stderr path for this job, if known.
+            backend: The backend instance for communicating with the cluster.
+                Takes precedence over ``cluster.backend`` if both are provided.
+            on_completed: Optional callback invoked when the job reaches a terminal
+                state. Signature: ``(job, status, timestamp) -> None``.
 
         Raises:
-            ValueError: If id is not a non-empty string or if cluster is None.
+            ValueError: If id is not a non-empty string or if neither backend nor cluster is provided.
         """
         if not id or not isinstance(id, str) or not id.strip():
             raise ValueError(
@@ -135,12 +140,17 @@ class Job(Generic[T]):
 
         self.id = id
         logger.debug("[%s] Initializing Job", self.id)
-        if cluster is None:
-            raise ValueError(
-                "Cluster instance is required. The global cluster pattern has been removed. "
-                "Pass the cluster explicitly or use the Job returned from cluster.submit()."
-            )
-        self.cluster = cluster
+
+        # Resolve backend: prefer explicit, fall back to cluster.backend
+        if backend is not None:
+            self.backend = backend
+        elif cluster is not None:
+            self.backend = cluster.backend
+        else:
+            raise ValueError("Either 'backend' or 'cluster' must be provided.")
+
+        self._on_completed = on_completed
+        self.cluster = cluster  # backward compat
         self.task_func = task_func
         self.args = args
         self.kwargs = kwargs or {}
@@ -233,15 +243,16 @@ class Job(Generic[T]):
                 return self._status_cache
 
         try:
-            status = self.cluster.backend.get_job_status(self.id)
+            status = self.backend.get_job_status(self.id)
             timestamp = time.time()
             self._update_status_cache(status, timestamp)
 
-            if status.get("JobState") in self.TERMINAL_STATES and hasattr(
-                self.cluster, "_emit_completed_context"
+            if (
+                status.get("JobState") in self.TERMINAL_STATES
+                and self._on_completed is not None
             ):
                 try:
-                    self.cluster._emit_completed_context(self, status, timestamp)
+                    self._on_completed(self, status, timestamp)
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.debug(
                         "Error emitting completed context for job %s: %s",
@@ -499,7 +510,7 @@ class Job(Generic[T]):
                 "Ensure the job completed successfully before calling get_result()."
             ) from e
 
-        if isinstance(self.cluster.backend, SSHCommandBackend):
+        if self.backend.is_remote():
             import tempfile
 
             with tempfile.NamedTemporaryFile(delete=False) as temp_file:
@@ -512,7 +523,7 @@ class Job(Generic[T]):
                     result_file_path,
                     local_temp_path,
                 )
-                self.cluster.backend.download_file(result_file_path, local_temp_path)
+                self.backend.download_file(result_file_path, local_temp_path)
 
                 from ._serialization import read_pickled
 
@@ -570,7 +581,7 @@ class Job(Generic[T]):
                     "  3. Check file size: ssh {hostname} du -h {result_file}\n"
                     "  4. Check Python versions match between local and cluster\n"
                     "  5. Review job output logs for errors: {job_dir}/*.out".format(
-                        hostname=getattr(self.cluster.backend, "hostname", "cluster"),
+                        hostname=getattr(self.backend, "hostname", "cluster"),
                         result_file=result_file_path,
                         job_dir=self.target_job_dir
                         if self.target_job_dir
@@ -708,7 +719,7 @@ class Job(Generic[T]):
             ...     job.cancel()
         """
         try:
-            return self.cluster.backend.cancel_job(self.id)
+            return self.backend.cancel_job(self.id)
         except Exception as e:
             logger.error("Error cancelling job: %s", e)
             return False
@@ -832,7 +843,7 @@ class Job(Generic[T]):
         Raises:
             FileNotFoundError: If the file doesn't exist.
         """
-        if isinstance(self.cluster.backend, SSHCommandBackend):
+        if self.backend.is_remote():
             import tempfile
 
             with tempfile.NamedTemporaryFile(
@@ -848,7 +859,7 @@ class Job(Generic[T]):
                     remote_path,
                     local_temp_path,
                 )
-                self.cluster.backend.download_file(remote_path, local_temp_path)
+                self.backend.download_file(remote_path, local_temp_path)
 
                 with open(local_temp_path, "r") as f:
                     return f.read()
