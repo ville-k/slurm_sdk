@@ -39,8 +39,9 @@ class JobContext:
     master_port: int = _DEFAULT_MASTER_PORT
     environment: Dict[str, str] = field(default_factory=dict)
     created_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
-        + "Z"
+        default_factory=lambda: (
+            datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z"
+        )
     )
     output_dir: Optional[Path] = None
 
