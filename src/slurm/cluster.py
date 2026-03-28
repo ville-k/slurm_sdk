@@ -3,7 +3,10 @@ This module provides the Cluster class for submitting and managing jobs on SLURM
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Tuple, Union
+from typing import Any, Dict, List, Optional, Callable, Tuple, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .api.base import BackendBase
 import argparse
 import sys
 import traceback
@@ -106,10 +109,11 @@ class _JobStatusPoller(threading.Thread):
                     try:
                         callback.on_job_status_update_ctx(ctx)
                     except Exception as exc:  # pragma: no cover - callback errors
-                        logger.debug(
+                        logger.warning(
                             "Callback %s failed during polling: %s",
                             type(callback).__name__,
                             exc,
+                            exc_info=True,
                         )
                     self._last_emit[callback] = timestamp
 
@@ -459,6 +463,50 @@ class Cluster:
         self._backend_kwargs = dict(backend_only_kwargs)
         self.backend = create_backend(backend_type, **backend_only_kwargs)
         self._job_pollers: Dict[str, _JobStatusPoller] = {}
+        self._job_pollers_lock = threading.Lock()
+
+    @classmethod
+    def from_backend(
+        cls,
+        backend: "BackendBase",
+        *,
+        backend_type: str = "local",
+        callbacks: Optional[List[BaseCallback]] = None,
+        default_packaging: Optional[str] = None,
+        default_account: Optional[str] = None,
+        default_partition: Optional[str] = None,
+        default_packaging_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> "Cluster":
+        """Create a Cluster with a pre-constructed backend.
+
+        Use this when you already have a backend instance and want to skip
+        the connection setup that ``__init__`` performs.  This is the
+        recommended way to create Cluster instances in tests.
+
+        Args:
+            backend: A pre-constructed backend instance.
+            backend_type: Label for the backend (e.g., "local", "ssh").
+            callbacks: Lifecycle callback instances.
+            default_packaging: Default packaging strategy name.
+            default_account: Default SLURM account.
+            default_partition: Default SLURM partition.
+            default_packaging_kwargs: Extra kwargs forwarded to packaging strategies.
+
+        Returns:
+            A fully initialised Cluster that uses the given backend.
+        """
+        cluster = cls.__new__(cls)
+        cluster.backend_type = backend_type
+        cluster.backend = backend
+        cluster.callbacks = callbacks or []
+        cluster.default_packaging = default_packaging
+        cluster.default_account = default_account
+        cluster.default_partition = default_partition
+        cluster.default_packaging_kwargs = default_packaging_kwargs or {}
+        cluster._backend_kwargs = {}
+        cluster._job_pollers = {}
+        cluster._job_pollers_lock = threading.Lock()
+        return cluster
 
     def _render_workflow_slurmfile(self, env_name: str) -> str:
         """Render a minimal Slurmfile for nested workflow execution.
@@ -1031,17 +1079,7 @@ class Cluster:
             timestamp=packaging_start,
         )
 
-        for callback in self.callbacks:
-            if not callback.should_run_on_client("on_begin_package_ctx"):
-                continue
-            try:
-                callback.on_begin_package_ctx(begin_ctx)
-            except Exception as exc:
-                logger.debug(
-                    "Callback %s failed in on_begin_package_ctx: %s",
-                    type(callback).__name__,
-                    exc,
-                )
+        self._dispatch_callbacks("on_begin_package_ctx", begin_ctx)
 
         strategy = get_packaging_strategy(effective_packaging_config)
         logger.debug(
@@ -1073,17 +1111,7 @@ class Cluster:
             duration=packaging_end - packaging_start,
         )
 
-        for callback in self.callbacks:
-            if not callback.should_run_on_client("on_end_package_ctx"):
-                continue
-            try:
-                callback.on_end_package_ctx(end_ctx)
-            except Exception as exc:
-                logger.debug(
-                    "Callback %s failed in on_end_package_ctx: %s",
-                    type(callback).__name__,
-                    exc,
-                )
+        self._dispatch_callbacks("on_end_package_ctx", end_ctx)
 
         return strategy
 
@@ -1241,17 +1269,7 @@ class Cluster:
             backend_type=self.backend_type,
         )
 
-        for callback in self.callbacks:
-            if not callback.should_run_on_client("on_begin_submit_job_ctx"):
-                continue
-            try:
-                callback.on_begin_submit_job_ctx(submit_begin_ctx)
-            except Exception as exc:
-                logger.debug(
-                    "Callback %s failed in on_begin_submit_job_ctx: %s",
-                    type(callback).__name__,
-                    exc,
-                )
+        self._dispatch_callbacks("on_begin_submit_job_ctx", submit_begin_ctx)
 
         script = render_job_script(
             task_func=func_to_render,
@@ -1418,19 +1436,7 @@ class Cluster:
                     timestamp=time.time(),
                     cluster=self,
                 )
-                for callback in self.callbacks:
-                    if not callback.should_run_on_client(
-                        "on_workflow_task_submitted_ctx"
-                    ):
-                        continue
-                    try:
-                        callback.on_workflow_task_submitted_ctx(submit_ctx)
-                    except Exception as exc:
-                        logger.debug(
-                            "Callback %s failed in on_workflow_task_submitted_ctx: %s",
-                            type(callback).__name__,
-                            exc,
-                        )
+                self._dispatch_callbacks("on_workflow_task_submitted_ctx", submit_ctx)
             except Exception as e:
                 logger.warning(f"Error calling workflow task submitted callbacks: {e}")
         else:
@@ -1439,19 +1445,7 @@ class Cluster:
         # Write metadata file via backend
         metadata_path = os.path.join(target_job_dir, "metadata.json")
         try:
-            # For SSH backend, use _upload_string_to_file
-            if hasattr(self.backend, "_upload_string_to_file"):
-                self.backend._upload_string_to_file(
-                    json.dumps(metadata, indent=2), metadata_path
-                )
-            elif hasattr(self.backend, "write_file"):
-                # Future: if we add a write_file() method to backends
-                self.backend.write_file(metadata_path, json.dumps(metadata, indent=2))
-            else:
-                # For local backends, write directly
-                os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
-                with open(metadata_path, "w") as f:
-                    json.dump(metadata, f, indent=2)
+            self.backend.write_file(metadata_path, json.dumps(metadata, indent=2))
         except Exception as exc:
             logger.warning(
                 "[%s] Failed to write metadata.json: %s", pre_submission_id, exc
@@ -1501,47 +1495,20 @@ class Cluster:
                 except Exception:
                     internal_hostname = "localhost"
 
-                section_header = f"[{env_name}.cluster.backend_config]"
-                lines = slurmfile_content.splitlines()
-                new_lines: List[str] = []
-                in_section = False
-                hostname_set = False
-                port_set = False
+                import tomlkit
 
-                for line in lines:
-                    stripped = line.strip()
-                    if stripped.startswith("[") and stripped.endswith("]"):
-                        if in_section:
-                            if not hostname_set:
-                                new_lines.append(f'hostname = "{internal_hostname}"')
-                            if not port_set:
-                                new_lines.append("port = 22")
-                        in_section = stripped == section_header
-                        hostname_set = False
-                        port_set = False
-                        new_lines.append(line)
-                        continue
-
-                    if in_section:
-                        if stripped.startswith("hostname"):
-                            new_lines.append(f'hostname = "{internal_hostname}"')
-                            hostname_set = True
-                            continue
-                        if stripped.startswith("port"):
-                            new_lines.append("port = 22")
-                            port_set = True
-                            continue
-
-                    new_lines.append(line)
-
-                if in_section:
-                    if not hostname_set:
-                        new_lines.append(f'hostname = "{internal_hostname}"')
-                    if not port_set:
-                        new_lines.append("port = 22")
-
-                newline_suffix = "\n" if slurmfile_content.endswith("\n") else ""
-                modified_content = "\n".join(new_lines) + newline_suffix
+                doc = tomlkit.parse(slurmfile_content)
+                # Navigate to the backend_config table, creating it if needed
+                env_table = doc.setdefault(env_name, tomlkit.table(is_super_table=True))
+                cluster_table = env_table.setdefault(
+                    "cluster", tomlkit.table(is_super_table=True)
+                )
+                backend_cfg = cluster_table.setdefault(
+                    "backend_config", tomlkit.table()
+                )
+                backend_cfg["hostname"] = internal_hostname
+                backend_cfg["port"] = 22
+                modified_content = tomlkit.dumps(doc)
 
                 logger.debug(
                     "[%s] Prepared Slurmfile for workflow: hostname=%s, port=22",
@@ -1550,20 +1517,12 @@ class Cluster:
                 )
 
                 remote_slurmfile_path = os.path.join(target_job_dir, "Slurmfile.toml")
-                if hasattr(self.backend, "_upload_string_to_file"):
-                    self.backend._upload_string_to_file(
-                        modified_content, remote_slurmfile_path
-                    )
-                    logger.debug(
-                        "[%s] Uploaded workflow Slurmfile to %s",
-                        pre_submission_id,
-                        remote_slurmfile_path,
-                    )
-                else:
-                    logger.warning(
-                        "[%s] Backend does not have _upload_string_to_file method",
-                        pre_submission_id,
-                    )
+                self.backend.write_file(remote_slurmfile_path, modified_content)
+                logger.debug(
+                    "[%s] Uploaded workflow Slurmfile to %s",
+                    pre_submission_id,
+                    remote_slurmfile_path,
+                )
             except Exception as exc:
                 logger.warning(
                     "[%s] Failed to upload workflow Slurmfile: %s",
@@ -1601,17 +1560,7 @@ class Cluster:
             backend_type=self.backend_type,
         )
 
-        for callback in self.callbacks:
-            if not callback.should_run_on_client("on_end_submit_job_ctx"):
-                continue
-            try:
-                callback.on_end_submit_job_ctx(submit_end_ctx)
-            except Exception as exc:
-                logger.debug(
-                    "Callback %s failed in on_end_submit_job_ctx: %s",
-                    type(callback).__name__,
-                    exc,
-                )
+        self._dispatch_callbacks("on_end_submit_job_ctx", submit_end_ctx)
 
         self._maybe_start_job_poller(job)
 
@@ -1849,6 +1798,26 @@ class Cluster:
 
         return submitter
 
+    def _dispatch_callbacks(self, method_name: str, context: Any) -> None:
+        """Dispatch a lifecycle event to all registered callbacks.
+
+        Calls *method_name* on each callback that opts in via
+        ``should_run_on_client``, catching and logging any exceptions.
+        """
+        for callback in self.callbacks:
+            if not callback.should_run_on_client(method_name):
+                continue
+            try:
+                getattr(callback, method_name)(context)
+            except Exception as exc:
+                logger.warning(
+                    "Callback %s failed in %s: %s",
+                    type(callback).__name__,
+                    method_name,
+                    exc,
+                    exc_info=True,
+                )
+
     def _maybe_start_job_poller(self, job: Job) -> None:
         subscriptions: List[Tuple[BaseCallback, float]] = []
         for callback in self.callbacks:
@@ -1864,9 +1833,11 @@ class Cluster:
 
         if not hasattr(self, "_job_pollers"):
             self._job_pollers: Dict[str, _JobStatusPoller] = {}
+            self._job_pollers_lock = threading.Lock()
 
         poller = _JobStatusPoller(self, job, subscriptions)
-        self._job_pollers[job.id] = poller
+        with self._job_pollers_lock:
+            self._job_pollers[job.id] = poller
         poller.start()
 
     def _emit_completed_context(
@@ -1915,22 +1886,17 @@ class Cluster:
             emitted_by=emitted_by,
         )
 
-        for callback in self.callbacks:
-            if not callback.should_run_on_client("on_completed_ctx"):
-                continue
-            try:
-                callback.on_completed_ctx(context)
-            except Exception as exc:  # pragma: no cover - callback errors
-                logger.debug(
-                    "Callback %s failed in on_completed_ctx: %s",
-                    type(callback).__name__,
-                    exc,
-                )
+        self._dispatch_callbacks("on_completed_ctx", context)
 
     def _on_poller_finished(self, job_id: str) -> None:
         pollers = getattr(self, "_job_pollers", None)
         if pollers is not None:
-            pollers.pop(job_id, None)
+            lock = getattr(self, "_job_pollers_lock", None)
+            if lock is not None:
+                with lock:
+                    pollers.pop(job_id, None)
+            else:
+                pollers.pop(job_id, None)
 
     def get_job(self, job_id: str) -> Job:
         """Retrieve a Job object for an existing Slurm job by its ID.
@@ -2076,6 +2042,8 @@ class Cluster:
         if hasattr(self, "_context_token"):
             _reset_active_context(self._context_token)
             delattr(self, "_context_token")
+        if hasattr(self, "backend"):
+            self.backend.close()
         return False
 
     def diagnose(self) -> Dict[str, Any]:

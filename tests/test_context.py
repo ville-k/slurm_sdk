@@ -6,8 +6,8 @@ from slurm.context import (
     _reset_active_context,
     _clear_active_context,
 )
-from slurm.cluster import Cluster
 from slurm.workflow import WorkflowContext
+from cluster_factory import make_test_cluster  # type: ignore
 
 
 def test_no_active_context():
@@ -20,9 +20,7 @@ def test_set_and_get_context(tmp_path):
     """Test setting and getting active context."""
     _clear_active_context()
 
-    # Create a mock cluster
-    cluster = object.__new__(Cluster)
-    cluster.job_base_dir = str(tmp_path)
+    cluster = make_test_cluster(backend=None, job_base_dir=str(tmp_path))
 
     # Set context
     token = _set_active_context(cluster)
@@ -40,12 +38,9 @@ def test_nested_contexts(tmp_path):
     """Test nested context scoping."""
     _clear_active_context()
 
-    # Create two mock clusters
-    cluster1 = object.__new__(Cluster)
-    cluster1.job_base_dir = str(tmp_path / "cluster1")
+    cluster1 = make_test_cluster(backend=None, job_base_dir=str(tmp_path / "cluster1"))
 
-    cluster2 = object.__new__(Cluster)
-    cluster2.job_base_dir = str(tmp_path / "cluster2")
+    cluster2 = make_test_cluster(backend=None, job_base_dir=str(tmp_path / "cluster2"))
 
     # Set outer context
     token1 = _set_active_context(cluster1)
@@ -68,9 +63,7 @@ def test_workflow_context_as_active_context(tmp_path):
     """Test that WorkflowContext can be set as active context."""
     _clear_active_context()
 
-    # Create mock cluster and workflow context
-    cluster = object.__new__(Cluster)
-    cluster.job_base_dir = str(tmp_path)
+    cluster = make_test_cluster(backend=None, job_base_dir=str(tmp_path))
 
     workflow_ctx = WorkflowContext(
         cluster=cluster,
@@ -98,8 +91,7 @@ def test_clear_context(tmp_path):
     """Test clearing context."""
     _clear_active_context()
 
-    cluster = object.__new__(Cluster)
-    cluster.job_base_dir = str(tmp_path)
+    cluster = make_test_cluster(backend=None, job_base_dir=str(tmp_path))
 
     # Set context
     _set_active_context(cluster)
@@ -120,11 +112,11 @@ def test_context_isolation_across_threads(tmp_path):
 
     _clear_active_context()
 
-    cluster_main = object.__new__(Cluster)
-    cluster_main.job_base_dir = str(tmp_path / "main")
+    cluster_main = make_test_cluster(backend=None, job_base_dir=str(tmp_path / "main"))
 
-    cluster_thread = object.__new__(Cluster)
-    cluster_thread.job_base_dir = str(tmp_path / "thread")
+    cluster_thread = make_test_cluster(
+        backend=None, job_base_dir=str(tmp_path / "thread")
+    )
 
     # Set context in main thread
     token_main = _set_active_context(cluster_main)

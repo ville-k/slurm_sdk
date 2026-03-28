@@ -5,7 +5,7 @@ to run Python tasks.
 """
 
 # Re-export main entry point from the implementation module
-from slurm._runner_impl import main
+from slurm.runner.main import main
 
 # Also export from new modules (public API)
 from slurm.runner.argument_loader import (

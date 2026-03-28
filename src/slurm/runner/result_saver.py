@@ -13,7 +13,7 @@ import os
 import pickle
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -71,11 +71,12 @@ def write_environment_metadata(
                 "pre_submission_id": pre_submission_id or "unknown",
                 "workflow_name": workflow_name or "unknown",
             },
-            "created_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": datetime.now(timezone.utc).isoformat() + "Z",
         }
 
-        # Write metadata file
-        with open(metadata_path, "w") as f:
+        # Write metadata file with restricted permissions
+        fd = os.open(str(metadata_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(metadata, f, indent=2)
 
         logger.info(f"Wrote environment metadata to {metadata_path}")

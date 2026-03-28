@@ -16,6 +16,9 @@ class _DummyUploadBackend:
     def _upload_string_to_file(self, content: str, remote_path: str) -> None:
         self.uploads.append((remote_path, content))
 
+    def write_file(self, file_path: str, content: str) -> None:
+        self.uploads.append((file_path, content))
+
 
 @workflow(time="00:01:00")
 def _wf(ctx: WorkflowContext) -> None:

@@ -124,6 +124,18 @@ class LocalBackend:
             ]
         }
 
+    def write_file(self, file_path: str, content: str) -> None:
+        """Write string content to a local file."""
+        parent = os.path.dirname(file_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(file_path, "w", newline="\n") as f:
+            f.write(content)
+
     def is_remote(self) -> bool:
         """Return False since this is a local backend."""
         return False
+
+    def close(self) -> None:
+        """No-op for local backend."""
+        pass

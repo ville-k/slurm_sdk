@@ -10,22 +10,17 @@ from slurm.context import (
 from slurm.workflow import WorkflowContext
 
 from slurm.examples.parallel_train_eval.workflow import parallel_train_eval_workflow
+from cluster_factory import make_test_cluster  # type: ignore
 from local_backend import LocalBackend  # type: ignore
 
 
 def create_mock_cluster(tmp_path: Path) -> Cluster:
     """Create a mock cluster for testing."""
-    cluster = object.__new__(Cluster)
-    cluster.job_base_dir = str(tmp_path)
-    cluster.backend = LocalBackend(job_base_dir=str(tmp_path))
-    cluster.backend_type = "LocalBackend"
-    cluster.packaging_defaults = {"type": "none"}
-    cluster.callbacks = []
-    cluster.console = None
-    cluster.default_packaging = None
-    cluster.default_account = None
-    cluster.default_partition = None
-    return cluster
+    return make_test_cluster(
+        backend=LocalBackend(job_base_dir=str(tmp_path)),
+        job_base_dir=str(tmp_path),
+        packaging_defaults={"type": "none"},
+    )
 
 
 def run_workflow(tmp_path: Path, epochs: int, epoch_steps: int, cap: int) -> Path:

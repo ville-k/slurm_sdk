@@ -249,6 +249,7 @@ def slurm_cluster(slurm_cluster_config, tmp_path):
         look_for_keys = false
         allow_agent = false
         banner_timeout = {backend_config["banner_timeout"]}
+        host_key_policy = "auto"
 
         [default.packaging]
         type = \"{packaging["type"]}\"{python_cfg_line}
@@ -874,6 +875,7 @@ def slurm_pyxis_cluster(slurm_pyxis_cluster_config: Dict, tmp_path: Path):
         look_for_keys = {str(backend_config.get("look_for_keys", False)).lower()}
         allow_agent = {str(backend_config.get("allow_agent", False)).lower()}
         banner_timeout = {backend_config.get("banner_timeout", 30)}
+        host_key_policy = "auto"
 
         [default.packaging]
         type = "{packaging["type"]}"{python_cfg_line}{upgrade_pip_line}

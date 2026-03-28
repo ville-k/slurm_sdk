@@ -7,7 +7,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple, get_args, get_origin
@@ -39,7 +39,9 @@ class JobContext:
     master_port: int = _DEFAULT_MASTER_PORT
     environment: Dict[str, str] = field(default_factory=dict)
     created_at: str = field(
-        default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        default_factory=lambda: (
+            datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z"
+        )
     )
     output_dir: Optional[Path] = None
 

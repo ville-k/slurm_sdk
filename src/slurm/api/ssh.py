@@ -53,7 +53,7 @@ class SSHCommandBackend(BackendBase):
         gss_host: Optional[str] = None,
         disabled_algorithms: Optional[Dict[str, List[str]]] = None,
         job_base_dir: Optional[str] = None,
-        host_key_policy: Literal["auto", "warn", "reject"] = "warn",
+        host_key_policy: Literal["auto", "warn", "reject"] = "reject",
     ):
         """
         Initialize the SSH command backend.
@@ -79,10 +79,11 @@ class SSHCommandBackend(BackendBase):
             gss_host: The target name for GSS-API authentication.
             disabled_algorithms: Dictionary of disabled algorithms by type.
             job_base_dir: The base directory for job-related files.
-            host_key_policy: Policy for handling unknown SSH host keys:
-                - "auto": Automatically accept and save unknown keys (less secure)
-                - "warn": Log a warning but accept unknown keys (default)
-                - "reject": Reject connections to unknown hosts (most secure)
+            host_key_policy: Policy for handling unknown SSH host keys.
+                Defaults to "reject" which requires the host to be in
+                known_hosts. Use "warn" to accept unknown keys with a
+                logged warning, or "auto" to silently accept and save
+                unknown keys (least secure).
         """
         self.hostname = hostname
         self.username = username
@@ -358,6 +359,10 @@ class SSHCommandBackend(BackendBase):
 
         except Exception as e:
             raise RuntimeError(f"Failed to upload content to file: {e}")
+
+    def write_file(self, file_path: str, content: str) -> None:
+        """Write string content to a file on the remote host."""
+        self._upload_string_to_file(content, file_path)
 
     def _create_remote_temp_dir(self) -> str:
         """
@@ -895,33 +900,27 @@ class SSHCommandBackend(BackendBase):
                 )
             ) from e
 
-    def __del__(self):
-        """
-        Clean up resources when the object is destroyed.
-        """
+    def close(self) -> None:
+        """Close SSH and SFTP connections and clean up remote resources."""
+        if hasattr(self, "remote_temp_dir"):
+            try:
+                self._run_command(f"rm -rf {self.remote_temp_dir}")
+            except Exception as e:
+                logger.debug(f"Error cleaning up remote temp dir: {e}")
+        if hasattr(self, "sftp") and self.sftp:
+            try:
+                self.sftp.close()
+            except Exception as e:
+                logger.debug(f"Error closing SFTP connection: {e}")
         if hasattr(self, "client") and self.client:
             try:
-                # Clean up the remote temporary directory
-                if hasattr(self, "remote_temp_dir"):
-                    try:
-                        self._run_command(f"rm -rf {self.remote_temp_dir}")
-                    except Exception as e:
-                        # Catch all exceptions in __del__ - we can't propagate them anyway
-                        logger.debug(f"Error cleaning up remote temp dir: {e}")
-
-                # Close the SFTP connection
-                if hasattr(self, "sftp") and self.sftp:
-                    try:
-                        self.sftp.close()
-                    except Exception as e:
-                        # Catch all exceptions in __del__ - we can't propagate them anyway
-                        logger.debug(f"Error closing SFTP connection: {e}")
-
-                # Close the SSH connection
                 self.client.close()
             except Exception as e:
-                # Catch all exceptions in __del__ - we can't propagate them anyway
-                logger.debug(f"Error during cleanup: {e}")
+                logger.debug(f"Error closing SSH connection: {e}")
+
+    def __del__(self):
+        """Clean up resources when the object is destroyed."""
+        self.close()
 
     def _upload_file(self, local_path: str, remote_path: str) -> None:
         """

@@ -6,14 +6,16 @@ including image reuse and proper cluster configuration.
 
 from pathlib import Path
 from slurm.workflow import WorkflowContext
-from slurm.cluster import Cluster
+from cluster_factory import make_test_cluster  # type: ignore
 
 
 def test_workflow_context_provides_cluster_for_nested_tasks(tmp_path):
     """Test that WorkflowContext provides cluster for nested task submission."""
-    cluster = object.__new__(Cluster)
-    cluster.job_base_dir = str(tmp_path)
-    cluster.packaging_defaults = {"type": "container", "image": "test:latest"}
+    cluster = make_test_cluster(
+        backend=None,
+        job_base_dir=str(tmp_path),
+        packaging_defaults={"type": "container", "image": "test:latest"},
+    )
 
     workflow_ctx = WorkflowContext(
         cluster=cluster,
@@ -30,13 +32,14 @@ def test_workflow_context_provides_cluster_for_nested_tasks(tmp_path):
 
 def test_nested_task_inherits_container_config():
     """Test that nested tasks inherit container configuration from cluster."""
-    # This test verifies the design that nested tasks use cluster packaging config
-    cluster = object.__new__(Cluster)
-    cluster.packaging_defaults = {
-        "type": "container",
-        "image": "nvcr.io/nvidia/pytorch:latest",
-        "push": False,
-    }
+    cluster = make_test_cluster(
+        backend=None,
+        packaging_defaults={
+            "type": "container",
+            "image": "nvcr.io/nvidia/pytorch:latest",
+            "push": False,
+        },
+    )
 
     # When a task is called within a workflow context, it should use
     # the cluster's packaging_defaults

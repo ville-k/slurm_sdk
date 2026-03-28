@@ -298,9 +298,9 @@ class TestBindWorkflowContext:
 
     def create_workflow_context(self, tmp_path: Path) -> WorkflowContext:
         """Create a mock WorkflowContext for testing."""
-        from slurm.cluster import Cluster
+        from cluster_factory import make_test_cluster
 
-        cluster = object.__new__(Cluster)
+        cluster = make_test_cluster(backend=None)
         return WorkflowContext(
             cluster=cluster,
             workflow_job_id="test_123",

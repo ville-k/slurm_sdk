@@ -1,7 +1,7 @@
 from typing import Any, Dict, List
 
-from slurm.cluster import Cluster
 from slurm.job import Job
+from cluster_factory import make_test_cluster  # type: ignore
 
 
 class FakeBackend:
@@ -47,9 +47,7 @@ class FakeBackend:
 
 
 def test_cluster_get_jobs_uses_queue(monkeypatch):
-    # Create a Cluster-like instance without invoking __init__ (avoids backend factory)
-    c = object.__new__(Cluster)
-    c.backend = FakeBackend()
+    c = make_test_cluster(backend=FakeBackend())
 
     jobs = c.get_jobs()
     assert isinstance(jobs, list)

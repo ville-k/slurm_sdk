@@ -642,7 +642,11 @@ class LocalBackend(BackendBase):
         Raises:
             RuntimeError: If the command fails
         """
-        stdout, stderr, return_code = self._run_command(command, check=False)
+        import shlex
+
+        stdout, stderr, return_code = self._run_command(
+            shlex.split(command), check=False
+        )
 
         if return_code != 0:
             raise RuntimeError(
@@ -679,6 +683,17 @@ class LocalBackend(BackendBase):
         except Exception as e:
             logger.error(f"Error reading file {file_path}: {e}")
             raise RuntimeError(f"Failed to read file {file_path}: {e}") from e
+
+    def write_file(self, file_path: str, content: str) -> None:
+        """Write string content to a local file."""
+        try:
+            parent = os.path.dirname(file_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+        except Exception as e:
+            raise RuntimeError(f"Failed to write file {file_path}: {e}") from e
 
     def is_remote(self) -> bool:
         """Return False since local backend uses direct file access."""

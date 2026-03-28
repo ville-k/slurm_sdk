@@ -9,23 +9,17 @@ from slurm.decorators import task, workflow
 from slurm.workflow import WorkflowContext
 from slurm.runtime import JobContext
 from slurm.context import _clear_active_context
+from cluster_factory import make_test_cluster  # type: ignore
 from local_backend import LocalBackend  # type: ignore
 
 
 def create_mock_cluster(tmp_path: Path) -> Cluster:
     """Create a mock cluster for testing."""
-    cluster = object.__new__(Cluster)
-    cluster.job_base_dir = str(tmp_path)
-    cluster.backend = LocalBackend(job_base_dir=str(tmp_path))
-    cluster.backend_type = "LocalBackend"
-    cluster.packaging_defaults = {"type": "none"}
-    cluster.callbacks = []
-    cluster.console = None
-    # Add new string-based API attributes
-    cluster.default_packaging = None
-    cluster.default_account = None
-    cluster.default_partition = None
-    return cluster
+    return make_test_cluster(
+        backend=LocalBackend(job_base_dir=str(tmp_path)),
+        job_base_dir=str(tmp_path),
+        packaging_defaults={"type": "none"},
+    )
 
 
 @task(time="00:01:00", mem="1G")
@@ -117,9 +111,7 @@ def test_workflow_unwrapped_works():
     """Test that workflow.unwrapped can be tested locally."""
     _clear_active_context()
 
-    # Create mock cluster and context
-    cluster = object.__new__(Cluster)
-    cluster.job_base_dir = "/tmp/test"
+    cluster = make_test_cluster(backend=None, job_base_dir="/tmp/test")
 
     _workflow_ctx = WorkflowContext(  # Tests WorkflowContext instantiation
         cluster=cluster,
@@ -166,7 +158,7 @@ def test_workflow_context_shared_directory(tmp_path):
     shared_dir = workflow_dir / "shared"
     shared_dir.mkdir(parents=True)
 
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_ctx = WorkflowContext(
         cluster=cluster,
         workflow_job_id="test_123",
@@ -245,7 +237,7 @@ def test_workflow_result_path(tmp_path):
     workflow_dir = tmp_path / "workflow"
     workflow_dir.mkdir()
 
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_ctx = WorkflowContext(
         cluster=cluster,
         workflow_job_id="test_123",
@@ -270,7 +262,7 @@ def test_workflow_list_task_runs_sorting(tmp_path):
     (task_dir / "20250102_100000_def").mkdir()
     (task_dir / "20250103_100000_ghi").mkdir()
 
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_ctx = WorkflowContext(
         cluster=cluster,
         workflow_job_id="test_123",
