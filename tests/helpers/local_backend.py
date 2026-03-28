@@ -139,3 +139,7 @@ class LocalBackend:
     def close(self) -> None:
         """No-op for local backend."""
         pass
+
+    def reconnect(self) -> None:
+        """No-op for local backend."""
+        pass

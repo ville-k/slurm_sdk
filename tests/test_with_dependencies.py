@@ -142,7 +142,7 @@ class TestSubmittableWorkflow:
         # Add a non-SlurmTask object
         wrapper._dependent_tasks = ["not a task"]
 
-        with patch("slurm.cluster.logger") as mock_logger:
+        with patch("slurm._workflow.logger") as mock_logger:
             result = wrapper._build_dependency_containers()
             mock_logger.warning.assert_called()
 
@@ -251,7 +251,7 @@ class TestPrebuiltImageUsage:
             }
 
             # Mock get_packaging_strategy to avoid actual packaging
-            with patch("slurm.cluster.get_packaging_strategy") as mock_get_strategy:
+            with patch("slurm._submission.get_packaging_strategy") as mock_get_strategy:
                 mock_strategy = MagicMock()
                 mock_get_strategy.return_value = mock_strategy
 

@@ -153,7 +153,7 @@ class TestResultSaverModule:
 
     def test_save_result(self, tmp_path):
         """Test save_result function."""
-        import pickle
+        from slurm._serialization import read_pickled
 
         output_file = tmp_path / "result.pkl"
         result = {"key": "value", "number": 42}
@@ -161,13 +161,12 @@ class TestResultSaverModule:
         save_result(str(output_file), result)
 
         assert output_file.exists()
-        with open(output_file, "rb") as f:
-            loaded = pickle.load(f)
+        loaded = read_pickled(str(output_file))
         assert loaded == result
 
     def test_save_result_creates_directory(self, tmp_path):
         """Test save_result creates output directory if needed."""
-        import pickle
+        from slurm._serialization import read_pickled
 
         output_file = tmp_path / "subdir" / "result.pkl"
         result = [1, 2, 3]
@@ -175,8 +174,7 @@ class TestResultSaverModule:
         save_result(str(output_file), result)
 
         assert output_file.exists()
-        with open(output_file, "rb") as f:
-            loaded = pickle.load(f)
+        loaded = read_pickled(str(output_file))
         assert loaded == result
 
     def test_update_job_metadata(self, tmp_path):

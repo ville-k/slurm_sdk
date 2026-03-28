@@ -196,3 +196,13 @@ class BackendBase(abc.ABC):
         persistent connections (e.g. SSH) should override this.
         """
         pass
+
+    def reconnect(self) -> None:
+        """Close and re-establish the backend connection.
+
+        The default implementation is a no-op. Backends that hold
+        persistent connections (e.g. SSH) should override this.
+        Useful for recovering from stale connections in long-lived
+        sessions (e.g. Jupyter notebooks).
+        """
+        pass

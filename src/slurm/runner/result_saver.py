@@ -10,7 +10,6 @@ import os
 
 # nosec B403 - pickle is required for serializing task results
 # Security note: pickle files are created by the SDK and stored in trusted job directories
-import pickle
 import sys
 import time
 from datetime import datetime, timezone
@@ -101,8 +100,9 @@ def save_result(output_file: str, result: Any) -> None:
         logger.debug("Ensuring output directory exists: %s", output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
-    with open(output_file, "wb") as f:
-        pickle.dump(result, f)
+    from .._serialization import write_pickled
+
+    write_pickled(output_file, result)
 
     logger.debug("Result saved successfully.")
 
