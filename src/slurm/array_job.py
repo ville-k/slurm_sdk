@@ -328,6 +328,8 @@ class ArrayJob(Generic[T]):
                 sbatch_options=dict(task_defaults),
                 stdout_path=f"{target_job_dir}/slurm_{pre_submission_id}_{idx}.out",
                 stderr_path=f"{target_job_dir}/slurm_{pre_submission_id}_{idx}.err",
+                backend=self.cluster.backend,
+                on_completed=self.cluster._emit_completed_context,
             )
             self._jobs.append(job)
 

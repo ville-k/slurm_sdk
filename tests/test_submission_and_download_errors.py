@@ -38,6 +38,9 @@ class FakeSSHBackend:
     def get_job_status(self, job_id: str):
         return {"JobState": "COMPLETED", "ExitCode": "0:0"}
 
+    def is_remote(self):
+        return False
+
     def download_file(self, remote_path: str, local_path: str):
         if not self._exists:
             raise FileNotFoundError("missing")

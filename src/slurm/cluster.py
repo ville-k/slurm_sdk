@@ -1132,6 +1132,8 @@ class Cluster:
             pre_submission_id=pre_submission_id,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
+            backend=self.backend,
+            on_completed=self._emit_completed_context,
         )
 
     def get_jobs(self) -> List[Job]:
@@ -1157,7 +1159,15 @@ class Cluster:
             )
             if job_id:
                 job_ids.append(str(job_id))
-        return [Job(job_id, self) for job_id in job_ids]
+        return [
+            Job(
+                job_id,
+                self,
+                backend=self.backend,
+                on_completed=self._emit_completed_context,
+            )
+            for job_id in job_ids
+        ]
 
     def get_queue(self) -> List[Dict[str, Any]]:
         """Get raw queue information from the Slurm scheduler.

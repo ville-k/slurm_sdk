@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Job` now depends on `BackendBase` interface instead of `Cluster`; accepts
+  `backend` and `on_completed` keyword arguments. The `cluster` parameter is
+  kept for backward compatibility
+- `BackendBase` now provides `download_file()` (default: local copy) and
+  `hostname` class attribute (default: `"localhost"`)
 - Decomposed `cluster.py` into private modules (`_polling`, `_submission`,
   `_workflow`) for maintainability; public API unchanged
 - Extracted private methods from `ContainerPackagingStrategy.prepare()` for

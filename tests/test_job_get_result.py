@@ -14,6 +14,9 @@ class FakeSSHBackend:
     def get_job_status(self, job_id: str):
         return {"JobState": "COMPLETED", "ExitCode": "0:0"}
 
+    def is_remote(self):
+        return False
+
     def download_file(self, remote_path: str, local_path: str):
         # Simulate remote file existing by copying from a known local path
         with open(remote_path, "rb") as src, open(local_path, "wb") as dst:
@@ -26,13 +29,11 @@ class FailingSSHBackend:
     def get_job_status(self, job_id: str):
         return {"JobState": "COMPLETED", "ExitCode": "0:0"}
 
+    def is_remote(self):
+        return True
+
     def download_file(self, remote_path: str, local_path: str):
         raise OSError("Simulated SSH download failure")
-
-
-class DummyCluster:
-    def __init__(self, backend):
-        self.backend = backend
 
 
 def test_job_get_result_downloads_and_unpickles(tmp_path):
@@ -45,10 +46,9 @@ def test_job_get_result_downloads_and_unpickles(tmp_path):
         pickle.dump({"ok": True}, f)
 
     backend = FakeSSHBackend(str(remote_dir))
-    cluster = DummyCluster(backend)
     job = Job(
         id="7",
-        cluster=cluster,
+        backend=backend,
         target_job_dir=str(remote_dir),
         pre_submission_id=pre_id,
     )
@@ -66,10 +66,12 @@ def test_job_get_result_failure_after_wait_reports_failure(monkeypatch, tmp_path
                 "Reason": "NonZeroExitCode",
             }
 
-    cluster = DummyCluster(StatusBackend())
+        def is_remote(self):
+            return False
+
     job = Job(
         id="9",
-        cluster=cluster,
+        backend=StatusBackend(),
         target_job_dir=str(tmp_path),
         pre_submission_id="pre",
         stdout_path=str(tmp_path / "stdout.txt"),
@@ -99,10 +101,9 @@ def test_job_get_result_failure_after_wait_reports_failure(monkeypatch, tmp_path
 def test_get_result_ssh_cleans_up_temp_file_on_download_failure(tmp_path):
     """Temp file must be removed even when SSH download raises."""
     backend = FailingSSHBackend()
-    cluster = DummyCluster(backend)
     job = Job(
         id="42",
-        cluster=cluster,
+        backend=backend,
         target_job_dir=str(tmp_path),
         pre_submission_id="cleanup_test",
     )
@@ -115,12 +116,9 @@ def test_get_result_ssh_cleans_up_temp_file_on_download_failure(tmp_path):
         created_paths.append(tf.name)
         return tf
 
-    # Patch isinstance so FailingSSHBackend is treated as SSHCommandBackend,
-    # and track temp files created during the download attempt.
-    with (
-        patch("slurm.job.SSHCommandBackend", new=FailingSSHBackend),
-        patch("tempfile.NamedTemporaryFile", side_effect=tracking_ntf),
-    ):
+    # Track temp files created during the download attempt.
+    # FailingSSHBackend.is_remote() returns True, so the SSH path is taken.
+    with patch("tempfile.NamedTemporaryFile", side_effect=tracking_ntf):
         with pytest.raises(DownloadError):
             job.get_result()
 
