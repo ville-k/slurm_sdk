@@ -188,10 +188,9 @@ def restore_sys_path(encoded_sys_path: str) -> None:
     Args:
         encoded_sys_path: Base64-encoded pickled sys.path list.
     """
-    # nosec B301 - sys.path comes from SDK's own serialization in rendering.py
-    original_sys_path = pickle.loads(  # nosec B301
-        base64.b64decode(encoded_sys_path.encode())
-    )
+    from .._serialization import loads_pickled
+
+    original_sys_path = loads_pickled(base64.b64decode(encoded_sys_path.encode()))
     # Prepend original paths to ensure user modules are found first
     sys.path = original_sys_path + [p for p in sys.path if p not in original_sys_path]
     logger.debug("Updated sys.path: %s", sys.path)
@@ -226,11 +225,10 @@ def _load_regular_task_arguments(args: RunnerArgs) -> Tuple[tuple, dict]:
     Returns:
         Tuple of (task_args, task_kwargs).
     """
-    # nosec B301 - args/kwargs files created by SDK in rendering.py, stored in trusted job dir
-    with open(args.args_file, "rb") as f:
-        task_args = pickle.load(f)  # nosec B301
-    with open(args.kwargs_file, "rb") as f:
-        task_kwargs = pickle.load(f)  # nosec B301
+    from .._serialization import read_pickled
+
+    task_args = read_pickled(args.args_file)
+    task_kwargs = read_pickled(args.kwargs_file)
     return task_args, task_kwargs
 
 
@@ -304,8 +302,9 @@ def load_callbacks(callbacks_file: str) -> List[BaseCallback]:
             # Handle empty file case (created by rendering script if no callbacks)
             content = f.read()
             if content:
-                # nosec B301 - callbacks serialized by SDK in rendering.py
-                callbacks = pickle.loads(content)  # nosec B301
+                from .._serialization import loads_pickled
+
+                callbacks = loads_pickled(content)
                 logger.debug("Deserialized %d callbacks.", len(callbacks))
             else:
                 logger.debug("No callbacks provided (empty callbacks file).")

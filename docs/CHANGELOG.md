@@ -13,9 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@task`, `@workflow`, and `with_options()` APIs
 - `write_file()` and `close()` methods on `BackendBase` interface for unified
   file operations and explicit resource cleanup
+- Pickle version headers for cross-version mismatch detection; result files now
+  include Python version and SDK version metadata, with clear warnings on mismatch
 
 ### Changed
 
+- Decomposed `cluster.py` into private modules (`_polling`, `_submission`,
+  `_workflow`) for maintainability; public API unchanged
+- Extracted private methods from `ContainerPackagingStrategy.prepare()` for
+  improved testability
 - Callback exceptions are now logged at WARNING level with full tracebacks
   (previously logged at DEBUG)
 - SSH backend `host_key_policy` default changed from `"warn"` to `"reject"` for

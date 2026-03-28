@@ -11,7 +11,6 @@ import os
 
 # nosec B403 - pickle is required for deserializing task results
 # Security note: pickle files are created by the SDK and transferred via trusted SSH/local storage
-import pickle
 from typing import Any
 
 logger = logging.getLogger("slurm.runner")
@@ -82,9 +81,9 @@ def _load_placeholder_result(placeholder: Any, job_base_dir: str | None = None) 
                 result_path = os.path.join(result_dir, result_filename)
 
                 logger.debug("Found result file: %s", result_path)
-                # nosec B301 - result file created by SDK runner, stored in trusted job dir
-                with open(result_path, "rb") as f:
-                    return pickle.load(f)  # nosec B301
+                from .._serialization import read_pickled
+
+                return read_pickled(result_path)
         except Exception as e:
             logger.warning("Error reading metadata from %s: %s", metadata_path, e)
 

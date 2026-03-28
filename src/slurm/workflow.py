@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Any
 
 # nosec B403 - pickle required for loading workflow results serialized by SDK
-import pickle
 
 if TYPE_CHECKING:
     from .cluster import Cluster
@@ -152,9 +151,9 @@ class WorkflowContext:
                 "Check the task's stdout/stderr logs in the run directory for errors."
             )
 
-        # nosec B301 - result file created by SDK runner in workflow job directory
-        with open(result_file, "rb") as f:
-            return pickle.load(f)  # nosec B301
+        from ._serialization import read_pickled
+
+        return read_pickled(result_file)
 
     def load_workflow_result(self, workflow_path: str) -> Any:
         """Load result from another workflow.
@@ -183,6 +182,6 @@ class WorkflowContext:
                 "Verify the workflow completed successfully and the path is correct."
             )
 
-        # nosec B301 - result file created by SDK runner in workflow directory
-        with open(result_file, "rb") as f:
-            return pickle.load(f)  # nosec B301
+        from ._serialization import read_pickled
+
+        return read_pickled(result_file)

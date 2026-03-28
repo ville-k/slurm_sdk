@@ -5,6 +5,8 @@ This module provides functions for rendering Slurm job scripts from task definit
 import logging
 import pickle
 from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING
+
+from ._serialization import dumps_pickled
 import inspect
 import sys
 import traceback
@@ -300,9 +302,9 @@ def render_job_script(
     try:
         # For array jobs, skip args/kwargs pickling (loaded from array_items_file)
         if not is_array_job:
-            pickled_args = base64.b64encode(pickle.dumps(task_args)).decode()
-            pickled_kwargs = base64.b64encode(pickle.dumps(task_kwargs)).decode()
-        pickled_sys_path = base64.b64encode(pickle.dumps(sys.path)).decode()
+            pickled_args = base64.b64encode(dumps_pickled(task_args)).decode()
+            pickled_kwargs = base64.b64encode(dumps_pickled(task_kwargs)).decode()
+        pickled_sys_path = base64.b64encode(dumps_pickled(sys.path)).decode()
 
         picklable_callbacks = []
         for cb in callbacks or []:
@@ -333,7 +335,7 @@ def render_job_script(
                 )
 
         pickled_callbacks = (
-            base64.b64encode(pickle.dumps(picklable_callbacks)).decode()
+            base64.b64encode(dumps_pickled(picklable_callbacks)).decode()
             if picklable_callbacks
             else ""
         )

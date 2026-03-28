@@ -144,19 +144,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         self, task: Union["SlurmTask", Callable], cluster: "Cluster"
     ) -> Dict[str, Any]:
         console = getattr(cluster, "console", None)
-
-        # Check for RichLoggerCallback to determine verbosity
-        self._packaging_callback = None
-        self._verbose_packaging = True  # Default to verbose
-        callbacks = getattr(cluster, "callbacks", [])
-        if callbacks:
-            from ..callbacks import RichLoggerCallback
-
-            for callback in callbacks:
-                if isinstance(callback, RichLoggerCallback):
-                    self._packaging_callback = callback
-                    self._verbose_packaging = getattr(callback, "_verbose", True)
-                    break
+        self._detect_callback_config(cluster)
 
         if self.use_digest:
             logger.debug(
@@ -166,10 +154,6 @@ class ContainerPackagingStrategy(PackagingStrategy):
             logger.debug("Using auto-generated tag: %s", self.tag)
 
         image_ref = self._resolve_image_reference(task)
-
-        built_image = False
-        push_performed = False
-
         dockerfile_path, context_path = self._resolve_build_paths()
 
         # Fast path: if we have a pre-built image and don't need to build/push,
@@ -178,7 +162,6 @@ class ContainerPackagingStrategy(PackagingStrategy):
             dockerfile_path or context_path or self.push or self.use_digest
         )
         if not needs_runtime and self.image:
-            # Pre-built image, no runtime needed
             self._image_reference = self._convert_to_enroot_format(image_ref)
             logger.debug(
                 "Using pre-built image reference (no runtime needed): %s",
@@ -195,77 +178,20 @@ class ContainerPackagingStrategy(PackagingStrategy):
             self.last_prepare_result = prepare_result
             return prepare_result
 
-        # Need runtime for build/push/pull operations
         runtime = self._detect_runtime()
-
-        if dockerfile_path or context_path:
-            self._build_container_image(
-                runtime=runtime,
-                image_ref=image_ref,
-                dockerfile_path=dockerfile_path,
-                context_path=context_path,
-                console=console,
-            )
-            built_image = True
-        elif not self.image:
-            raise PackagingError(
-                "Container packaging requires either 'image' or 'dockerfile' in the configuration."
-            )
-        else:
-            # Using pre-existing image
-            # Only pull if we need the digest for digest-based references
-            if self.use_digest:
-                try:
-                    pull_cmd = [runtime, "pull", image_ref]
-                    logger.debug(
-                        "Pulling pre-existing image to get digest: %s", image_ref
-                    )
-                    subprocess.run(
-                        pull_cmd,
-                        capture_output=True,
-                        text=True,
-                        check=True,
-                    )
-                except subprocess.CalledProcessError as e:
-                    logger.warning("Failed to pull image %s: %s", image_ref, e.stderr)
-                    # Continue anyway - image might already be available locally
-
-        if self.push:
-            self._push_container_image(
-                runtime=runtime, image_ref=image_ref, console=console
-            )
-            push_performed = True
-
-        # Optionally resolve image digest for reproducibility
-        # Note: Some Pyxis/enroot versions may not properly support digest-based auth
-        if self.use_digest:
-            digest_ref = self._get_image_digest(runtime, image_ref)
-            if digest_ref:
-                self._image_reference = digest_ref
-                logger.debug("Using digest-based image reference: %s", digest_ref)
-            else:
-                # Fallback to tag-based reference if digest cannot be determined
-                self._image_reference = image_ref
-                logger.warning(
-                    "Could not resolve image digest, using tag-based reference: %s",
-                    image_ref,
-                )
-        else:
-            # Use tag-based reference (default for compatibility)
-            self._image_reference = image_ref
-            logger.debug("Using tag-based image reference: %s", image_ref)
-
-        # Convert to enroot format for Pyxis compatibility
-        self._image_reference = self._convert_to_enroot_format(self._image_reference)
-
+        built = self._build_or_pull_image(
+            runtime, image_ref, dockerfile_path, context_path, console
+        )
+        pushed = self._push_if_needed(runtime, image_ref, console)
+        self._resolve_final_reference(runtime, image_ref)
         self._runtime_cmd = runtime
 
         prepare_result = {
             "status": "success",
             "image": image_ref,
-            "image_digest": self._image_reference,  # Digest-based reference used in job
-            "built": built_image,
-            "pushed": push_performed,
+            "image_digest": self._image_reference,
+            "built": built,
+            "pushed": pushed,
             "runtime": runtime,
             "dockerfile": str(dockerfile_path) if dockerfile_path else None,
             "context": str(context_path) if context_path else None,
@@ -276,6 +202,88 @@ class ContainerPackagingStrategy(PackagingStrategy):
 
         self.last_prepare_result = prepare_result
         return prepare_result
+
+    def _detect_callback_config(self, cluster: "Cluster") -> None:
+        """Detect RichLoggerCallback and set verbosity for packaging output."""
+        self._packaging_callback = None
+        self._verbose_packaging = True
+        callbacks = getattr(cluster, "callbacks", [])
+        if callbacks:
+            from ..callbacks import RichLoggerCallback
+
+            for callback in callbacks:
+                if isinstance(callback, RichLoggerCallback):
+                    self._packaging_callback = callback
+                    self._verbose_packaging = getattr(callback, "_verbose", True)
+                    break
+
+    def _build_or_pull_image(
+        self,
+        runtime: str,
+        image_ref: str,
+        dockerfile_path: Optional[pathlib.Path],
+        context_path: Optional[pathlib.Path],
+        console: Any,
+    ) -> bool:
+        """Build from Dockerfile or pull pre-existing image. Returns True if built."""
+        if dockerfile_path or context_path:
+            self._build_container_image(
+                runtime=runtime,
+                image_ref=image_ref,
+                dockerfile_path=dockerfile_path,
+                context_path=context_path,
+                console=console,
+            )
+            return True
+
+        if not self.image:
+            raise PackagingError(
+                "Container packaging requires either 'image' or 'dockerfile' in the configuration."
+            )
+
+        # Pre-existing image — only pull if we need the digest
+        if self.use_digest:
+            try:
+                pull_cmd = [runtime, "pull", image_ref]
+                logger.debug("Pulling pre-existing image to get digest: %s", image_ref)
+                subprocess.run(
+                    pull_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+            except subprocess.CalledProcessError as e:
+                logger.warning("Failed to pull image %s: %s", image_ref, e.stderr)
+
+        return False
+
+    def _push_if_needed(self, runtime: str, image_ref: str, console: Any) -> bool:
+        """Push image to registry if configured. Returns True if pushed."""
+        if self.push:
+            self._push_container_image(
+                runtime=runtime, image_ref=image_ref, console=console
+            )
+            return True
+        return False
+
+    def _resolve_final_reference(self, runtime: str, image_ref: str) -> None:
+        """Resolve image digest (if requested) and convert to enroot format."""
+        if self.use_digest:
+            digest_ref = self._get_image_digest(runtime, image_ref)
+            if digest_ref:
+                self._image_reference = digest_ref
+                logger.debug("Using digest-based image reference: %s", digest_ref)
+            else:
+                self._image_reference = image_ref
+                logger.warning(
+                    "Could not resolve image digest, using tag-based reference: %s",
+                    image_ref,
+                )
+        else:
+            self._image_reference = image_ref
+            logger.debug("Using tag-based image reference: %s", image_ref)
+
+        self._image_reference = self._convert_to_enroot_format(self._image_reference)
 
     def generate_setup_commands(
         self,

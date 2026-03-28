@@ -8,128 +8,46 @@ from typing import Any, Dict, List, Optional, Callable, Tuple, Union, TYPE_CHECK
 if TYPE_CHECKING:
     from .api.base import BackendBase
 import argparse
-import sys
-import traceback
-import uuid
 import logging
 import os
 import re
-import time
 import threading
-import json
-from datetime import datetime
 
 from .job import Job
 from .api import create_backend
 from .callbacks import (
     BaseCallback,
-    CompletedContext,
     ExecutionLocus,
-    JobStatusUpdatedContext,
-    PackagingBeginContext,
-    PackagingEndContext,
-    SubmitBeginContext,
-    SubmitEndContext,
-    WorkflowTaskSubmitContext,
 )
 from .task import SlurmTask, normalize_sbatch_options
-from .packaging import get_packaging_strategy
 from .config import load_environment
-from .errors import (
-    PackagingError,
-    SubmissionError,
-    SlurmfileInvalidError,
+from .errors import SlurmfileInvalidError
+
+# Internal modules extracted from this file for maintainability
+from ._polling import (
+    _JobStatusPoller,
+    dispatch_callbacks,
+    maybe_start_job_poller,
+    emit_completed_context,
+    on_poller_finished,
+)
+from ._submission import (
+    prepare_packaging_strategy,
+    setup_job_directory,
+    merge_sbatch_options,
+    render_and_submit_to_backend,
+    create_job_object,
+    finalize_job_submission,
+)
+from ._workflow import (
+    SubmittableWorkflow,
+    render_workflow_slurmfile,
+    write_job_metadata,
+    handle_workflow_slurmfile,
 )
 
 
 logger = logging.getLogger(__name__)
-
-
-class _JobStatusPoller(threading.Thread):
-    """Background thread that emits JobStatusUpdated callbacks."""
-
-    def __init__(
-        self,
-        cluster: "Cluster",
-        job: "Job",
-        subscriptions: List[Tuple[BaseCallback, float]],
-    ) -> None:
-        super().__init__(
-            daemon=True,
-            name=f"slurm-job-poller-{job.id}",
-        )
-        self.cluster = cluster
-        self.job = job
-        self.subscriptions = subscriptions
-        self._stop = threading.Event()
-        self._last_emit: Dict[BaseCallback, float] = {}
-        self._previous_state: Optional[str] = None
-        self._interval = min((interval for _, interval in subscriptions), default=5.0)
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def run(self) -> None:  # pragma: no cover - background thread
-        try:
-            while not self._stop.is_set():
-                timestamp = time.time()
-                try:
-                    status = self.cluster.backend.get_job_status(self.job.id)
-                except Exception as exc:  # pragma: no cover - backend errors
-                    status = {"JobState": "UNKNOWN", "Error": str(exc)}
-
-                self.job._update_status_cache(status, timestamp)
-
-                current_state = status.get("JobState") or "UNKNOWN"
-                is_terminal = current_state in self.job.TERMINAL_STATES
-
-                ctx = JobStatusUpdatedContext(
-                    job=self.job,
-                    job_id=self.job.id,
-                    status=status,
-                    timestamp=timestamp,
-                    previous_state=self._previous_state,
-                    is_terminal=is_terminal,
-                )
-
-                for callback, interval in self.subscriptions:
-                    if not callback.should_run_on_client("on_job_status_update_ctx"):
-                        continue
-
-                    last_emit = self._last_emit.get(callback, 0.0)
-                    should_emit = (
-                        (timestamp - last_emit) >= interval
-                        or self._previous_state != current_state
-                        or is_terminal
-                    )
-
-                    if not should_emit:
-                        continue
-
-                    try:
-                        callback.on_job_status_update_ctx(ctx)
-                    except Exception as exc:  # pragma: no cover - callback errors
-                        logger.warning(
-                            "Callback %s failed during polling: %s",
-                            type(callback).__name__,
-                            exc,
-                            exc_info=True,
-                        )
-                    self._last_emit[callback] = timestamp
-
-                self._previous_state = current_state
-
-                if is_terminal:
-                    self.cluster._emit_completed_context(
-                        self.job,
-                        status,
-                        timestamp,
-                    )
-                    break
-
-                self._stop.wait(self._interval)
-        finally:
-            self.cluster._on_poller_finished(self.job.id)
 
 
 def _looks_like_path(value: str) -> bool:
@@ -144,198 +62,6 @@ def _looks_like_path(value: str) -> bool:
         or value.startswith("~")
         or value.endswith(".toml")
     )
-
-
-def _generate_timestamp_id() -> tuple[str, str]:
-    """Generate timestamp and unique ID for hierarchical directory structure.
-
-    Returns:
-        tuple: (timestamp, unique_id) where timestamp is YYYYMMDD_HHMMSS format
-            and unique_id is an 8-character hex string.
-    """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    unique_id = uuid.uuid4().hex[:8]
-    return timestamp, unique_id
-
-
-def _sanitize_task_name(name: str) -> str:
-    """Sanitize task name for filesystem use.
-
-    Args:
-        name: Raw task name.
-
-    Returns:
-        Sanitized task name safe for filesystem paths.
-
-    Examples:
-        >>> _sanitize_task_name("Train Model")
-        'train_model'
-        >>> _sanitize_task_name("model:v2")
-        'model_v2'
-    """
-    name = name.lower()
-    name = re.sub(r"[^\w\-]", "_", name)
-    name = re.sub(r"_+", "_", name)
-    name = name.strip("_")
-    return name or "task"
-
-
-class SubmittableWorkflow:
-    """Wrapper for workflow submissions that supports pre-building dependent task containers.
-
-    This class is returned by `cluster.submit()` when submitting a workflow, allowing
-    users to specify dependent tasks that need their containers built before the workflow runs.
-
-    When a workflow contains child tasks that use different container configurations,
-    those containers must be built before the workflow starts. This class provides
-    a fluent interface via `with_dependencies()` to specify which tasks need
-    pre-building.
-
-    Attributes:
-        _cluster: The Cluster instance for submission.
-        _submitter: The underlying submitter callable.
-        _task_func: The workflow SlurmTask being submitted.
-        _packaging_config: Packaging configuration override.
-        _dependent_tasks: List of tasks with containers to pre-build.
-        _prebuilt_images: Dict mapping task qualified names to pre-built image references.
-
-    Examples:
-        Basic workflow submission (no dependencies):
-
-            >>> submitter = cluster.submit(my_workflow)
-            >>> job = submitter(input_data)
-
-        Pre-build containers for child tasks:
-
-            >>> job = cluster.submit(my_workflow).with_dependencies([
-            ...     task_a,
-            ...     task_b.with_options(packaging_container_tag="v2"),
-            ... ])(input_data)
-    """
-
-    def __init__(
-        self,
-        cluster: "Cluster",
-        submitter: Callable[..., Job],
-        task_func: "SlurmTask",
-        packaging_config: Optional[Dict[str, Any]],
-        container_dependencies: Optional[List["SlurmTask"]] = None,
-    ):
-        self._cluster = cluster
-        self._submitter = submitter
-        self._task_func = task_func
-        self._packaging_config = packaging_config
-        self._dependent_tasks: List["SlurmTask"] = container_dependencies or []
-        self._prebuilt_images: Dict[str, str] = {}
-
-    def with_dependencies(self, tasks: List["SlurmTask"]) -> "SubmittableWorkflow":
-        """Specify dependent tasks that need their containers pre-built.
-
-        When the workflow is submitted, containers for these tasks will be built
-        and pushed before the workflow starts. The workflow's child tasks can then
-        use these pre-built images instead of inheriting the parent's container.
-
-        Args:
-            tasks: List of SlurmTask instances that will be submitted by the workflow.
-                   These can include tasks with overrides (e.g., task.with_options(...)).
-
-        Returns:
-            Self for method chaining.
-
-        Example:
-            >>> job = cluster.submit(my_workflow).with_dependencies([
-            ...     task_a,
-            ...     task_b.with_options(packaging_container_tag="v2"),
-            ... ])(input_data)
-        """
-        self._dependent_tasks = list(tasks)
-        return self
-
-    def _build_dependency_containers(self) -> Dict[str, str]:
-        """Build containers for all dependent tasks.
-
-        Returns:
-            Dict mapping task function qualified names to their pre-built image references.
-        """
-        prebuilt_images: Dict[str, str] = {}
-
-        logger.info(
-            f"Building dependency containers for {len(self._dependent_tasks)} tasks"
-        )
-
-        for task in self._dependent_tasks:
-            if not isinstance(task, SlurmTask):
-                logger.warning(f"Skipping non-SlurmTask dependency: {type(task)}")
-                continue
-
-            # Get the task's packaging config
-            task_packaging = getattr(task, "packaging", None)
-            logger.debug(f"Task packaging config: {task_packaging}")
-            if not task_packaging:
-                task_packaging = {}
-
-            # Merge with any overrides from with_options
-            effective_packaging = dict(task_packaging)
-
-            # Determine the packaging type
-            pkg_type = effective_packaging.get("type", "auto")
-            logger.debug(f"Packaging type: {pkg_type}")
-
-            # For auto or inherit, use cluster defaults
-            if pkg_type in ("auto", "inherit", None):
-                if self._cluster.packaging_defaults:
-                    effective_packaging = dict(self._cluster.packaging_defaults)
-                    effective_packaging.update(task_packaging)
-
-            # Only build containers
-            if effective_packaging.get("type") != "container":
-                logger.debug(
-                    f"Skipping non-container packaging: {effective_packaging.get('type')}"
-                )
-                continue
-
-            # Get task identifier
-            func = task.func
-            task_name = f"{func.__module__}.{func.__qualname__}"
-
-            logger.info(f"Building container for dependent task: {task_name}")
-            logger.debug(f"Effective packaging: {effective_packaging}")
-
-            # Prepare the packaging strategy
-            packaging_strategy = self._cluster._prepare_packaging_strategy(
-                task, effective_packaging
-            )
-
-            if packaging_strategy and hasattr(packaging_strategy, "_image_reference"):
-                image_ref = packaging_strategy._image_reference
-                if image_ref:
-                    prebuilt_images[task_name] = image_ref
-                    logger.info(f"Pre-built image for {task_name}: {image_ref}")
-                else:
-                    logger.warning(f"No image reference set for {task_name}")
-            else:
-                logger.warning("Packaging strategy has no _image_reference attribute")
-
-        logger.info(
-            f"Built {len(prebuilt_images)} pre-built images: {list(prebuilt_images.keys())}"
-        )
-        return prebuilt_images
-
-    def __call__(self, *args, **kwargs) -> Job:
-        """Submit the workflow, building dependency containers first if specified."""
-        # Build containers for dependencies
-        if self._dependent_tasks:
-            self._prebuilt_images = self._build_dependency_containers()
-
-        # If we have pre-built images, pass them to the workflow via environment
-        if self._prebuilt_images:
-            # Store pre-built images in cluster's environment for rendering
-            if not hasattr(self._cluster, "_prebuilt_dependency_images"):
-                self._cluster._prebuilt_dependency_images = {}
-            self._cluster._prebuilt_dependency_images.update(self._prebuilt_images)
-
-        # Call the original submitter
-        return self._submitter(*args, **kwargs)
 
 
 class Cluster:
@@ -508,74 +234,17 @@ class Cluster:
         cluster._job_pollers_lock = threading.Lock()
         return cluster
 
+    # -------------------------------------------------------------------
+    # Workflow Slurmfile rendering (delegates to _workflow module)
+    # -------------------------------------------------------------------
+
     def _render_workflow_slurmfile(self, env_name: str) -> str:
-        """Render a minimal Slurmfile for nested workflow execution.
+        """Render a minimal Slurmfile for nested workflow execution."""
+        return render_workflow_slurmfile(self, env_name)
 
-        This is used as a fallback when the Cluster was created without a Slurmfile
-        (e.g. via `Cluster.from_args()`), but workflow jobs still need to recreate a
-        Cluster instance on the runner side.
-        """
-        env_name = env_name or "default"
-        backend_config = dict(self._backend_kwargs)
-        job_base_dir = backend_config.pop("job_base_dir", None)
-        if job_base_dir is None:
-            job_base_dir = getattr(self.backend, "job_base_dir", None) or "~/slurm_jobs"
-
-        lines: list[str] = []
-        lines.append(f"[{env_name}.cluster]")
-        lines.append(f'backend = "{self.backend_type}"')
-        lines.append(f'job_base_dir = "{job_base_dir}"')
-        lines.append("")
-
-        if self.backend_type == "ssh":
-            lines.append(f"[{env_name}.cluster.backend_config]")
-            for key in sorted(backend_config.keys()):
-                value = backend_config[key]
-                if value is None:
-                    continue
-                if isinstance(value, bool):
-                    rendered = "true" if value else "false"
-                elif isinstance(value, (int, float)):
-                    rendered = str(value)
-                else:
-                    rendered = str(value).replace('"', '\\"')
-                    rendered = f'"{rendered}"'
-                lines.append(f"{key} = {rendered}")
-            lines.append("")
-
-        from .decorators import _parse_packaging_config
-
-        packaging_config = _parse_packaging_config(self.default_packaging or "auto", {})
-        packaging_config = packaging_config or {}
-        packaging_config.update(self.default_packaging_kwargs)
-        if packaging_config:
-            lines.append(f"[{env_name}.packaging]")
-            for key, value in sorted(packaging_config.items()):
-                if value is None:
-                    continue
-                if isinstance(value, bool):
-                    rendered = "true" if value else "false"
-                elif isinstance(value, (int, float)):
-                    rendered = str(value)
-                else:
-                    rendered = str(value).replace('"', '\\"')
-                    rendered = f'"{rendered}"'
-                lines.append(f"{key} = {rendered}")
-            lines.append("")
-
-        submit_defaults: dict[str, Any] = {}
-        if self.default_account:
-            submit_defaults["account"] = self.default_account
-        if self.default_partition:
-            submit_defaults["partition"] = self.default_partition
-        if submit_defaults:
-            lines.append(f"[{env_name}.submit]")
-            for key, value in sorted(submit_defaults.items()):
-                rendered = str(value).replace('"', '\\"')
-                lines.append(f'{key} = "{rendered}"')
-            lines.append("")
-
-        return "\n".join(lines).rstrip() + "\n"
+    # -------------------------------------------------------------------
+    # Cluster construction from config
+    # -------------------------------------------------------------------
 
     @classmethod
     def from_env(
@@ -788,7 +457,6 @@ class Cluster:
             >>> cluster = Cluster.from_file("prod.toml", default_partition="gpu")
         """
         import tomllib
-        from pathlib import Path
 
         config_file = Path(config_path)
         if not config_file.exists():
@@ -988,188 +656,23 @@ class Cluster:
 
         return cls(**kwargs)
 
+    # -------------------------------------------------------------------
+    # Submission pipeline (delegates to _submission module)
+    # -------------------------------------------------------------------
+
     def _prepare_packaging_strategy(
         self,
         task_func: SlurmTask,
         packaging_config: Optional[Dict[str, Any]],
     ) -> Any:
-        """Prepare the packaging strategy for a task submission.
-
-        Determines the effective packaging configuration by checking:
-        1. Provided packaging_config parameter
-        2. Task's packaging configuration
-        3. Cluster's default packaging
-        4. Legacy Slurmfile packaging defaults
-
-        Args:
-            task_func: The task to package
-            packaging_config: Override packaging configuration
-
-        Returns:
-            The prepared packaging strategy
-        """
-        from .decorators import _parse_packaging_config
-
-        effective_packaging_config: Optional[Dict[str, Any]] = packaging_config
-
-        # Check if there's a pre-built image for this task (takes priority over all other packaging)
-        prebuilt_images = getattr(self, "_prebuilt_dependency_images", None)
-        if prebuilt_images:
-            func = task_func.func
-            task_name = f"{func.__module__}.{func.__qualname__}"
-            logger.debug(
-                f"Checking pre-built images for {task_name}. Available: {list(prebuilt_images.keys())}"
-            )
-            if task_name in prebuilt_images:
-                prebuilt_image = prebuilt_images[task_name]
-                logger.info(f"Using pre-built image for {task_name}: {prebuilt_image}")
-                effective_packaging_config = {
-                    "type": "container",
-                    "image": prebuilt_image,
-                    "push": False,
-                }
-            else:
-                logger.debug(f"No pre-built image found for {task_name}")
-
-        # Use provided packaging_config, else task's packaging, else cluster defaults
-        if effective_packaging_config is None:
-            # Check if task has packaging configuration
-            task_packaging = task_func.packaging
-            # Skip task packaging if it's "auto" or "inherit" to allow cluster defaults to take precedence
-            # This allows workflows to override child task packaging:
-            # - "auto": use whatever the cluster/workflow default is
-            # - "inherit": for container workflows, reuse parent's container image
-            #              for wheel workflows, use inherit strategy with parent_job_dir
-            if task_packaging and task_packaging.get("type") not in (
-                "auto",
-                "inherit",
-                None,
-            ):
-                effective_packaging_config = task_packaging
-            else:
-                # Use cluster default_packaging (new string-based system)
-                if self.default_packaging:
-                    # Start with cluster-level packaging defaults
-                    merged_kwargs = dict(self.default_packaging_kwargs)
-                    # Overlay task-specific packaging_* kwargs
-                    if task_packaging:
-                        task_packaging_kwargs = {
-                            k: v for k, v in task_packaging.items() if k != "type"
-                        }
-                        merged_kwargs.update(task_packaging_kwargs)
-                    effective_packaging_config = _parse_packaging_config(
-                        self.default_packaging, merged_kwargs
-                    )
-                else:
-                    # Fall back to old Slurmfile packaging_defaults for compatibility
-                    effective_packaging_config = getattr(
-                        self, "packaging_defaults", None
-                    )
-                    # If still using auto from task, resolve it now
-                    if effective_packaging_config is None and task_packaging:
-                        effective_packaging_config = task_packaging
-
-        logger.debug("Effective packaging config: %s", effective_packaging_config)
-
-        packaging_start = time.time()
-        begin_ctx = PackagingBeginContext(
-            task=task_func,
-            packaging_config=effective_packaging_config,
-            cluster=self,
-            timestamp=packaging_start,
-        )
-
-        self._dispatch_callbacks("on_begin_package_ctx", begin_ctx)
-
-        strategy = get_packaging_strategy(effective_packaging_config)
-        logger.debug(
-            "[%s] Using packaging strategy: %s", "n/a", type(strategy).__name__
-        )
-        try:
-            result = strategy.prepare(task=task_func, cluster=self)
-            logger.debug("[%s] Packaging prepared: %s", "n/a", result)
-        except Exception as exc:
-            logger.error("[%s] Packaging preparation failed: %s", "n/a", exc)
-            traceback.print_exc(file=sys.stderr)
-            pkg_type = (
-                effective_packaging_config.get("type")
-                if effective_packaging_config
-                else "none"
-            )
-            raise PackagingError(
-                f"Packaging preparation failed for task '{getattr(task_func, '__name__', 'unknown')}'\n"
-                f"Packaging type: {pkg_type}\n"
-                f"Original error: {exc}"
-            ) from exc
-
-        packaging_end = time.time()
-        end_ctx = PackagingEndContext(
-            task=task_func,
-            packaging_result=strategy,
-            cluster=self,
-            timestamp=packaging_end,
-            duration=packaging_end - packaging_start,
-        )
-
-        self._dispatch_callbacks("on_end_package_ctx", end_ctx)
-
-        return strategy
+        """Prepare the packaging strategy for a task submission."""
+        return prepare_packaging_strategy(self, task_func, packaging_config)
 
     def _setup_job_directory(
         self, task_func: SlurmTask, task_defaults: Dict[str, Any]
     ) -> tuple[str, str, str, str]:
-        """Setup job directory structure and return identifiers.
-
-        Args:
-            task_func: The task being submitted
-            task_defaults: Task default options
-
-        Returns:
-            Tuple of (pre_submission_id, sanitized_task_name, target_job_dir, timestamp)
-        """
-        # Generate timestamp and unique ID for hierarchical structure
-        timestamp, unique_id = _generate_timestamp_id()
-        pre_submission_id = f"{timestamp}_{unique_id}"
-
-        # Get task name and sanitize it
-        task_name = task_defaults.get("job_name", task_func.func.__name__)
-        sanitized_task_name = _sanitize_task_name(task_name)
-
-        resolved_job_base_dir = getattr(self.backend, "job_base_dir", None)
-        if resolved_job_base_dir is None:
-            import tempfile
-
-            resolved_job_base_dir = os.path.join(tempfile.gettempdir(), "slurm_jobs")
-            try:
-                os.makedirs(resolved_job_base_dir, exist_ok=True)
-            except (OSError, IOError) as e:
-                logger.debug(f"Failed to create job base directory: {e}")
-
-        # Check if we're in a workflow context for nested structure
-        from .context import _get_active_context
-        from .workflow import WorkflowContext
-
-        ctx = _get_active_context()
-        if isinstance(ctx, WorkflowContext):
-            # Nested in workflow: {workflow_dir}/tasks/{task_name}/{timestamp}_{unique_id}/
-            target_job_dir = os.path.join(
-                str(ctx.workflow_job_dir),
-                "tasks",
-                sanitized_task_name,
-                f"{timestamp}_{unique_id}",
-            )
-        else:
-            # Regular task: {job_base_dir}/{task_name}/{timestamp}_{unique_id}/
-            target_job_dir = os.path.join(
-                resolved_job_base_dir,
-                sanitized_task_name,
-                f"{timestamp}_{unique_id}",
-            )
-        logger.debug(
-            "[%s] Target job directory path: %s", pre_submission_id, target_job_dir
-        )
-
-        return pre_submission_id, sanitized_task_name, target_job_dir, timestamp
+        """Setup job directory structure and return identifiers."""
+        return setup_job_directory(self, task_func, task_defaults)
 
     def _merge_sbatch_options(
         self,
@@ -1178,54 +681,10 @@ class Cluster:
         pre_submission_id: str,
         target_job_dir: str,
     ) -> tuple[Dict[str, Any], str, str]:
-        """Merge SBATCH options with proper precedence.
-
-        Precedence order (lowest to highest):
-        1. Cluster defaults (default_account, default_partition)
-        2. Slurmfile [submit] defaults (for backward compatibility)
-        3. Task decorator defaults
-        4. Runtime overrides
-
-        Args:
-            task_defaults: Options from task decorator
-            submit_overrides: Options from submit() call
-            pre_submission_id: Job submission ID
-            target_job_dir: Job directory path
-
-        Returns:
-            Tuple of (effective_sbatch_options, stdout_path, stderr_path)
-        """
-        effective_sbatch_options: Dict[str, Any] = {}
-
-        # Add cluster-wide defaults (new string-based API)
-        if self.default_account:
-            effective_sbatch_options["account"] = self.default_account
-        if self.default_partition:
-            effective_sbatch_options["partition"] = self.default_partition
-
-        # Add Slurmfile submit defaults if available (for backward compatibility)
-        slurmfile_submit_defaults = getattr(self, "submit_defaults", None)
-        if slurmfile_submit_defaults and isinstance(slurmfile_submit_defaults, dict):
-            # Normalize the Slurmfile submit defaults
-            effective_sbatch_options.update(
-                normalize_sbatch_options(slurmfile_submit_defaults)
-            )
-
-        # Add task defaults
-        effective_sbatch_options.update(task_defaults)
-
-        # Add runtime overrides
-        effective_sbatch_options.update(submit_overrides)
-
-        stdout_path = effective_sbatch_options.get("output")
-        if not stdout_path:
-            stdout_path = f"{target_job_dir}/slurm_{pre_submission_id}.out"
-
-        stderr_path = effective_sbatch_options.get("error")
-        if not stderr_path:
-            stderr_path = f"{target_job_dir}/slurm_{pre_submission_id}.err"
-
-        return effective_sbatch_options, stdout_path, stderr_path
+        """Merge SBATCH options with proper precedence."""
+        return merge_sbatch_options(
+            self, task_defaults, submit_overrides, pre_submission_id, target_job_dir
+        )
 
     def _render_and_submit_to_backend(
         self,
@@ -1240,98 +699,20 @@ class Cluster:
         target_job_dir: str,
         effective_sbatch_options: Dict[str, Any],
     ) -> str:
-        """Render job script and submit to backend.
-
-        Args:
-            task_func: The SlurmTask being submitted
-            func_to_render: The actual function to render in the script
-            args: Task arguments
-            kwargs: Task keyword arguments
-            task_defaults: Task default options
-            submit_overrides: Submit-time option overrides
-            packaging_strategy: The packaging strategy to use
-            pre_submission_id: Job submission ID
-            target_job_dir: Job directory path
-            effective_sbatch_options: Merged SBATCH options
-
-        Returns:
-            The job ID as a string
-        """
-        from .rendering import render_job_script
-
-        submit_begin_ctx = SubmitBeginContext(
-            task=task_func,
-            sbatch_options=dict(effective_sbatch_options),
-            pre_submission_id=pre_submission_id,
-            target_job_dir=target_job_dir,
-            cluster=self,
-            packaging_strategy=packaging_strategy,
-            backend_type=self.backend_type,
-        )
-
-        self._dispatch_callbacks("on_begin_submit_job_ctx", submit_begin_ctx)
-
-        script = render_job_script(
-            task_func=func_to_render,
-            task_args=args,
-            task_kwargs=kwargs,
-            task_definition=task_defaults,
-            sbatch_overrides=dict(submit_overrides),
-            packaging_strategy=packaging_strategy,
-            target_job_dir=target_job_dir,
-            pre_submission_id=pre_submission_id,
-            callbacks=self.callbacks,
-            cluster=self,  # Pass cluster for workflow support
-        )
-        logger.debug(
-            "[%s] --- RENDERED SBATCH SCRIPT ---\n%s\n[%s] --- END RENDERED SCRIPT ---",
+        """Render job script and submit to backend."""
+        return render_and_submit_to_backend(
+            self,
+            task_func,
+            func_to_render,
+            args,
+            kwargs,
+            task_defaults,
+            submit_overrides,
+            packaging_strategy,
             pre_submission_id,
-            script,
-            pre_submission_id,
+            target_job_dir,
+            effective_sbatch_options,
         )
-
-        # Get account and partition from effective options (which includes Slurmfile defaults)
-        submit_account = effective_sbatch_options.get("account")
-        submit_partition = effective_sbatch_options.get("partition")
-        logger.debug("[%s] submit_account: %s", pre_submission_id, submit_account)
-        logger.debug("[%s] submit_partition: %s", pre_submission_id, submit_partition)
-        submission_message = (
-            f"[{pre_submission_id}] Submitting job via {self.backend_type} backend"
-        )
-        try:
-            logger.debug(submission_message)
-            job_submission_result = self.backend.submit_job(
-                script,
-                target_job_dir=target_job_dir,
-                pre_submission_id=pre_submission_id,
-                account=submit_account,
-                partition=submit_partition,
-            )
-        except Exception as e:
-            raise SubmissionError(
-                f"Failed to submit job via backend '{self.backend_type}': {e}",
-                script=script,
-                metadata={
-                    "backend": self.backend_type,
-                    "account": submit_account,
-                    "partition": submit_partition,
-                    "pre_submission_id": pre_submission_id,
-                    "target_job_dir": target_job_dir,
-                },
-            ) from e
-
-        if isinstance(job_submission_result, str):
-            job_id = job_submission_result
-        elif (
-            isinstance(job_submission_result, tuple) and len(job_submission_result) == 2
-        ):
-            job_id, _ = job_submission_result
-        else:
-            raise TypeError(
-                f"Unexpected return type from backend.submit_job: {type(job_submission_result)}"
-            )
-
-        return job_id
 
     def _create_job_object(
         self,
@@ -1345,34 +726,23 @@ class Cluster:
         stdout_path: str,
         stderr_path: str,
     ) -> Job:
-        """Create a Job object from submission results.
-
-        Args:
-            job_id: The SLURM job ID
-            task_func: The task being submitted
-            args: Task arguments
-            kwargs: Task keyword arguments
-            target_job_dir: Job directory path
-            pre_submission_id: Job submission ID
-            effective_sbatch_options: Merged SBATCH options
-            stdout_path: Path to stdout file
-            stderr_path: Path to stderr file
-
-        Returns:
-            The created Job object
-        """
-        return Job(
-            id=job_id,
-            cluster=self,
-            task_func=task_func,
-            args=args,
-            kwargs=kwargs,
-            target_job_dir=target_job_dir,
-            pre_submission_id=pre_submission_id,
-            sbatch_options=dict(effective_sbatch_options),
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
+        """Create a Job object from submission results."""
+        return create_job_object(
+            self,
+            job_id,
+            task_func,
+            args,
+            kwargs,
+            target_job_dir,
+            pre_submission_id,
+            effective_sbatch_options,
+            stdout_path,
+            stderr_path,
         )
+
+    # -------------------------------------------------------------------
+    # Workflow metadata (delegates to _workflow module)
+    # -------------------------------------------------------------------
 
     def _write_job_metadata(
         self,
@@ -1383,73 +753,16 @@ class Cluster:
         target_job_dir: str,
         task_func: SlurmTask,
     ) -> None:
-        """Write job metadata file and emit workflow callbacks.
-
-        Args:
-            job_id: The SLURM job ID
-            pre_submission_id: Job submission ID
-            sanitized_task_name: Sanitized task name
-            timestamp: Job timestamp
-            target_job_dir: Job directory path
-            task_func: The task being submitted
-        """
-        # Generate metadata.json
-        is_workflow = getattr(task_func, "_is_workflow", False)
-        logger.debug(
-            "[%s] is_workflow=%s (from task_func attribute)",
+        """Write job metadata file and emit workflow callbacks."""
+        write_job_metadata(
+            self,
+            job_id,
             pre_submission_id,
-            is_workflow,
+            sanitized_task_name,
+            timestamp,
+            target_job_dir,
+            task_func,
         )
-        metadata = {
-            "job_id": job_id,
-            "pre_submission_id": pre_submission_id,
-            "task_name": sanitized_task_name,
-            "timestamp": timestamp,
-            "submitted_at": time.time(),
-            "status": "PENDING",
-            "is_workflow": is_workflow,
-        }
-
-        # Check if we're in a workflow context (for parent_workflow tracking)
-        from .context import _get_active_context
-        from .workflow import WorkflowContext
-
-        ctx = _get_active_context()
-        if isinstance(ctx, WorkflowContext):
-            metadata["parent_workflow"] = ctx.workflow_job_id
-
-            # Emit workflow task submission event
-            logger.debug("Calling on_workflow_task_submitted callbacks...")
-            try:
-                from pathlib import Path as PathType
-
-                submit_ctx = WorkflowTaskSubmitContext(
-                    parent_workflow_id=ctx.workflow_job_id,
-                    parent_workflow_dir=ctx.workflow_job_dir,
-                    parent_workflow_name=task_func.func.__name__
-                    if hasattr(task_func, "func")
-                    else str(ctx.workflow_job_id).split("_")[0],
-                    child_job_id=job_id,
-                    child_job_dir=PathType(target_job_dir),
-                    child_task_name=sanitized_task_name,
-                    child_is_workflow=is_workflow,
-                    timestamp=time.time(),
-                    cluster=self,
-                )
-                self._dispatch_callbacks("on_workflow_task_submitted_ctx", submit_ctx)
-            except Exception as e:
-                logger.warning(f"Error calling workflow task submitted callbacks: {e}")
-        else:
-            metadata["parent_workflow"] = None
-
-        # Write metadata file via backend
-        metadata_path = os.path.join(target_job_dir, "metadata.json")
-        try:
-            self.backend.write_file(metadata_path, json.dumps(metadata, indent=2))
-        except Exception as exc:
-            logger.warning(
-                "[%s] Failed to write metadata.json: %s", pre_submission_id, exc
-            )
 
     def _handle_workflow_slurmfile(
         self,
@@ -1457,78 +770,8 @@ class Cluster:
         pre_submission_id: str,
         target_job_dir: str,
     ) -> None:
-        """Handle workflow Slurmfile upload for nested workflow execution.
-
-        Args:
-            task_func: The task being submitted
-            pre_submission_id: Job submission ID
-            target_job_dir: Job directory path
-        """
-        # Upload Slurmfile for workflow support
-        is_workflow = getattr(task_func, "_is_workflow", False)
-        logger.debug(
-            "[%s] Checking workflow Slurmfile upload: is_workflow=%s",
-            pre_submission_id,
-            is_workflow,
-        )
-        if is_workflow:
-            slurmfile_path = getattr(self, "slurmfile_path", None)
-            logger.debug(
-                "[%s] slurmfile_path=%s, exists=%s",
-                pre_submission_id,
-                slurmfile_path,
-                os.path.exists(slurmfile_path) if slurmfile_path else False,
-            )
-
-            env_name = getattr(self, "env_name", None) or "default"
-            try:
-                if slurmfile_path and os.path.exists(slurmfile_path):
-                    with open(slurmfile_path, "r", encoding="utf-8") as f:
-                        slurmfile_content = f.read()
-                else:
-                    slurmfile_content = self._render_workflow_slurmfile(env_name)
-
-                # Determine the hostname to use inside the cluster.
-                try:
-                    result = self.backend.execute_command("hostname")
-                    internal_hostname = result.strip() or "localhost"
-                except Exception:
-                    internal_hostname = "localhost"
-
-                import tomlkit
-
-                doc = tomlkit.parse(slurmfile_content)
-                # Navigate to the backend_config table, creating it if needed
-                env_table = doc.setdefault(env_name, tomlkit.table(is_super_table=True))
-                cluster_table = env_table.setdefault(
-                    "cluster", tomlkit.table(is_super_table=True)
-                )
-                backend_cfg = cluster_table.setdefault(
-                    "backend_config", tomlkit.table()
-                )
-                backend_cfg["hostname"] = internal_hostname
-                backend_cfg["port"] = 22
-                modified_content = tomlkit.dumps(doc)
-
-                logger.debug(
-                    "[%s] Prepared Slurmfile for workflow: hostname=%s, port=22",
-                    pre_submission_id,
-                    internal_hostname,
-                )
-
-                remote_slurmfile_path = os.path.join(target_job_dir, "Slurmfile.toml")
-                self.backend.write_file(remote_slurmfile_path, modified_content)
-                logger.debug(
-                    "[%s] Uploaded workflow Slurmfile to %s",
-                    pre_submission_id,
-                    remote_slurmfile_path,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Failed to upload workflow Slurmfile: %s",
-                    pre_submission_id,
-                    exc,
-                )
+        """Handle workflow Slurmfile upload for nested workflow execution."""
+        handle_workflow_slurmfile(self, task_func, pre_submission_id, target_job_dir)
 
     def _finalize_job_submission(
         self,
@@ -1538,33 +781,19 @@ class Cluster:
         target_job_dir: str,
         effective_sbatch_options: Dict[str, Any],
     ) -> Job:
-        """Finalize job submission with callbacks and polling.
-
-        Args:
-            job: The Job object
-            job_id: The SLURM job ID
-            pre_submission_id: Job submission ID
-            target_job_dir: Job directory path
-            effective_sbatch_options: Merged SBATCH options
-
-        Returns:
-            The Job object
-        """
-        submit_end_ctx = SubmitEndContext(
-            job=job,
-            job_id=str(job_id),
-            pre_submission_id=pre_submission_id,
-            target_job_dir=target_job_dir,
-            sbatch_options=dict(effective_sbatch_options),
-            cluster=self,
-            backend_type=self.backend_type,
+        """Finalize job submission with callbacks and polling."""
+        return finalize_job_submission(
+            self,
+            job,
+            job_id,
+            pre_submission_id,
+            target_job_dir,
+            effective_sbatch_options,
         )
 
-        self._dispatch_callbacks("on_end_submit_job_ctx", submit_end_ctx)
-
-        self._maybe_start_job_poller(job)
-
-        return job
+    # -------------------------------------------------------------------
+    # Job submission (public API)
+    # -------------------------------------------------------------------
 
     def submit(
         self,
@@ -1572,7 +801,7 @@ class Cluster:
         packaging_config: Optional[Dict[str, Any]] = None,
         after: Optional[Union[Job, List[Job]]] = None,
         **sbatch_options: Any,
-    ) -> Union[Callable[..., Job], SubmittableWorkflow]:
+    ) -> Union[Callable[..., Job], "SubmittableWorkflow"]:
         """Prepare a task for submission to the cluster.
 
         This method implements a two-phase submission pattern: it returns a callable
@@ -1798,47 +1027,17 @@ class Cluster:
 
         return submitter
 
-    def _dispatch_callbacks(self, method_name: str, context: Any) -> None:
-        """Dispatch a lifecycle event to all registered callbacks.
+    # -------------------------------------------------------------------
+    # Callback dispatch and polling (delegates to _polling module)
+    # -------------------------------------------------------------------
 
-        Calls *method_name* on each callback that opts in via
-        ``should_run_on_client``, catching and logging any exceptions.
-        """
-        for callback in self.callbacks:
-            if not callback.should_run_on_client(method_name):
-                continue
-            try:
-                getattr(callback, method_name)(context)
-            except Exception as exc:
-                logger.warning(
-                    "Callback %s failed in %s: %s",
-                    type(callback).__name__,
-                    method_name,
-                    exc,
-                    exc_info=True,
-                )
+    def _dispatch_callbacks(self, method_name: str, context: Any) -> None:
+        """Dispatch a lifecycle event to all registered callbacks."""
+        dispatch_callbacks(self.callbacks, method_name, context)
 
     def _maybe_start_job_poller(self, job: Job) -> None:
-        subscriptions: List[Tuple[BaseCallback, float]] = []
-        for callback in self.callbacks:
-            interval = callback.get_poll_interval()
-            if interval is None:
-                continue
-            if not callback.should_run_on_client("on_job_status_update_ctx"):
-                continue
-            subscriptions.append((callback, interval))
-
-        if not subscriptions:
-            return
-
-        if not hasattr(self, "_job_pollers"):
-            self._job_pollers: Dict[str, _JobStatusPoller] = {}
-            self._job_pollers_lock = threading.Lock()
-
-        poller = _JobStatusPoller(self, job, subscriptions)
-        with self._job_pollers_lock:
-            self._job_pollers[job.id] = poller
-        poller.start()
+        """Start a background poller for the job if any callback requests polling."""
+        maybe_start_job_poller(self, job)
 
     def _emit_completed_context(
         self,
@@ -1849,54 +1048,27 @@ class Cluster:
         error_payload: Optional[Dict[str, Optional[str]]] = None,
         emitted_by: ExecutionLocus = ExecutionLocus.CLIENT,
     ) -> None:
-        if not hasattr(job, "_completed_context_lock"):
-            return
-
-        with job._completed_context_lock:
-            if getattr(job, "_completed_context_emitted", False):
-                return
-            job._completed_context_emitted = True
-
-        finished_at = timestamp or time.time()
-        job.finished_at = job.finished_at or finished_at
-        start_time = job.started_at or job.created_at
-        duration: Optional[float] = None
-        if job.finished_at is not None and start_time is not None:
-            duration = job.finished_at - start_time
-
-        context = CompletedContext(
-            job=job if emitted_by is ExecutionLocus.CLIENT else None,
-            job_id=job.id,
-            job_dir=job.target_job_dir,
-            job_state=status.get("JobState"),
-            exit_code=status.get("ExitCode"),
-            reason=status.get("Reason")
-            or status.get("Error")
-            or status.get("StateDesc"),
-            stdout_path=job.stdout_path,
-            stderr_path=job.stderr_path,
-            start_time=start_time,
-            end_time=job.finished_at,
-            duration=duration,
-            status=status,
-            error_type=error_payload.get("error_type") if error_payload else None,
-            error_message=error_payload.get("error_message") if error_payload else None,
-            traceback=error_payload.get("traceback") if error_payload else None,
-            result_path=job.result_path,
+        """Emit the CompletedContext callback for a finished job."""
+        emit_completed_context(
+            self.callbacks,
+            job,
+            status,
+            timestamp,
+            error_payload=error_payload,
             emitted_by=emitted_by,
         )
 
-        self._dispatch_callbacks("on_completed_ctx", context)
-
     def _on_poller_finished(self, job_id: str) -> None:
-        pollers = getattr(self, "_job_pollers", None)
-        if pollers is not None:
-            lock = getattr(self, "_job_pollers_lock", None)
-            if lock is not None:
-                with lock:
-                    pollers.pop(job_id, None)
-            else:
-                pollers.pop(job_id, None)
+        """Remove a finished poller from the tracking dict."""
+        on_poller_finished(
+            getattr(self, "_job_pollers", None),
+            getattr(self, "_job_pollers_lock", None),
+            job_id,
+        )
+
+    # -------------------------------------------------------------------
+    # Job retrieval and query (public API)
+    # -------------------------------------------------------------------
 
     def get_job(self, job_id: str) -> Job:
         """Retrieve a Job object for an existing Slurm job by its ID.
@@ -2007,6 +1179,10 @@ class Cluster:
         """
         return self.backend.get_cluster_info()
 
+    # -------------------------------------------------------------------
+    # Context manager
+    # -------------------------------------------------------------------
+
     def __enter__(self) -> "Cluster":
         """Enter cluster context for task execution.
 
@@ -2045,6 +1221,10 @@ class Cluster:
         if hasattr(self, "backend"):
             self.backend.close()
         return False
+
+    # -------------------------------------------------------------------
+    # Diagnostics
+    # -------------------------------------------------------------------
 
     def diagnose(self) -> Dict[str, Any]:
         """Run cluster diagnostics and return a summary of the cluster state.
