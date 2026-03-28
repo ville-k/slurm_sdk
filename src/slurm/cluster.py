@@ -3,7 +3,10 @@ This module provides the Cluster class for submitting and managing jobs on SLURM
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Tuple, Union
+from typing import Any, Dict, List, Optional, Callable, Tuple, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .api.base import BackendBase
 import argparse
 import sys
 import traceback
@@ -461,6 +464,49 @@ class Cluster:
         self.backend = create_backend(backend_type, **backend_only_kwargs)
         self._job_pollers: Dict[str, _JobStatusPoller] = {}
         self._job_pollers_lock = threading.Lock()
+
+    @classmethod
+    def from_backend(
+        cls,
+        backend: "BackendBase",
+        *,
+        backend_type: str = "local",
+        callbacks: Optional[List[BaseCallback]] = None,
+        default_packaging: Optional[str] = None,
+        default_account: Optional[str] = None,
+        default_partition: Optional[str] = None,
+        default_packaging_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> "Cluster":
+        """Create a Cluster with a pre-constructed backend.
+
+        Use this when you already have a backend instance and want to skip
+        the connection setup that ``__init__`` performs.  This is the
+        recommended way to create Cluster instances in tests.
+
+        Args:
+            backend: A pre-constructed backend instance.
+            backend_type: Label for the backend (e.g., "local", "ssh").
+            callbacks: Lifecycle callback instances.
+            default_packaging: Default packaging strategy name.
+            default_account: Default SLURM account.
+            default_partition: Default SLURM partition.
+            default_packaging_kwargs: Extra kwargs forwarded to packaging strategies.
+
+        Returns:
+            A fully initialised Cluster that uses the given backend.
+        """
+        cluster = cls.__new__(cls)
+        cluster.backend_type = backend_type
+        cluster.backend = backend
+        cluster.callbacks = callbacks or []
+        cluster.default_packaging = default_packaging
+        cluster.default_account = default_account
+        cluster.default_partition = default_partition
+        cluster.default_packaging_kwargs = default_packaging_kwargs or {}
+        cluster._backend_kwargs = {}
+        cluster._job_pollers = {}
+        cluster._job_pollers_lock = threading.Lock()
+        return cluster
 
     def _render_workflow_slurmfile(self, env_name: str) -> str:
         """Render a minimal Slurmfile for nested workflow execution.
