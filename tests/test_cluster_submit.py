@@ -1,7 +1,7 @@
 from slurm.callbacks import BaseCallback
-from slurm.cluster import Cluster
 from slurm.decorators import task
 from slurm.packaging.base import PackagingStrategy
+from cluster_factory import make_test_cluster  # type: ignore
 from local_backend import LocalBackend  # type: ignore
 
 
@@ -22,16 +22,6 @@ def add_one(x: int) -> int:
 
 
 def test_cluster_submit_with_local_backend(monkeypatch, tmp_path):
-    # Construct a bare Cluster and use the LocalBackend
-    cluster = object.__new__(Cluster)
-    cluster.backend_type = "LocalBackend"
-    cluster.console = None
-    cluster.backend = LocalBackend(job_base_dir=str(tmp_path))
-    # Add new string-based API attributes
-    cluster.default_packaging = None
-    cluster.default_account = None
-    cluster.default_partition = None
-
     captured: dict[str, object] = {}
 
     class CaptureCallback(BaseCallback):
@@ -41,7 +31,10 @@ def test_cluster_submit_with_local_backend(monkeypatch, tmp_path):
         def on_end_submit_job_ctx(self, ctx):
             captured["end"] = ctx
 
-    cluster.callbacks = [CaptureCallback()]
+    cluster = make_test_cluster(
+        backend=LocalBackend(job_base_dir=str(tmp_path)),
+        callbacks=[CaptureCallback()],
+    )
 
     # Submit and run locally
     job = cluster.submit(add_one, packaging="none")(41)

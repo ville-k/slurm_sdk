@@ -15,6 +15,7 @@ import shlex
 import os
 import importlib
 from .callbacks.callbacks import BaseCallback
+from .validation import validate_job_name
 
 if TYPE_CHECKING:
     from .cluster import Cluster
@@ -143,7 +144,8 @@ def render_job_script(
     job_name = sbatch_params.pop("job_name", None)
     if not job_name:
         job_name = task_func.__name__
-    script_lines.append(f"#SBATCH --job-name={job_name}")
+    validate_job_name(job_name)
+    script_lines.append(f"#SBATCH --job-name={shlex.quote(job_name)}")
 
     output_path = sbatch_params.get("output")
     error_path = sbatch_params.get("error")

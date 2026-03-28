@@ -11,6 +11,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - How-to guide for creating custom task and workflow decorators using existing
   `@task`, `@workflow`, and `with_options()` APIs
+- `write_file()` and `close()` methods on `BackendBase` interface for unified
+  file operations and explicit resource cleanup
+
+### Changed
+
+- Callback exceptions are now logged at WARNING level with full tracebacks
+  (previously logged at DEBUG)
+- SSH backend `host_key_policy` default changed from `"warn"` to `"reject"` for
+  improved security; pass `host_key_policy="warn"` to restore previous behavior
+- Extracted `_dispatch_callbacks()` helper on `Cluster` to deduplicate callback
+  dispatch logic
+- Consolidated `_runner_impl.py` into the `runner/` package; a thin
+  backwards-compatible shim remains for external references
+- Slurmfile TOML modification now uses `tomlkit` for proper round-trip parsing
+  instead of fragile line-by-line string manipulation
+
+### Fixed
+
+- Temp file leak in `Job.get_result()` when downloading results via SSH; files
+  are now cleaned up in a `finally` block
+- Thread-safety issue with `Job` status cache; reads and writes to
+  `_status_cache`, `_status_cache_time`, and `_completed` are now protected
+  by an `RLock`
+- Race condition in `_job_pollers` dict access between main and poller threads
+- Job name validation and quoting in rendered sbatch scripts
+- Replaced deprecated `datetime.utcnow()` with `datetime.now(timezone.utc)`
+- Environment metadata files are now written with `0o600` permissions
+- `LocalBackend.execute_command()` no longer uses `shell=True`
+
+### Dependencies
+
+- Added `tomlkit>=0.12` as a required dependency
 
 ## [0.4.5] - 2026-02-05
 

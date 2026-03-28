@@ -4,14 +4,13 @@ from pathlib import Path
 
 from slurm.decorators import workflow
 from slurm.workflow import WorkflowContext
-from slurm.cluster import Cluster
 from slurm.runtime import JobContext
+from cluster_factory import make_test_cluster  # type: ignore
 
 
 def test_workflow_context_creation(tmp_path):
     """Test creating WorkflowContext."""
-    cluster = object.__new__(Cluster)
-    cluster.job_base_dir = str(tmp_path)
+    cluster = make_test_cluster(backend=None, job_base_dir=str(tmp_path))
 
     workflow_dir = tmp_path / "workflow"
     shared_dir = workflow_dir / "shared"
@@ -33,7 +32,7 @@ def test_workflow_context_creation(tmp_path):
 
 def test_workflow_context_properties(tmp_path):
     """Test WorkflowContext properties."""
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_dir = tmp_path / "workflow"
     shared_dir = workflow_dir / "shared"
 
@@ -57,7 +56,7 @@ def test_workflow_context_properties(tmp_path):
 
 def test_workflow_context_get_task_output_dir(tmp_path):
     """Test WorkflowContext.get_task_output_dir()."""
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_dir = tmp_path / "workflow"
 
     ctx = WorkflowContext(
@@ -74,7 +73,7 @@ def test_workflow_context_get_task_output_dir(tmp_path):
 
 def test_workflow_context_list_task_runs(tmp_path):
     """Test WorkflowContext.list_task_runs()."""
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_dir = tmp_path / "workflow"
 
     ctx = WorkflowContext(
@@ -103,7 +102,7 @@ def test_workflow_context_list_task_runs(tmp_path):
 
 def test_workflow_context_list_task_runs_empty(tmp_path):
     """Test WorkflowContext.list_task_runs() with no runs."""
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_dir = tmp_path / "workflow"
 
     ctx = WorkflowContext(
@@ -162,7 +161,7 @@ def test_workflow_context_injection():
     def workflow_func(x: int, ctx: WorkflowContext) -> int:
         return x + 1
 
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_ctx = WorkflowContext(
         cluster=cluster,
         workflow_job_id="test_123",
@@ -189,7 +188,7 @@ def test_workflow_context_injection_already_provided():
     def workflow_func(x: int, ctx: WorkflowContext) -> int:
         return x + 1
 
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_ctx = WorkflowContext(
         cluster=cluster,
         workflow_job_id="test_123",
@@ -219,7 +218,7 @@ def test_workflow_context_injection_by_name():
     """Test context injection works with different parameter names."""
     from slurm.runner import bind_workflow_context
 
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_ctx = WorkflowContext(
         cluster=cluster,
         workflow_job_id="test_123",
@@ -258,7 +257,7 @@ def test_workflow_context_symmetry_with_job_context():
     (result_path, metadata_path, tasks_dir) that JobContext doesn't have.
     Both share the output_dir concept but use it differently.
     """
-    cluster = object.__new__(Cluster)
+    cluster = make_test_cluster(backend=None)
     workflow_dir = Path("/tmp/workflow")
 
     workflow_ctx = WorkflowContext(

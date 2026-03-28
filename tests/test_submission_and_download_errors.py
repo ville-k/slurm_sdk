@@ -1,9 +1,9 @@
 import pickle
 import pytest
 
-from slurm.cluster import Cluster
 from slurm.decorators import task
 from slurm.errors import SubmissionError, DownloadError
+from cluster_factory import make_test_cluster  # type: ignore
 
 
 @task(job_name="boom")
@@ -23,14 +23,10 @@ class FailingBackend:
 
 
 def test_submission_error_bubbled():
-    c = object.__new__(Cluster)
-    c.backend_type = "FailingBackend"
-    c.backend = FailingBackend()
-    c.callbacks = []
-    # Add new string-based API attributes
-    c.default_packaging = None
-    c.default_account = None
-    c.default_partition = None
+    c = make_test_cluster(
+        backend=FailingBackend(),
+        backend_type="FailingBackend",
+    )
     with pytest.raises(SubmissionError):
         c.submit(echo, packaging="none")(1)
 

@@ -167,6 +167,7 @@ class Job(Generic[T]):
         self._status_cache = None
         self._status_cache_time = 0
         self._completed = False
+        self._status_lock = threading.RLock()
 
         self._result_filename = (
             f"slurm_job_{self.pre_submission_id}_{RESULT_FILENAME}"
@@ -181,11 +182,12 @@ class Job(Generic[T]):
     ) -> None:
         """Update cached status metadata and derived telemetry."""
 
-        self._status_cache = status
-        self._status_cache_time = timestamp or time.time()
-        self._update_status_telemetry(status, self._status_cache_time)
-        if status.get("JobState") in self.TERMINAL_STATES:
-            self._completed = True
+        with self._status_lock:
+            self._status_cache = status
+            self._status_cache_time = timestamp or time.time()
+            self._update_status_telemetry(status, self._status_cache_time)
+            if status.get("JobState") in self.TERMINAL_STATES:
+                self._completed = True
 
     def _update_status_telemetry(
         self, status: Dict[str, Any], timestamp: float
@@ -226,9 +228,10 @@ class Job(Generic[T]):
             >>> if status.get("ExitCode", "").startswith("0:0"):
             ...     print("Job succeeded")
         """
-        current_time = time.time()
-        if self._status_cache and current_time - self._status_cache_time < 1:
-            return self._status_cache
+        with self._status_lock:
+            current_time = time.time()
+            if self._status_cache and current_time - self._status_cache_time < 1:
+                return self._status_cache
 
         try:
             status = self.cluster.backend.get_job_status(self.id)
@@ -285,14 +288,16 @@ class Job(Generic[T]):
         Returns:
             True if the job is in a terminal state, False if still pending or running.
         """
-        if self._completed:
-            return True
+        with self._status_lock:
+            if self._completed:
+                return True
 
         status = self.get_status()
 
-        if status.get("JobState") in self.TERMINAL_STATES:
-            self._completed = True
-            return True
+        with self._status_lock:
+            if status.get("JobState") in self.TERMINAL_STATES:
+                self._completed = True
+                return True
 
         return False
 
@@ -573,6 +578,9 @@ class Job(Generic[T]):
                         else "job directory",
                     )
                 ) from e
+            finally:
+                if os.path.exists(local_temp_path):
+                    os.unlink(local_temp_path)
         else:
             try:
                 local_result_path = result_file_path

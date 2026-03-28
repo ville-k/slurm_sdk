@@ -174,3 +174,25 @@ class BackendBase(abc.ABC):
                   False if backend is local (direct file access).
         """
         pass
+
+    def write_file(self, file_path: str, content: str) -> None:
+        """Write string content to a file on the target system.
+
+        Args:
+            file_path: Absolute path to the destination file.
+            content: The string content to write.
+
+        Raises:
+            NotImplementedError: If the backend does not support this operation.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement write_file()"
+        )
+
+    def close(self) -> None:
+        """Release any resources held by this backend.
+
+        The default implementation is a no-op. Backends that hold
+        persistent connections (e.g. SSH) should override this.
+        """
+        pass

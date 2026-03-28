@@ -14,8 +14,8 @@ from slurm.callbacks import (
     SubmitBeginContext,
     SubmitEndContext,
 )
-from slurm.cluster import Cluster
 from slurm.decorators import task
+from cluster_factory import make_test_cluster  # type: ignore
 from local_backend import LocalBackend  # type: ignore
 
 
@@ -69,16 +69,10 @@ def test_callbacks_invoked_local_backend(tmp_path):
     cbmod = importlib.import_module("cbmod")
     callback = cbmod.TestCallback(str(tmp_path))
 
-    # Create cluster and swap in local backend
-    cluster = object.__new__(Cluster)
-    cluster.backend_type = "LocalBackend"
-    cluster.console = None
-    cluster.callbacks = [callback]
-    cluster.backend = LocalBackend(job_base_dir=str(tmp_path))
-    # Add new string-based API attributes
-    cluster.default_packaging = None
-    cluster.default_account = None
-    cluster.default_partition = None
+    cluster = make_test_cluster(
+        backend=LocalBackend(job_base_dir=str(tmp_path)),
+        callbacks=[callback],
+    )
 
     job = cluster.submit(echo_val, packaging="none")(7)
     job.wait()
