@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Corrected callback method names in callbacks and events explanation; expanded
+  from stub to comprehensive coverage of all 11 hooks, execution loci, and
+  serialization behavior
 - Moved `base64` import to module level in rendering to prevent potential
   `NameError`
 - Temp file leak in `Job.get_result()` when downloading results via SSH; files
