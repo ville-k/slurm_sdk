@@ -2,6 +2,7 @@
 This module provides functions for rendering Slurm job scripts from task definitions.
 """
 
+import base64
 import logging
 import pickle
 from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING
@@ -11,7 +12,6 @@ import inspect
 import sys
 import traceback
 from .packaging.base import PackagingStrategy
-from .task import normalize_sbatch_options
 import pathlib
 import shlex
 import os
@@ -115,9 +115,8 @@ def render_job_script(
         array_items_file: For array jobs, the filename of the pickled array items.
     """
 
-    sbatch_params = normalize_sbatch_options(task_definition)
-    overrides = normalize_sbatch_options(sbatch_overrides)
-    sbatch_params.update(overrides)
+    sbatch_params = dict(task_definition)
+    sbatch_params.update(sbatch_overrides)
 
     # For array jobs, use %a (array task ID) in output/error paths
     if is_array_job:
@@ -206,7 +205,6 @@ def render_job_script(
     # needs to be passed to nested tasks
     if packaging_strategy is not None:
         import json
-        import base64
 
         packaging_config = getattr(packaging_strategy, "config", {})
         if packaging_config:
@@ -242,7 +240,6 @@ def render_job_script(
         prebuilt_images = getattr(cluster, "_prebuilt_dependency_images", None)
         if prebuilt_images:
             import json
-            import base64
 
             images_json = json.dumps(prebuilt_images)
             images_b64 = base64.b64encode(images_json.encode()).decode()

@@ -24,6 +24,7 @@ from .errors import PackagingError, SubmissionError
 from .job import Job
 from .packaging import get_packaging_strategy
 from .task import SlurmTask, normalize_sbatch_options
+from .validation import validate_account, validate_partition
 
 if TYPE_CHECKING:
     from .cluster import Cluster
@@ -263,6 +264,9 @@ def merge_sbatch_options(
 
     effective_sbatch_options.update(task_defaults)
     effective_sbatch_options.update(submit_overrides)
+
+    validate_account(effective_sbatch_options.get("account"))
+    validate_partition(effective_sbatch_options.get("partition"))
 
     stdout_path = effective_sbatch_options.get("output")
     if not stdout_path:
