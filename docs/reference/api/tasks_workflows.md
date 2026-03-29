@@ -7,3 +7,5 @@
 ::: slurm.task.SlurmTask
 
 ::: slurm.workflow.WorkflowContext
+
+::: slurm.runtime.JobContext

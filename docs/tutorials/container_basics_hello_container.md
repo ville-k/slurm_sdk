@@ -98,7 +98,7 @@ The example uses a context manager to scope cluster operations:
 
 ```python
 from slurm.cluster import Cluster
-from slurm.callbacks.callbacks import RichLoggerCallback
+from slurm.callbacks import RichLoggerCallback
 
 
 cluster = Cluster.from_args(

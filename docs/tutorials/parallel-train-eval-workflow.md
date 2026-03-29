@@ -190,6 +190,11 @@ core loop:
 from pathlib import Path
 from typing import Any, List, Optional
 
+from slurm.decorators import workflow
+from slurm.workflow import WorkflowContext
+from slurm.examples.parallel_train_eval.train_task import train_epoch_segment
+from slurm.examples.parallel_train_eval.eval_task import evaluate_epoch
+
 @workflow(time="00:20:00", mem="512M", cpus_per_task=1)
 def parallel_train_eval_workflow(
     epochs: int,

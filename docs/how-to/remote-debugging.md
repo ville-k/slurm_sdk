@@ -35,8 +35,7 @@ For wheel packaging, add `debugpy` to your project dependencies or install it in
 Import and add the `DebugCallback` to your cluster's callbacks:
 
 ```python
-from slurm.callbacks.callbacks import LoggerCallback
-from slurm.callbacks.debug import DebugCallback
+from slurm.callbacks import DebugCallback, LoggerCallback
 from slurm.cluster import Cluster
 from slurm.decorators import task
 
