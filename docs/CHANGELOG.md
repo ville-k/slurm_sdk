@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Usage examples in docstrings for `SlurmTask.__call__()`, `ArrayJob.get_results()`,
+  `WorkflowContext`, and `JobContext`
 - How-to guide for creating custom task and workflow decorators using existing
   `@task`, `@workflow`, and `with_options()` APIs
 - `write_file()` and `close()` methods on `BackendBase` interface for unified
@@ -21,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Expanded container packaging explanation with details on multi-word Python
+  executables, container mounts, working directory, and array job naming
 - Input validation for `account` and `partition` sbatch options is now enforced
   at submission time
 - Removed redundant SBATCH option normalization in `render_job_script()`

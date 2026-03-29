@@ -27,7 +27,7 @@ class WorkflowContext:
     Examples:
         Basic workflow with context:
 
-            >>> from slurm.runtime import WorkflowContext
+            >>> from slurm import WorkflowContext
             >>> @workflow(time="02:00:00")
             ... def my_workflow(data: str, ctx: WorkflowContext):
             ...     # Submit tasks using context cluster
@@ -38,6 +38,21 @@ class WorkflowContext:
             ...     save(output, job.get_result())
             ...
             ...     return job.get_result()
+
+        Using shared_dir for inter-task data:
+
+            >>> @workflow(time="01:00:00")
+            ... def pipeline(ctx: WorkflowContext):
+            ...     shared = Path(ctx.shared_dir)
+            ...     (shared / "checkpoints").mkdir(exist_ok=True)
+            ...     prep_job = preprocess(output_dir=str(shared))
+
+        Checking task outputs:
+
+            >>> @workflow(time="01:00:00")
+            ... def pipeline(ctx: WorkflowContext):
+            ...     task_runs = ctx.list_task_runs("train")
+            ...     latest = ctx.get_latest_task_result("train")
     """
 
     cluster: "Cluster"
