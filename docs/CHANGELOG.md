@@ -7,10 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed missing imports in parallel train-eval workflow tutorial
+- Added `JobContext` to API reference documentation
+- Updated import paths in tutorials and how-to guides to use public API
+  (`from slurm.callbacks import ...`) instead of internal modules
+- Removed unused imports from workflow graph visualization tutorial
+
 ### Added
 
 - Usage examples in docstrings for `SlurmTask.__call__()`, `ArrayJob.get_results()`,
   `WorkflowContext`, and `JobContext`
+- `llms.txt` file with complete API recipes, decision tree, and method signatures
+  for AI coding agent consumption
 - How-to guide for creating custom task and workflow decorators using existing
   `@task`, `@workflow`, and `with_options()` APIs
 - `write_file()` and `close()` methods on `BackendBase` interface for unified
@@ -25,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Expanded container packaging explanation with details on multi-word Python
   executables, container mounts, working directory, and array job naming
+- Restructured GPU, container dependency, and parallelization how-to guides
+  with proper problem statements, prerequisites, steps, and verification
+  sections following Diataxis how-to guide format
 - Input validation for `account` and `partition` sbatch options is now enforced
   at submission time
 - Removed redundant SBATCH option normalization in `render_job_script()`
@@ -66,6 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Corrected callback method names in callbacks and events explanation; expanded
+  from stub to comprehensive coverage of all 11 hooks, execution loci, and
+  serialization behavior
 - Moved `base64` import to module level in rendering to prevent potential
   `NameError`
 - Temp file leak in `Job.get_result()` when downloading results via SSH; files

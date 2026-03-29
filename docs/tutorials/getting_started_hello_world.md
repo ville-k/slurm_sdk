@@ -68,7 +68,7 @@ The example uses argparse helpers to configure the cluster connection:
 
 ```python
 from slurm.cluster import Cluster
-from slurm.callbacks.callbacks import LoggerCallback
+from slurm.callbacks import LoggerCallback
 
 
 parser = argparse.ArgumentParser(description="Submit a simple hello world job")
