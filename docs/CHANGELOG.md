@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept as an alias for backward compatibility
 - Extracted `_resolve_cluster()` helper in context module, eliminating duplicated
   context resolution logic across task submission methods
+- Consolidated packaging config resolution into `resolve_packaging_config()` with
+  documented precedence; eliminates duplicated logic between submission and
+  workflow dependency building
 - Removed submission pipeline wrapper methods from `Cluster`; internal modules
   now call extracted functions directly
 - `Job` now depends on `BackendBase` interface instead of `Cluster`; accepts
