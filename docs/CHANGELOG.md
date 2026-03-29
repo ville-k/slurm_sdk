@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Input validation for `account` and `partition` sbatch options is now enforced
+  at submission time
+- Removed redundant SBATCH option normalization in `render_job_script()`
 - `Job` now depends on `BackendBase` interface instead of `Cluster`; accepts
   `backend` and `on_completed` keyword arguments. The `cluster` parameter is
   kept for backward compatibility
@@ -41,8 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Slurmfile TOML modification now uses `tomlkit` for proper round-trip parsing
   instead of fragile line-by-line string manipulation
 
+### Removed
+
+- Removed unused `_runner_impl.py` backward-compatibility shim
+
 ### Fixed
 
+- Moved `base64` import to module level in rendering to prevent potential
+  `NameError`
 - Temp file leak in `Job.get_result()` when downloading results via SSH; files
   are now cleaned up in a `finally` block
 - Thread-safety issue with `Job` status cache; reads and writes to
