@@ -5,6 +5,7 @@ This module provides functions for rendering Slurm job scripts from task definit
 import base64
 import logging
 import pickle
+from dataclasses import dataclass, field
 from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING
 
 from ._serialization import dumps_pickled
@@ -92,31 +93,43 @@ def _get_importable_module_name(func: Callable) -> str:
         return module_name
 
 
-def render_job_script(
-    task_func: Callable[..., Any],
-    task_args: Tuple[Any, ...],
-    task_kwargs: Dict[str, Any],
-    task_definition: Dict[str, Any],
-    sbatch_overrides: Dict[str, Any],
-    packaging_strategy: PackagingStrategy,
-    target_job_dir: str,
-    pre_submission_id: str,
-    callbacks: List[BaseCallback],
-    cluster: Optional["Cluster"] = None,
-    is_array_job: bool = False,
-    array_items_file: Optional[str] = None,
-) -> str:
-    """
-    Renders the SLURM sbatch script using an explicit target directory path.
+@dataclass
+class RenderContext:
+    """Structured input for :func:`render_job_script`.
 
-    Args:
-        cluster: Optional cluster instance for workflow support (provides Slurmfile path and env name).
-        is_array_job: If True, generates script for native SLURM array job.
-        array_items_file: For array jobs, the filename of the pickled array items.
+    Groups the parameters needed to render an sbatch script so that
+    callers pass a single object instead of 12 positional arguments.
     """
 
-    sbatch_params = dict(task_definition)
-    sbatch_params.update(sbatch_overrides)
+    task_func: Callable[..., Any]
+    task_args: Tuple[Any, ...]
+    task_kwargs: Dict[str, Any]
+    task_definition: Dict[str, Any]
+    sbatch_overrides: Dict[str, Any]
+    packaging_strategy: PackagingStrategy
+    target_job_dir: str
+    pre_submission_id: str
+    callbacks: List[BaseCallback] = field(default_factory=list)
+    cluster: Optional["Cluster"] = None
+    is_array_job: bool = False
+    array_items_file: Optional[str] = None
+
+
+def render_job_script(ctx: RenderContext) -> str:
+    """Render a SLURM sbatch script from a :class:`RenderContext`."""
+    task_func = ctx.task_func
+    task_args = ctx.task_args
+    task_kwargs = ctx.task_kwargs
+    packaging_strategy = ctx.packaging_strategy
+    target_job_dir = ctx.target_job_dir
+    pre_submission_id = ctx.pre_submission_id
+    callbacks = ctx.callbacks
+    cluster = ctx.cluster
+    is_array_job = ctx.is_array_job
+    array_items_file = ctx.array_items_file
+
+    sbatch_params = dict(ctx.task_definition)
+    sbatch_params.update(ctx.sbatch_overrides)
 
     # For array jobs, use %a (array task ID) in output/error paths
     if is_array_job:

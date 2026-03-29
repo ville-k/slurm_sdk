@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidated packaging config resolution into `resolve_packaging_config()` with
   documented precedence; eliminates duplicated logic between submission and
   workflow dependency building
+- Replaced 12 positional parameters on `render_job_script()` with structured
+  `RenderContext` dataclass
 - Removed submission pipeline wrapper methods from `Cluster`; internal modules
   now call extracted functions directly
 - `Job` now depends on `BackendBase` interface instead of `Cluster`; accepts

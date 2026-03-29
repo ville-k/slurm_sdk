@@ -1,4 +1,4 @@
-from slurm.rendering import render_job_script
+from slurm.rendering import RenderContext, render_job_script
 from slurm.callbacks.callbacks import BaseCallback
 from slurm.packaging.base import PackagingStrategy
 
@@ -30,25 +30,27 @@ def test_task_decorator_without_arguments():
 
 def test_render_job_script_basic_includes_sbatch_and_runner(tmp_path):
     script = render_job_script(
-        task_func=sample_func,
-        task_args=(1,),
-        task_kwargs={"y": 2},
-        task_definition={
-            "job_name": "unit-test",
-            "time": "00:01:00",
-            "mem": "1G",
-            "cpus_per_task": 1,
-            "nodes": 1,
-            "ntasks": 1,
-            "account": "acc",
-            "partition": "part",
-            "exclusive": None,
-        },
-        sbatch_overrides={},
-        packaging_strategy=DummyStrategy({}),
-        target_job_dir=str(tmp_path),
-        pre_submission_id="abc123",
-        callbacks=[BaseCallback()],
+        RenderContext(
+            task_func=sample_func,
+            task_args=(1,),
+            task_kwargs={"y": 2},
+            task_definition={
+                "job_name": "unit-test",
+                "time": "00:01:00",
+                "mem": "1G",
+                "cpus_per_task": 1,
+                "nodes": 1,
+                "ntasks": 1,
+                "account": "acc",
+                "partition": "part",
+                "exclusive": None,
+            },
+            sbatch_overrides={},
+            packaging_strategy=DummyStrategy({}),
+            target_job_dir=str(tmp_path),
+            pre_submission_id="abc123",
+            callbacks=[BaseCallback()],
+        )
     )
 
     assert "#SBATCH --job-name=unit-test" in script
@@ -72,25 +74,27 @@ def test_render_job_script_basic_includes_sbatch_and_runner(tmp_path):
 
 def test_render_job_script_gpu_and_per_node_options(tmp_path):
     script = render_job_script(
-        task_func=sample_func,
-        task_args=(1,),
-        task_kwargs={"y": 2},
-        task_definition={
-            "job_name": "gpu-test",
-            "nodes": 2,
-            "ntasks": 2,
-            "ntasks_per_node": 8,
-            "cpus_per_task": 4,
-            "gpus_per_node": 8,
-            "gpus": 8,
-            "gpus_per_task": 1,
-            "gres": "gpu:8",
-        },
-        sbatch_overrides={},
-        packaging_strategy=DummyStrategy({}),
-        target_job_dir=str(tmp_path),
-        pre_submission_id="gid123",
-        callbacks=[BaseCallback()],
+        RenderContext(
+            task_func=sample_func,
+            task_args=(1,),
+            task_kwargs={"y": 2},
+            task_definition={
+                "job_name": "gpu-test",
+                "nodes": 2,
+                "ntasks": 2,
+                "ntasks_per_node": 8,
+                "cpus_per_task": 4,
+                "gpus_per_node": 8,
+                "gpus": 8,
+                "gpus_per_task": 1,
+                "gres": "gpu:8",
+            },
+            sbatch_overrides={},
+            packaging_strategy=DummyStrategy({}),
+            target_job_dir=str(tmp_path),
+            pre_submission_id="gid123",
+            callbacks=[BaseCallback()],
+        )
     )
 
     # Per-node and GPU options
@@ -105,19 +109,21 @@ def test_render_job_script_gpu_and_per_node_options(tmp_path):
 
 def test_render_job_script_handles_arbitrary_directives(tmp_path):
     script = render_job_script(
-        task_func=sample_func,
-        task_args=(),
-        task_kwargs={},
-        task_definition={
-            "time": "00:05:00",
-            "mail_type": "FAIL",
-            "array": "0-3",
-        },
-        sbatch_overrides={"reservation": "debug"},
-        packaging_strategy=DummyStrategy({}),
-        target_job_dir=str(tmp_path),
-        pre_submission_id="arr123",
-        callbacks=[BaseCallback()],
+        RenderContext(
+            task_func=sample_func,
+            task_args=(),
+            task_kwargs={},
+            task_definition={
+                "time": "00:05:00",
+                "mail_type": "FAIL",
+                "array": "0-3",
+            },
+            sbatch_overrides={"reservation": "debug"},
+            packaging_strategy=DummyStrategy({}),
+            target_job_dir=str(tmp_path),
+            pre_submission_id="arr123",
+            callbacks=[BaseCallback()],
+        )
     )
 
     assert "#SBATCH --job-name=sample_func" in script
@@ -129,18 +135,20 @@ def test_render_job_script_handles_arbitrary_directives(tmp_path):
 def test_render_job_script_quotes_job_name(tmp_path):
     """Job names should be quoted in SBATCH directives."""
     script = render_job_script(
-        task_func=sample_func,
-        task_args=(),
-        task_kwargs={},
-        task_definition={
-            "job_name": "my/job:v2",
-            "time": "00:01:00",
-        },
-        sbatch_overrides={},
-        packaging_strategy=DummyStrategy({}),
-        target_job_dir=str(tmp_path),
-        pre_submission_id="quote123",
-        callbacks=[BaseCallback()],
+        RenderContext(
+            task_func=sample_func,
+            task_args=(),
+            task_kwargs={},
+            task_definition={
+                "job_name": "my/job:v2",
+                "time": "00:01:00",
+            },
+            sbatch_overrides={},
+            packaging_strategy=DummyStrategy({}),
+            target_job_dir=str(tmp_path),
+            pre_submission_id="quote123",
+            callbacks=[BaseCallback()],
+        )
     )
 
     assert "#SBATCH --job-name=" in script
@@ -154,18 +162,20 @@ def test_render_job_script_rejects_invalid_job_name(tmp_path):
 
     with pytest.raises(ValueError, match="invalid characters"):
         render_job_script(
-            task_func=sample_func,
-            task_args=(),
-            task_kwargs={},
-            task_definition={
-                "job_name": "bad name with spaces",
-                "time": "00:01:00",
-            },
-            sbatch_overrides={},
-            packaging_strategy=DummyStrategy({}),
-            target_job_dir=str(tmp_path),
-            pre_submission_id="bad123",
-            callbacks=[BaseCallback()],
+            RenderContext(
+                task_func=sample_func,
+                task_args=(),
+                task_kwargs={},
+                task_definition={
+                    "job_name": "bad name with spaces",
+                    "time": "00:01:00",
+                },
+                sbatch_overrides={},
+                packaging_strategy=DummyStrategy({}),
+                target_job_dir=str(tmp_path),
+                pre_submission_id="bad123",
+                callbacks=[BaseCallback()],
+            )
         )
 
 
@@ -183,18 +193,20 @@ def test_render_container_job_with_uv_run_python(tmp_path):
     container_strategy._image_reference = "my-uv-image:latest"
 
     script = render_job_script(
-        task_func=sample_func,
-        task_args=(1,),
-        task_kwargs={"y": 2},
-        task_definition={
-            "job_name": "uv-container-test",
-            "time": "00:10:00",
-        },
-        sbatch_overrides={},
-        packaging_strategy=container_strategy,
-        target_job_dir=str(tmp_path),
-        pre_submission_id="uvtest123",
-        callbacks=[BaseCallback()],
+        RenderContext(
+            task_func=sample_func,
+            task_args=(1,),
+            task_kwargs={"y": 2},
+            task_definition={
+                "job_name": "uv-container-test",
+                "time": "00:10:00",
+            },
+            sbatch_overrides={},
+            packaging_strategy=container_strategy,
+            target_job_dir=str(tmp_path),
+            pre_submission_id="uvtest123",
+            callbacks=[BaseCallback()],
+        )
     )
 
     # Verify PY_EXEC is set as a bash array in setup commands
