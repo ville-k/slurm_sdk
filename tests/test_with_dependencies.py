@@ -112,7 +112,9 @@ class TestSubmittableWorkflow:
     def test_build_dependency_containers_skips_non_container(self):
         """Test that non-container tasks are skipped."""
         mock_cluster = MagicMock(spec=Cluster)
+        mock_cluster.default_packaging = None
         mock_cluster.packaging_defaults = {"type": "wheel"}
+        mock_cluster._prebuilt_dependency_images = None
         mock_submitter = MagicMock()
 
         wrapper = SubmittableWorkflow(

@@ -10,7 +10,7 @@ import os
 import time
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
-from ._submission import prepare_packaging_strategy
+from ._submission import prepare_packaging_strategy, resolve_packaging_config
 from .callbacks import WorkflowTaskSubmitContext
 from .job import Job
 from .task import SlurmTask
@@ -114,24 +114,15 @@ class SubmittableWorkflow:
                 logger.warning(f"Skipping non-SlurmTask dependency: {type(task)}")
                 continue
 
-            task_packaging = getattr(task, "packaging", None)
-            logger.debug(f"Task packaging config: {task_packaging}")
-            if not task_packaging:
-                task_packaging = {}
+            effective_packaging = resolve_packaging_config(self._cluster, task)
 
-            effective_packaging = dict(task_packaging)
-
-            pkg_type = effective_packaging.get("type", "auto")
-            logger.debug(f"Packaging type: {pkg_type}")
-
-            if pkg_type in ("auto", "inherit", None):
-                if self._cluster.packaging_defaults:
-                    effective_packaging = dict(self._cluster.packaging_defaults)
-                    effective_packaging.update(task_packaging)
-
-            if effective_packaging.get("type") != "container":
+            if (
+                not effective_packaging
+                or effective_packaging.get("type") != "container"
+            ):
                 logger.debug(
-                    f"Skipping non-container packaging: {effective_packaging.get('type')}"
+                    f"Skipping non-container packaging: "
+                    f"{effective_packaging.get('type') if effective_packaging else None}"
                 )
                 continue
 
