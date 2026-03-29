@@ -3,6 +3,8 @@
 from typing import TYPE_CHECKING, TypeVar, Generic, List, Optional, Any
 from pathlib import Path
 
+from ._submission import prepare_packaging_strategy
+
 if TYPE_CHECKING:
     from .cluster import Cluster
     from .task import SlurmTask
@@ -155,9 +157,8 @@ class ArrayJob(Generic[T]):
             and self.cluster.backend.is_remote()
         )
 
-        # Use cluster's packaging strategy preparation to respect default_packaging
-        packaging_strategy = self.cluster._prepare_packaging_strategy(
-            self.task, packaging_config=None
+        packaging_strategy = prepare_packaging_strategy(
+            self.cluster, self.task, packaging_config=None
         )
 
         # Prepare packaging

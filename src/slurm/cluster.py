@@ -41,7 +41,6 @@ from ._submission import (
 )
 from ._workflow import (
     SubmittableWorkflow,
-    render_workflow_slurmfile,
     write_job_metadata,
     handle_workflow_slurmfile,
 )
@@ -233,14 +232,6 @@ class Cluster:
         cluster._job_pollers = {}
         cluster._job_pollers_lock = threading.Lock()
         return cluster
-
-    # -------------------------------------------------------------------
-    # Workflow Slurmfile rendering (delegates to _workflow module)
-    # -------------------------------------------------------------------
-
-    def _render_workflow_slurmfile(self, env_name: str) -> str:
-        """Render a minimal Slurmfile for nested workflow execution."""
-        return render_workflow_slurmfile(self, env_name)
 
     # -------------------------------------------------------------------
     # Cluster construction from config
@@ -657,141 +648,6 @@ class Cluster:
         return cls(**kwargs)
 
     # -------------------------------------------------------------------
-    # Submission pipeline (delegates to _submission module)
-    # -------------------------------------------------------------------
-
-    def _prepare_packaging_strategy(
-        self,
-        task_func: SlurmTask,
-        packaging_config: Optional[Dict[str, Any]],
-    ) -> Any:
-        """Prepare the packaging strategy for a task submission."""
-        return prepare_packaging_strategy(self, task_func, packaging_config)
-
-    def _setup_job_directory(
-        self, task_func: SlurmTask, task_defaults: Dict[str, Any]
-    ) -> tuple[str, str, str, str]:
-        """Setup job directory structure and return identifiers."""
-        return setup_job_directory(self, task_func, task_defaults)
-
-    def _merge_sbatch_options(
-        self,
-        task_defaults: Dict[str, Any],
-        submit_overrides: Dict[str, Any],
-        pre_submission_id: str,
-        target_job_dir: str,
-    ) -> tuple[Dict[str, Any], str, str]:
-        """Merge SBATCH options with proper precedence."""
-        return merge_sbatch_options(
-            self, task_defaults, submit_overrides, pre_submission_id, target_job_dir
-        )
-
-    def _render_and_submit_to_backend(
-        self,
-        task_func: SlurmTask,
-        func_to_render: Callable,
-        args: tuple,
-        kwargs: dict,
-        task_defaults: Dict[str, Any],
-        submit_overrides: Dict[str, Any],
-        packaging_strategy: Any,
-        pre_submission_id: str,
-        target_job_dir: str,
-        effective_sbatch_options: Dict[str, Any],
-    ) -> str:
-        """Render job script and submit to backend."""
-        return render_and_submit_to_backend(
-            self,
-            task_func,
-            func_to_render,
-            args,
-            kwargs,
-            task_defaults,
-            submit_overrides,
-            packaging_strategy,
-            pre_submission_id,
-            target_job_dir,
-            effective_sbatch_options,
-        )
-
-    def _create_job_object(
-        self,
-        job_id: str,
-        task_func: SlurmTask,
-        args: tuple,
-        kwargs: dict,
-        target_job_dir: str,
-        pre_submission_id: str,
-        effective_sbatch_options: Dict[str, Any],
-        stdout_path: str,
-        stderr_path: str,
-    ) -> Job:
-        """Create a Job object from submission results."""
-        return create_job_object(
-            self,
-            job_id,
-            task_func,
-            args,
-            kwargs,
-            target_job_dir,
-            pre_submission_id,
-            effective_sbatch_options,
-            stdout_path,
-            stderr_path,
-        )
-
-    # -------------------------------------------------------------------
-    # Workflow metadata (delegates to _workflow module)
-    # -------------------------------------------------------------------
-
-    def _write_job_metadata(
-        self,
-        job_id: str,
-        pre_submission_id: str,
-        sanitized_task_name: str,
-        timestamp: str,
-        target_job_dir: str,
-        task_func: SlurmTask,
-    ) -> None:
-        """Write job metadata file and emit workflow callbacks."""
-        write_job_metadata(
-            self,
-            job_id,
-            pre_submission_id,
-            sanitized_task_name,
-            timestamp,
-            target_job_dir,
-            task_func,
-        )
-
-    def _handle_workflow_slurmfile(
-        self,
-        task_func: SlurmTask,
-        pre_submission_id: str,
-        target_job_dir: str,
-    ) -> None:
-        """Handle workflow Slurmfile upload for nested workflow execution."""
-        handle_workflow_slurmfile(self, task_func, pre_submission_id, target_job_dir)
-
-    def _finalize_job_submission(
-        self,
-        job: Job,
-        job_id: str,
-        pre_submission_id: str,
-        target_job_dir: str,
-        effective_sbatch_options: Dict[str, Any],
-    ) -> Job:
-        """Finalize job submission with callbacks and polling."""
-        return finalize_job_submission(
-            self,
-            job,
-            job_id,
-            pre_submission_id,
-            target_job_dir,
-            effective_sbatch_options,
-        )
-
-    # -------------------------------------------------------------------
     # Job submission (public API)
     # -------------------------------------------------------------------
 
@@ -935,25 +791,24 @@ class Cluster:
 
             submit_overrides = dict(normalized_overrides)
 
-            # Prepare packaging strategy
-            packaging_strategy = self._prepare_packaging_strategy(
-                task_func, packaging_config
+            packaging_strategy = prepare_packaging_strategy(
+                self, task_func, packaging_config
             )
 
-            # Setup job directory and get identifiers
             pre_submission_id, sanitized_task_name, target_job_dir, timestamp = (
-                self._setup_job_directory(task_func, task_defaults)
+                setup_job_directory(self, task_func, task_defaults)
             )
 
-            # Merge SBATCH options with proper precedence
-            effective_sbatch_options, stdout_path, stderr_path = (
-                self._merge_sbatch_options(
-                    task_defaults, submit_overrides, pre_submission_id, target_job_dir
-                )
+            effective_sbatch_options, stdout_path, stderr_path = merge_sbatch_options(
+                self,
+                task_defaults,
+                submit_overrides,
+                pre_submission_id,
+                target_job_dir,
             )
 
-            # Render script and submit to backend
-            job_id = self._render_and_submit_to_backend(
+            job_id = render_and_submit_to_backend(
+                self,
                 task_func,
                 func_to_render,
                 args,
@@ -966,8 +821,8 @@ class Cluster:
                 effective_sbatch_options,
             )
 
-            # Create Job object
-            job = self._create_job_object(
+            job = create_job_object(
+                self,
                 job_id,
                 task_func,
                 args,
@@ -979,8 +834,8 @@ class Cluster:
                 stderr_path,
             )
 
-            # Write job metadata and emit workflow callbacks
-            self._write_job_metadata(
+            write_job_metadata(
+                self,
                 job_id,
                 pre_submission_id,
                 sanitized_task_name,
@@ -989,15 +844,15 @@ class Cluster:
                 task_func,
             )
 
-            # Handle workflow Slurmfile upload
-            self._handle_workflow_slurmfile(
+            handle_workflow_slurmfile(
+                self,
                 task_func,
                 pre_submission_id,
                 target_job_dir,
             )
 
-            # Finalize submission and return job
-            return self._finalize_job_submission(
+            return finalize_job_submission(
+                self,
                 job,
                 job_id,
                 pre_submission_id,

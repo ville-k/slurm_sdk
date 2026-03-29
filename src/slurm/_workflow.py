@@ -10,6 +10,7 @@ import os
 import time
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
+from ._submission import prepare_packaging_strategy
 from .callbacks import WorkflowTaskSubmitContext
 from .job import Job
 from .task import SlurmTask
@@ -140,8 +141,8 @@ class SubmittableWorkflow:
             logger.info(f"Building container for dependent task: {task_name}")
             logger.debug(f"Effective packaging: {effective_packaging}")
 
-            packaging_strategy = self._cluster._prepare_packaging_strategy(
-                task, effective_packaging
+            packaging_strategy = prepare_packaging_strategy(
+                self._cluster, task, effective_packaging
             )
 
             if packaging_strategy and hasattr(packaging_strategy, "_image_reference"):
