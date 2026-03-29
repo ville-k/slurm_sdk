@@ -327,7 +327,7 @@ def render_and_submit_to_backend(
     Returns:
         The job ID as a string.
     """
-    from .rendering import render_job_script
+    from .rendering import RenderContext, render_job_script
 
     submit_begin_ctx = SubmitBeginContext(
         task=task_func,
@@ -342,16 +342,18 @@ def render_and_submit_to_backend(
     cluster._dispatch_callbacks("on_begin_submit_job_ctx", submit_begin_ctx)
 
     script = render_job_script(
-        task_func=func_to_render,
-        task_args=args,
-        task_kwargs=kwargs,
-        task_definition=task_defaults,
-        sbatch_overrides=dict(submit_overrides),
-        packaging_strategy=packaging_strategy,
-        target_job_dir=target_job_dir,
-        pre_submission_id=pre_submission_id,
-        callbacks=cluster.callbacks,
-        cluster=cluster,
+        RenderContext(
+            task_func=func_to_render,
+            task_args=args,
+            task_kwargs=kwargs,
+            task_definition=task_defaults,
+            sbatch_overrides=dict(submit_overrides),
+            packaging_strategy=packaging_strategy,
+            target_job_dir=target_job_dir,
+            pre_submission_id=pre_submission_id,
+            callbacks=cluster.callbacks,
+            cluster=cluster,
+        )
     )
     logger.debug(
         "[%s] --- RENDERED SBATCH SCRIPT ---\n%s\n[%s] --- END RENDERED SCRIPT ---",

@@ -125,7 +125,7 @@ class ArrayJob(Generic[T]):
             generate_array_spec,
             convert_job_items_to_placeholders,
         )
-        from .rendering import render_job_script
+        from .rendering import RenderContext, render_job_script
         import uuid
         from datetime import datetime
         import re
@@ -202,18 +202,20 @@ class ArrayJob(Generic[T]):
 
                 # Render the job script with array job support
                 script = render_job_script(
-                    task_func=self.task.func,
-                    task_args=(),  # Not used for array jobs
-                    task_kwargs={},  # Not used for array jobs
-                    task_definition=task_defaults,
-                    sbatch_overrides=sbatch_overrides,
-                    packaging_strategy=packaging_strategy,
-                    target_job_dir=target_job_dir,
-                    pre_submission_id=pre_submission_id,
-                    callbacks=self.cluster.callbacks,
-                    cluster=self.cluster,
-                    is_array_job=True,
-                    array_items_file=array_items_filename,
+                    RenderContext(
+                        task_func=self.task.func,
+                        task_args=(),
+                        task_kwargs={},
+                        task_definition=task_defaults,
+                        sbatch_overrides=sbatch_overrides,
+                        packaging_strategy=packaging_strategy,
+                        target_job_dir=target_job_dir,
+                        pre_submission_id=pre_submission_id,
+                        callbacks=self.cluster.callbacks,
+                        cluster=self.cluster,
+                        is_array_job=True,
+                        array_items_file=array_items_filename,
+                    )
                 )
 
                 # Upload the array items file to the target directory
@@ -252,18 +254,20 @@ class ArrayJob(Generic[T]):
 
             # Render the job script with array job support
             script = render_job_script(
-                task_func=self.task.func,
-                task_args=(),  # Not used for array jobs
-                task_kwargs={},  # Not used for array jobs
-                task_definition=task_defaults,
-                sbatch_overrides=sbatch_overrides,
-                packaging_strategy=packaging_strategy,
-                target_job_dir=target_job_dir,
-                pre_submission_id=pre_submission_id,
-                callbacks=self.cluster.callbacks,
-                cluster=self.cluster,
-                is_array_job=True,
-                array_items_file=array_items_filename,
+                RenderContext(
+                    task_func=self.task.func,
+                    task_args=(),
+                    task_kwargs={},
+                    task_definition=task_defaults,
+                    sbatch_overrides=sbatch_overrides,
+                    packaging_strategy=packaging_strategy,
+                    target_job_dir=target_job_dir,
+                    pre_submission_id=pre_submission_id,
+                    callbacks=self.cluster.callbacks,
+                    cluster=self.cluster,
+                    is_array_job=True,
+                    array_items_file=array_items_filename,
+                )
             )
 
             # Submit the array job to the backend
