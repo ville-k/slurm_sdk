@@ -19,9 +19,9 @@ nav:
       - how-to/index.md
       - Using the CLI: how-to/cli.md
       - Remote Debugging: how-to/remote-debugging.md
-      - Container Dependencies (Map-Reduce): how-to/container_dependencies.md
-      - Parallelization Patterns: how-to/parallelization_patterns.md
-      - GPU Hello Torch: how-to/hello_torch.md
+      - Chaining Containerized Tasks: how-to/container_dependencies.md
+      - Choosing a Parallelization Pattern: how-to/parallelization_patterns.md
+      - Running GPU Tasks in Containers: how-to/hello_torch.md
       - SSH Security: how-to/ssh_security.md
       - Custom Task Decorators: how-to/custom-task-decorators.md
   - Reference:

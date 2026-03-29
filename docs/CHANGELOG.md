@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Restructured GPU, container dependency, and parallelization how-to guides
+  with proper problem statements, prerequisites, steps, and verification
+  sections following Diataxis how-to guide format
 - Input validation for `account` and `partition` sbatch options is now enforced
   at submission time
 - Removed redundant SBATCH option normalization in `render_job_script()`
