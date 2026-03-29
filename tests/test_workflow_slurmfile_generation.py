@@ -1,4 +1,5 @@
 from slurm import Cluster
+from slurm._workflow import handle_workflow_slurmfile
 from slurm.decorators import workflow
 from slurm.workflow import WorkflowContext
 
@@ -46,7 +47,8 @@ def test_workflow_slurmfile_uploaded_without_source_slurmfile(tmp_path) -> None:
     }
     cluster.backend = _DummyUploadBackend("slurm-control\n")  # type: ignore[assignment]
 
-    cluster._handle_workflow_slurmfile(
+    handle_workflow_slurmfile(
+        cluster,
         task_func=_wf,
         pre_submission_id="pre123",
         target_job_dir="/home/slurm/slurm_jobs/wf/ts_pre123",

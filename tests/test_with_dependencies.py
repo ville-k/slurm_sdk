@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from slurm import task
+from slurm._submission import prepare_packaging_strategy
 from slurm.decorators import workflow as workflow_decorator
 from slurm.cluster import Cluster, SubmittableWorkflow
 from slurm.job import Job
@@ -230,10 +231,10 @@ class TestClusterSubmitWithDependencies:
 
 
 class TestPrebuiltImageUsage:
-    """Tests for using pre-built images in _prepare_packaging_strategy."""
+    """Tests for using pre-built images in prepare_packaging_strategy."""
 
     def test_prepare_packaging_strategy_uses_prebuilt_image(self):
-        """Test that _prepare_packaging_strategy uses pre-built image when available."""
+        """Test that prepare_packaging_strategy uses pre-built image when available."""
         with patch.object(Cluster, "__init__", lambda self: None):
             cluster = Cluster()
             cluster.backend = MagicMock()
@@ -255,7 +256,7 @@ class TestPrebuiltImageUsage:
                 mock_strategy = MagicMock()
                 mock_get_strategy.return_value = mock_strategy
 
-                cluster._prepare_packaging_strategy(sample_task, None)
+                prepare_packaging_strategy(cluster, sample_task, None)
 
                 # Check that get_packaging_strategy was called with container config
                 call_args = mock_get_strategy.call_args
