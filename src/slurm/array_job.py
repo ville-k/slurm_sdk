@@ -350,6 +350,17 @@ class ArrayJob(Generic[T]):
 
         Returns:
             List of results from all array tasks.
+
+        Examples:
+            Collect results from a mapped task:
+
+                >>> results = process.map(["a.csv", "b.csv", "c.csv"]).get_results()
+                >>> for r in results:
+                ...     print(r)
+
+            With timeout:
+
+                >>> results = process.map(items).get_results(timeout=300)
         """
         results = []
         for job in self._jobs:

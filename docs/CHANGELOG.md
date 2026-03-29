@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Usage examples in docstrings for `SlurmTask.__call__()`, `ArrayJob.get_results()`,
+  `WorkflowContext`, and `JobContext`
 - `llms.txt` file with complete API recipes, decision tree, and method signatures
   for AI coding agent consumption
 - How-to guide for creating custom task and workflow decorators using existing
@@ -31,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Expanded container packaging explanation with details on multi-word Python
+  executables, container mounts, working directory, and array job naming
 - Restructured GPU, container dependency, and parallelization how-to guides
   with proper problem statements, prerequisites, steps, and verification
   sections following Diataxis how-to guide format

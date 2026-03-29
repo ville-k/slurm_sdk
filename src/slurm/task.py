@@ -237,6 +237,20 @@ class SlurmTask:
         Raises:
             RuntimeError: If called outside of a cluster or workflow context.
                 Use `.unwrapped(*args, **kwargs)` for local execution.
+
+        Examples:
+            Calling within a Cluster context:
+
+                >>> with Cluster(backend_type="ssh", hostname="hpc") as cluster:
+                ...     job = my_task(arg1, arg2)
+                ...     result = job.get_result()
+
+            Calling within a workflow:
+
+                >>> @workflow(time="01:00:00")
+                ... def my_pipeline(ctx: WorkflowContext):
+                ...     job = my_task("data.csv")
+                ...     return job.get_result()
         """
         from .context import _resolve_cluster
         from .job import Job
