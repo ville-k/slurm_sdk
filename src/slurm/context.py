@@ -69,3 +69,37 @@ def _clear_active_context() -> None:
     This is primarily useful for testing to ensure a clean state.
     """
     _cluster_context.set(None)
+
+
+def _resolve_cluster(caller_name: str) -> "Cluster":
+    """Resolve the active Cluster from the current context.
+
+    Args:
+        caller_name: Name of the calling function, used in error messages.
+
+    Returns:
+        The active Cluster instance.
+
+    Raises:
+        RuntimeError: If no context is active or cluster cannot be resolved.
+    """
+    from .cluster import Cluster
+
+    ctx = _get_active_context()
+    if ctx is None:
+        raise RuntimeError(
+            f"@task decorated function '{caller_name}' must be "
+            "called within a Cluster context or @workflow.\n"
+            f"For local execution, use: {caller_name}.unwrapped(...)"
+        )
+    if isinstance(ctx, Cluster):
+        return ctx
+    cluster = getattr(ctx, "cluster", None)
+    if cluster is None:
+        raise RuntimeError(
+            "Workflow context does not have an initialized cluster.\n"
+            "This typically means the cluster failed to initialize when the workflow started.\n"
+            "Check the workflow job logs for cluster initialization errors.\n"
+            "Common causes: Slurmfile not found, SSH connection timeout, or invalid backend configuration."
+        )
+    return cluster

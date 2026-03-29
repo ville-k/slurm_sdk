@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Input validation for `account` and `partition` sbatch options is now enforced
   at submission time
 - Removed redundant SBATCH option normalization in `render_job_script()`
+- Merged `SlurmTaskWithDependencies` into `SlurmTask`; `.after()` now returns a
+  `SlurmTask` with bound dependencies. The `SlurmTaskWithDependencies` name is
+  kept as an alias for backward compatibility
+- Extracted `_resolve_cluster()` helper in context module, eliminating duplicated
+  context resolution logic across task submission methods
 - `Job` now depends on `BackendBase` interface instead of `Cluster`; accepts
   `backend` and `on_completed` keyword arguments. The `cluster` parameter is
   kept for backward compatibility

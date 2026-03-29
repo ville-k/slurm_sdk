@@ -94,263 +94,6 @@ def normalize_sbatch_options(options: Dict[str, Any] | None) -> Dict[str, Any]:
     return normalized
 
 
-class SlurmTaskWithDependencies:
-    """Wrapper for a SlurmTask with pre-specified dependencies.
-
-    This class is returned by SlurmTask.after() and enables dependency
-    specification before task submission. It supports both:
-    - Calling directly: task.after(deps)(args) -> Job
-    - Mapping: task.after(deps).map(items) -> ArrayJob
-
-    The key benefit is that dependencies are specified BEFORE the operation
-    (call or map), allowing immediate submission while including dependencies.
-
-    This class exposes the same interface as SlurmTask for compatibility.
-
-    Attributes:
-        task: The underlying SlurmTask.
-        dependencies: List of Job instances that must complete first.
-
-    Examples:
-        Regular task with dependencies:
-
-            >>> prep = preprocess()
-            >>> result = process.after(prep)("data.csv")
-
-        Array job with dependencies (eager execution):
-
-            >>> prep = preprocess()
-            >>> array_job = process.after(prep).map(items)
-    """
-
-    def __init__(self, task: "SlurmTask", dependencies: List):
-        """Initialize wrapper with task and dependencies.
-
-        Args:
-            task: The SlurmTask to wrap.
-            dependencies: List of Job instances to depend on.
-        """
-        self.task = task
-        self.dependencies = dependencies
-        # Expose task attributes for compatibility
-        self.func = task.func
-        self.sbatch_options = task.sbatch_options.copy()
-        self.packaging = task.packaging.copy() if task.packaging else None
-        self.slurm_options = task.slurm_options
-        # For compatibility with tests that check _pending_dependencies
-        self._pending_dependencies = dependencies
-
-    @property
-    def __name__(self):
-        """Return the wrapped function's name."""
-        return self.func.__name__
-
-    @property
-    def __doc__(self):
-        """Return the wrapped function's docstring."""
-        return self.func.__doc__
-
-    @property
-    def unwrapped(self):
-        """Access the original function for local testing.
-
-        Returns:
-            The original unwrapped function.
-        """
-        return self.func
-
-    def __call__(self, *args, **kwargs):
-        """Call the task with dependencies.
-
-        Submits the task to the cluster with the pre-specified dependencies.
-        This is equivalent to calling the task with after= parameter.
-
-        Args:
-            *args: Positional arguments for the task function.
-            **kwargs: Keyword arguments for the task function.
-
-        Returns:
-            Job object for the submitted task.
-        """
-        from .context import _get_active_context
-        from .job import Job
-
-        # Check if we're in a cluster or workflow context
-        ctx = _get_active_context()
-        if ctx is None:
-            raise RuntimeError(
-                f"@task decorated function '{self.task.func.__name__}' must be "
-                "called within a Cluster context or @workflow.\n"
-                f"For local execution, use: {self.task.func.__name__}.unwrapped(...)"
-            )
-
-        # Get the cluster from context
-        from .cluster import Cluster
-
-        if isinstance(ctx, Cluster):
-            cluster = ctx
-        else:
-            cluster = getattr(ctx, "cluster", None)
-            if cluster is None:
-                raise RuntimeError(
-                    "Workflow context does not have an initialized cluster.\n"
-                    "This typically means the cluster failed to initialize when the workflow started.\n"
-                    "Check the workflow job logs for cluster initialization errors.\n"
-                    "Common causes: Slurmfile not found, SSH connection timeout, or invalid backend configuration."
-                )
-
-        # Extract Job dependencies from arguments (automatic dependency tracking)
-        automatic_dependencies = []
-        resolved_args = []
-        resolved_kwargs = {}
-
-        # Process positional arguments
-        for arg in args:
-            if isinstance(arg, Job):
-                automatic_dependencies.append(arg)
-                from .task import JobResultPlaceholder
-
-                resolved_args.append(JobResultPlaceholder(arg.id))
-            else:
-                resolved_args.append(arg)
-
-        # Process keyword arguments
-        for key, value in kwargs.items():
-            if isinstance(value, Job):
-                automatic_dependencies.append(value)
-                from .task import JobResultPlaceholder
-
-                resolved_kwargs[key] = JobResultPlaceholder(value.id)
-            else:
-                resolved_kwargs[key] = value
-
-        # Expand ArrayJob objects to avoid pickling them in dependency metadata
-        expanded_deps = []
-        for dep in self.dependencies + automatic_dependencies:
-            if hasattr(dep, "_jobs"):
-                expanded_deps.extend(dep._jobs)
-            else:
-                expanded_deps.append(dep)
-
-        submitter = cluster.submit(self.task, after=expanded_deps)
-        job = submitter(*resolved_args, **resolved_kwargs)
-
-        return job
-
-    def map(self, items: List[Any], max_concurrent: Optional[int] = None):
-        """Map task over items with dependencies, creating an eagerly-submitted array job.
-
-        This method creates an array job that depends on the pre-specified
-        dependencies and submits it immediately (eager execution).
-
-        Args:
-            items: List of items to process.
-            max_concurrent: Maximum concurrent tasks (optional).
-
-        Returns:
-            ArrayJob instance (already submitted).
-
-        Examples:
-            >>> prep = preprocess()
-            >>> array_job = process.after(prep).map(items)
-            >>> results = array_job.get_results()
-        """
-        from .context import _get_active_context
-        from .array_job import ArrayJob
-
-        ctx = _get_active_context()
-        if ctx is None:
-            raise RuntimeError(
-                "Task.map() must be called within a Cluster context or @workflow."
-            )
-
-        # Get cluster from context
-        from .cluster import Cluster
-
-        if isinstance(ctx, Cluster):
-            cluster = ctx
-        else:
-            cluster = getattr(ctx, "cluster", None)
-            if cluster is None:
-                raise RuntimeError(
-                    f"Context {type(ctx).__name__} does not have a cluster attribute"
-                )
-
-        # Create and eagerly submit array job with dependencies
-        return ArrayJob(
-            task=self.task,
-            items=items,
-            cluster=cluster,
-            max_concurrent=max_concurrent,
-            dependencies=self.dependencies,
-        )
-
-    def after(self, *jobs):
-        """Add more dependencies (fluent chaining).
-
-        Returns a new SlurmTaskWithDependencies with additional dependencies.
-
-        Args:
-            *jobs: Additional Job or ArrayJob instances to depend on.
-
-        Returns:
-            New SlurmTaskWithDependencies with combined dependencies.
-
-        Examples:
-            >>> job1 = task1()
-            >>> job2 = task2()
-            >>> job3 = task3.after(job1).after(job2)("data.csv")
-        """
-        from .job import Job
-        from .array_job import ArrayJob
-
-        # Flatten new dependencies
-        flattened_deps = list(self.dependencies)  # Copy existing
-        for job in jobs:
-            if isinstance(job, ArrayJob):
-                if not job._submitted:
-                    job._submit()
-                flattened_deps.extend(job._jobs)
-            elif isinstance(job, Job):
-                flattened_deps.append(job)
-            else:
-                raise TypeError(
-                    f".after() expects Job or ArrayJob arguments, got {type(job).__name__}"
-                )
-
-        return SlurmTaskWithDependencies(task=self.task, dependencies=flattened_deps)
-
-    def with_options(self, **sbatch_options):
-        """Create variant with different SBATCH options.
-
-        Returns a new SlurmTaskWithDependencies with updated options.
-
-        Args:
-            **sbatch_options: SBATCH parameter overrides.
-
-        Returns:
-            New SlurmTaskWithDependencies with merged options.
-
-        Examples:
-            >>> prep = preprocess()
-            >>> gpu_job = train.after(prep).with_options(gpus=2).map(configs)
-        """
-        # Create new task with merged options
-        merged_options = {**self.task.sbatch_options, **sbatch_options}
-        new_task = SlurmTask(
-            func=self.task.func,
-            sbatch_options=merged_options,
-            packaging=self.task.packaging.copy() if self.task.packaging else None,
-            **self.task.slurm_options,
-        )
-
-        return SlurmTaskWithDependencies(task=new_task, dependencies=self.dependencies)
-
-    def __repr__(self) -> str:
-        task_name = self.task.sbatch_options.get("job_name", self.task.func.__name__)
-        return f"SlurmTaskWithDependencies(task={task_name!r}, dependencies={len(self.dependencies)})"
-
-
 class SlurmTask:
     """A wrapper around a Python function that can be executed on a Slurm cluster.
 
@@ -376,7 +119,7 @@ class SlurmTask:
 
         subgraph Dependencies
             B --> D[".after(jobs)"]
-            D --> E[SlurmTaskWithDependencies]
+            D --> E["SlurmTask (with deps)"]
         end
 
         subgraph Execution
@@ -458,6 +201,24 @@ class SlurmTask:
         # Track container dependencies for workflows (tasks that need their containers pre-built)
         self._container_dependencies: list = []
 
+    @property
+    def task(self) -> "SlurmTask":
+        """Return self for backward compatibility with SlurmTaskWithDependencies API.
+
+        Returns:
+            This SlurmTask instance.
+        """
+        return self
+
+    @property
+    def dependencies(self) -> list:
+        """Return pending dependencies for backward compatibility with SlurmTaskWithDependencies API.
+
+        Returns:
+            List of pending Job dependencies.
+        """
+        return self._pending_dependencies
+
     def __call__(self, *args, **kwargs):
         """
         Call the task - returns Job if in cluster context, raises otherwise.
@@ -477,34 +238,10 @@ class SlurmTask:
             RuntimeError: If called outside of a cluster or workflow context.
                 Use `.unwrapped(*args, **kwargs)` for local execution.
         """
-        from .context import _get_active_context
+        from .context import _resolve_cluster
         from .job import Job
 
-        # Check if we're in a cluster or workflow context
-        ctx = _get_active_context()
-        if ctx is None:
-            raise RuntimeError(
-                f"@task decorated function '{self.func.__name__}' must be "
-                "called within a Cluster context or @workflow.\n"
-                f"For local execution, use: {self.func.__name__}.unwrapped(...)\n"
-                f"For cluster execution, use: with Cluster.from_env() as cluster: ..."
-            )
-
-        # Get the cluster from context (could be Cluster or WorkflowContext)
-        from .cluster import Cluster
-
-        if isinstance(ctx, Cluster):
-            cluster = ctx
-        else:
-            # WorkflowContext has .cluster attribute
-            cluster = getattr(ctx, "cluster", None)
-            if cluster is None:
-                raise RuntimeError(
-                    "Workflow context does not have an initialized cluster.\n"
-                    "This typically means the cluster failed to initialize when the workflow started.\n"
-                    "Check the workflow job logs for cluster initialization errors.\n"
-                    "Common causes: Slurmfile not found, SSH connection timeout, or invalid backend configuration."
-                )
+        cluster = _resolve_cluster(self.func.__name__)
 
         # Extract Job dependencies from arguments (for automatic dependency tracking)
         # Also replace Job objects with placeholders that will be resolved at runtime
@@ -512,26 +249,22 @@ class SlurmTask:
         resolved_args = []
         resolved_kwargs = {}
 
-        # Process positional arguments
         for arg in args:
             if isinstance(arg, Job):
                 automatic_dependencies.append(arg)
-                # Replace Job with a JobResultPlaceholder that will be resolved in the runner
                 resolved_args.append(JobResultPlaceholder(arg.id))
             else:
                 resolved_args.append(arg)
 
-        # Process keyword arguments
         for key, value in kwargs.items():
             if isinstance(value, Job):
                 automatic_dependencies.append(value)
-                # Replace Job with a JobResultPlaceholder that will be resolved in the runner
                 resolved_kwargs[key] = JobResultPlaceholder(value.id)
             else:
                 resolved_kwargs[key] = value
 
         # Merge explicit dependencies (from .after()) with automatic dependencies
-        all_dependencies = self._pending_dependencies + automatic_dependencies
+        all_dependencies = list(self._pending_dependencies) + automatic_dependencies
 
         # Expand ArrayJob objects to avoid pickling them in dependency metadata
         expanded_deps = []
@@ -636,37 +369,28 @@ class SlurmTask:
                 >>> items = [(job, config) for job, config in zip(data_jobs, configs)]
                 >>> results = train.map(items).get_results()
         """
-        from .context import _get_active_context
+        from .context import _resolve_cluster
         from .array_job import ArrayJob
 
-        ctx = _get_active_context()
-        if ctx is None:
-            raise RuntimeError(
-                "Task.map() must be called within a Cluster context or @workflow.\n"
-                "For local execution, use: [task.unwrapped(item) for item in items]"
-            )
+        cluster = _resolve_cluster(self.func.__name__)
 
-        # Get cluster from context
-        from .cluster import Cluster
-
-        if isinstance(ctx, Cluster):
-            cluster = ctx
-        else:
-            cluster = getattr(ctx, "cluster", None)
-            if cluster is None:
-                raise RuntimeError(
-                    f"Context {type(ctx).__name__} does not have a cluster attribute"
-                )
-
-        return ArrayJob(
-            task=self, items=items, cluster=cluster, max_concurrent=max_concurrent
+        dependencies = (
+            list(self._pending_dependencies) if self._pending_dependencies else None
         )
 
-    def after(self, *jobs: Union["Job", "ArrayJob"]) -> "SlurmTaskWithDependencies":
+        return ArrayJob(
+            task=self,
+            items=items,
+            cluster=cluster,
+            max_concurrent=max_concurrent,
+            dependencies=dependencies,
+        )
+
+    def after(self, *jobs: Union["Job", "ArrayJob"]) -> "SlurmTask":
         """Bind explicit dependencies to this task (pre-call dependency binding).
 
-        Returns a SlurmTaskWithDependencies wrapper that can be called or mapped.
-        When the returned wrapper is called or mapped, these dependencies will be
+        Returns a new SlurmTask with bound dependencies that can be called or mapped.
+        When the returned task is called or mapped, these dependencies will be
         included in the submission.
 
         This enables the fluent patterns:
@@ -677,7 +401,7 @@ class SlurmTask:
             *jobs: Job or ArrayJob instances to depend on.
 
         Returns:
-            SlurmTaskWithDependencies wrapper with bound dependencies.
+            New SlurmTask with bound dependencies.
 
         Examples:
             Regular task with dependencies:
@@ -706,7 +430,6 @@ class SlurmTask:
         flattened_deps = []
         for job in jobs:
             if isinstance(job, ArrayJob):
-                # ArrayJob dependencies: ensure submitted and use all jobs
                 if not job._submitted:
                     job._submit()
                 flattened_deps.extend(job._jobs)
@@ -717,8 +440,31 @@ class SlurmTask:
                     f".after() expects Job or ArrayJob arguments, got {type(job).__name__}"
                 )
 
-        # Return a wrapper that supports both __call__ and .map()
-        return SlurmTaskWithDependencies(task=self, dependencies=flattened_deps)
+        # Create a new SlurmTask with the same function and options
+        new_task = SlurmTask(
+            func=self.func,
+            sbatch_options=self.sbatch_options.copy(),
+            packaging=self.packaging.copy() if self.packaging else None,
+            **self.slurm_options,
+        )
+        new_task.slurm_options = self.slurm_options
+
+        # Preserve any existing pending dependencies and append new ones
+        if self._pending_dependencies:
+            new_task._pending_dependencies = (
+                list(self._pending_dependencies) + flattened_deps
+            )
+        else:
+            new_task._pending_dependencies = flattened_deps
+
+        # Preserve container dependencies
+        new_task._container_dependencies = self._container_dependencies.copy()
+
+        # Preserve workflow flag
+        if hasattr(self, "_is_workflow"):
+            new_task._is_workflow = self._is_workflow
+
+        return new_task
 
     def with_options(self, **options: Any) -> "SlurmTask":
         """Create a variant of this task with different SBATCH or packaging options.
@@ -847,7 +593,15 @@ class SlurmTask:
         return new_task
 
     def __repr__(self) -> str:
-        return f"SlurmTask(name={self.sbatch_options.get('job_name', self.func.__name__)!r})"
+        name = self.sbatch_options.get("job_name", self.func.__name__)
+        deps = len(self._pending_dependencies)
+        if deps:
+            return f"SlurmTask(name={name!r}, dependencies={deps})"
+        return f"SlurmTask(name={name!r})"
 
     def __str__(self) -> str:
         return self.sbatch_options.get("job_name", self.func.__name__)
+
+
+# Backward compatibility alias
+SlurmTaskWithDependencies = SlurmTask
