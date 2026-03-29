@@ -51,10 +51,8 @@ Callbacks inherit from `BaseCallback` and override event methods:
 ```python
 from slurm.callbacks import (
     BaseCallback,
-    WorkflowCallbackContext,
     WorkflowTaskSubmitContext,
     SubmitBeginContext,
-    SubmitEndContext,
 )
 
 

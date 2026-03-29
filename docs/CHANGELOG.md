@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed missing imports in parallel train-eval workflow tutorial
+- Added `JobContext` to API reference documentation
+- Updated import paths in tutorials and how-to guides to use public API
+  (`from slurm.callbacks import ...`) instead of internal modules
+- Removed unused imports from workflow graph visualization tutorial
+
 ### Added
 
 - How-to guide for creating custom task and workflow decorators using existing
