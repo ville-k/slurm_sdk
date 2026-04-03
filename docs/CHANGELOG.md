@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BackendBase.tail_file()` method with implementations for SSH and local backends
 - `slurm jobs tail <job-id>` CLI command with `--stderr`, `--no-follow`, and
   `--lines` options
+- Container image digest pinning via registry HTTP API; resolves digests with
+  a single HEAD request instead of pulling the full image
 - Usage examples in docstrings for `SlurmTask.__call__()`, `ArrayJob.get_results()`,
   `WorkflowContext`, and `JobContext`
 - `llms.txt` file with complete API recipes, decision tree, and method signatures
@@ -38,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Container packaging `use_digest` default changed from `False` to `True` for
+  reproducible deployments; pass `use_digest=False` to restore previous behavior
+- Pre-existing container images no longer require `docker pull` for digest
+  resolution when the registry API is accessible
 - Expanded container packaging explanation with details on multi-word Python
   executables, container mounts, working directory, and array job naming
 - Restructured GPU, container dependency, and parallelization how-to guides
