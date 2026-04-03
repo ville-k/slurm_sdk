@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Job.tail()` method for live log streaming with configurable `output` parameter
+  accepting any writable IO object (`sys.stdout`, `io.StringIO`, file objects)
+- `BackendBase.tail_file()` method with implementations for SSH and local backends
+- `slurm jobs tail <job-id>` CLI command with `--stderr`, `--no-follow`, and
+  `--lines` options
 - `llms.txt` file with complete API recipes, decision tree, and method signatures
   for AI coding agent consumption
 - How-to guide for creating custom task and workflow decorators using existing
