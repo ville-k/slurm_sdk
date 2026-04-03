@@ -189,6 +189,16 @@ def test_mount_dict_entries_render(monkeypatch):
     assert '--container-mounts="/data:/mnt/data:ro,/opt/tools:/opt/tools:ro"' in command
 
 
+def test_use_digest_default_is_true():
+    strategy = ContainerPackagingStrategy({})
+    assert strategy.use_digest is True
+
+
+def test_use_digest_explicit_false():
+    strategy = ContainerPackagingStrategy({"use_digest": False})
+    assert strategy.use_digest is False
+
+
 def test_missing_required_build_secret_raises(monkeypatch, tmp_path):
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text("FROM python:3.11-slim\n", encoding="utf-8")
