@@ -77,14 +77,16 @@ def main():
     # Submit job (uses cluster defaults for packaging, account, partition)
     job: Job[str] = cluster.submit(hello_world)()
 
-    success = job.wait()
-    if success:
+    # Stream job output while waiting
+    print("Streaming job output...")
+    job.tail(follow=True)
+
+    # tail() returns when the job reaches a terminal state
+    if job.is_successful():
         result: str = job.get_result()
-        print(f"Result: {result}")
+        print(f"\nResult: {result}")
     else:
-        print("Job failed!")
-        print("Job std out:")
-        print(job.get_stdout())
+        print("\nJob failed!")
         print("Job std err:")
         print(job.get_stderr())
 

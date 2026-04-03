@@ -1,11 +1,12 @@
 import logging
+import sys
 import time
 
 # nosec B403 - pickle required for loading job results serialized by SDK runner
 import os
 import threading
 
-from typing import Optional, Any, Callable, Dict, TYPE_CHECKING, TypeVar, Generic
+from typing import IO, Optional, Any, Callable, Dict, TYPE_CHECKING, TypeVar, Generic
 
 # Use TYPE_CHECKING to avoid circular imports
 if TYPE_CHECKING:
@@ -701,6 +702,99 @@ class Job(Generic[T]):
                 return False
 
             time.sleep(poll_interval)
+
+    def tail(
+        self,
+        *,
+        follow: bool = True,
+        stderr: bool = False,
+        lines: int = 10,
+        output: Optional["IO[str]"] = None,
+        poll_interval: float = 1.0,
+    ) -> None:
+        """Stream job output to a writable IO object.
+
+        When follow=True, blocks until the job reaches a terminal state,
+        streaming output in real-time. This can replace job.wait() when
+        you want to see output while waiting.
+
+        Args:
+            follow: If True, keep streaming until job completes. If False,
+                print last N lines and return immediately.
+            stderr: If True, stream stderr instead of stdout.
+            lines: Number of initial lines to show.
+            output: Writable IO object (anything with .write()). Defaults
+                to sys.stdout. Pass io.StringIO() to capture output, or
+                an open file handle to write to a file.
+            poll_interval: Seconds between checks for new content.
+
+        Raises:
+            RuntimeError: If the output file path is not available.
+
+        Examples:
+            Stream to terminal while waiting:
+
+                >>> job.tail()  # blocks until job completes
+
+            Capture to a string buffer:
+
+                >>> import io
+                >>> buf = io.StringIO()
+                >>> job.tail(output=buf)
+                >>> print(buf.getvalue())
+
+            Write to a log file:
+
+                >>> with open("job.log", "w") as f:
+                ...     job.tail(output=f)
+        """
+        path = self.stderr_path if stderr else self.stdout_path
+        if path is None:
+            raise RuntimeError("Output file path not available for this job")
+
+        output = output or sys.stdout
+
+        def on_line(line: str) -> None:
+            output.write(line + "\n")
+            if hasattr(output, "flush"):
+                output.flush()
+
+        stop_event = threading.Event()
+
+        if not follow:
+            self.backend.tail_file(
+                path,
+                follow=False,
+                lines=lines,
+                on_line=on_line,
+                stop_event=stop_event,
+            )
+            return
+
+        tail_thread = threading.Thread(
+            target=self.backend.tail_file,
+            kwargs={
+                "path": path,
+                "follow": True,
+                "lines": lines,
+                "on_line": on_line,
+                "stop_event": stop_event,
+                "poll_interval": poll_interval,
+            },
+            daemon=True,
+        )
+        tail_thread.start()
+
+        try:
+            while tail_thread.is_alive():
+                if self.is_completed():
+                    stop_event.set()
+                    tail_thread.join(timeout=5.0)
+                    break
+                tail_thread.join(timeout=poll_interval)
+        except KeyboardInterrupt:
+            stop_event.set()
+            tail_thread.join(timeout=5.0)
 
     def cancel(self) -> bool:
         """Cancel the job via `scancel`.

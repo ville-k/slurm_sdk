@@ -481,6 +481,57 @@ def _connect_local(command: str) -> None:
         pass
 
 
+@jobs_app.command(name="tail")
+def tail_job(
+    job_id: Annotated[
+        str,
+        cyclopts.Parameter(help="SLURM job ID to tail."),
+    ],
+    stderr: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name=["--stderr"],
+            help="Tail stderr instead of stdout.",
+        ),
+    ] = False,
+    no_follow: Annotated[
+        bool,
+        cyclopts.Parameter(
+            name=["--no-follow"],
+            help="Print last lines and exit (don't follow).",
+        ),
+    ] = False,
+    lines: Annotated[
+        int,
+        cyclopts.Parameter(
+            name=["--lines", "-n"],
+            help="Number of initial lines to show.",
+        ),
+    ] = 10,
+    env: Annotated[
+        Optional[str],
+        cyclopts.Parameter(
+            name=["--env", "-e"],
+            help="Environment name from Slurmfile.",
+        ),
+    ] = None,
+    slurmfile: Annotated[
+        Optional[str],
+        cyclopts.Parameter(
+            name=["--slurmfile", "-f"],
+            help="Path to Slurmfile.",
+        ),
+    ] = None,
+) -> None:
+    """Stream live output from a running SLURM job."""
+    cluster = get_cluster(env=env, slurmfile=slurmfile)
+    job = cluster.get_job(job_id)
+    try:
+        job.tail(follow=not no_follow, stderr=stderr, lines=lines)
+    except KeyboardInterrupt:
+        pass
+
+
 @jobs_app.command(name="cancel")
 def cancel_job(
     job_id: Annotated[

@@ -8,10 +8,11 @@ using SSH to execute commands on a remote Slurm cluster.
 import os
 import socket
 import tempfile
+import threading
 import time
 import uuid
 import re
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import paramiko
 import logging
@@ -1223,3 +1224,65 @@ class SSHCommandBackend(BackendBase):
     def is_remote(self) -> bool:
         """Return True since SSH backend requires remote file operations."""
         return True
+
+    def tail_file(
+        self,
+        path: str,
+        *,
+        follow: bool = True,
+        lines: int = 10,
+        on_line: Callable[[str], None],
+        stop_event: Optional[threading.Event] = None,
+        poll_interval: float = 1.0,
+    ) -> None:
+        """Stream lines from a file on the remote system via SSH.
+
+        Args:
+            path: Absolute path to the file on the remote system.
+            follow: If True, keep reading new content (like tail -f).
+                If False, read last N lines and return.
+            lines: Number of initial lines to emit.
+            on_line: Callback invoked for each line of text.
+            stop_event: Threading event to signal the method to stop following.
+            poll_interval: Seconds between re-reads when following.
+        """
+        stop_event = stop_event or threading.Event()
+        quoted_path = shlex.quote(path)
+
+        # Wait for file to appear, then tail it
+        cmd = f"while [ ! -f {quoted_path} ]; do sleep 1; done; tail -n {int(lines)}"
+        if follow:
+            cmd += " -f"
+        cmd += f" {quoted_path}"
+
+        try:
+            if not self.client:
+                self._connect()
+
+            # nosec B601 - path is quoted with shlex.quote, lines is cast to int
+            _stdin, stdout, _stderr = self.client.exec_command(cmd, timeout=None)  # nosec B601
+            channel = stdout.channel
+
+            buffer = ""
+            while True:
+                if channel.recv_ready():
+                    chunk = channel.recv(4096).decode("utf-8", errors="replace")
+                    buffer += chunk
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        on_line(line)
+                elif stop_event.is_set():
+                    channel.close()
+                    return
+                elif channel.exit_status_ready():
+                    # Remote command exited; read remaining data
+                    remaining = channel.recv(65536).decode("utf-8", errors="replace")
+                    buffer += remaining
+                    for line in buffer.splitlines():
+                        on_line(line)
+                    return
+                else:
+                    time.sleep(0.1)
+
+        except (paramiko.SSHException, socket.error, OSError) as e:
+            logger.warning("tail_file connection error: %s", e)

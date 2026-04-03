@@ -11,7 +11,9 @@ import os
 import re
 import subprocess  # nosec B404 - subprocess is required for SLURM command execution
 import logging
-from typing import Any, Dict, List, Optional, Union
+import threading
+import time as time_mod
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .base import BackendBase
 from ..errors import BackendTimeout, BackendCommandError, BackendError
@@ -698,3 +700,67 @@ class LocalBackend(BackendBase):
     def is_remote(self) -> bool:
         """Return False since local backend uses direct file access."""
         return False
+
+    def tail_file(
+        self,
+        path: str,
+        *,
+        follow: bool = True,
+        lines: int = 10,
+        on_line: Callable[[str], None],
+        stop_event: Optional[threading.Event] = None,
+        poll_interval: float = 1.0,
+    ) -> None:
+        """Stream lines from a local file.
+
+        Args:
+            path: Absolute path to the file.
+            follow: If True, keep reading new content (like tail -f).
+                If False, read last N lines and return.
+            lines: Number of initial lines to emit.
+            on_line: Callback invoked for each line of text.
+            stop_event: Threading event to signal the method to stop following.
+            poll_interval: Seconds between re-reads when following.
+        """
+        stop_event = stop_event or threading.Event()
+
+        while not os.path.exists(path):
+            if stop_event.is_set():
+                return
+            time_mod.sleep(1.0)
+
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+            all_lines = content.splitlines()
+            for line in all_lines[-lines:]:
+                on_line(line)
+
+            if not follow:
+                return
+
+            position = f.tell()
+            buffer = ""
+
+        while not stop_event.is_set():
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(position)
+                new_data = f.read()
+                position = f.tell()
+
+            if new_data:
+                buffer += new_data
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    on_line(line)
+
+            time_mod.sleep(poll_interval)
+
+        # Final read after stop_event is set
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(position)
+            new_data = f.read()
+
+        if new_data:
+            buffer += new_data
+            for line in buffer.splitlines():
+                on_line(line)

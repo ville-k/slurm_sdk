@@ -6,7 +6,8 @@ providing a common interface for interacting with SLURM clusters.
 """
 
 import abc
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional
 
 
 class BackendBase(abc.ABC):
@@ -230,3 +231,26 @@ class BackendBase(abc.ABC):
         sessions (e.g. Jupyter notebooks).
         """
         pass
+
+    def tail_file(
+        self,
+        path: str,
+        *,
+        follow: bool = True,
+        lines: int = 10,
+        on_line: Callable[[str], None],
+        stop_event: Optional[threading.Event] = None,
+        poll_interval: float = 1.0,
+    ) -> None:
+        """Stream lines from a file on the target system.
+
+        Args:
+            path: Absolute path to the file.
+            follow: If True, keep reading new content (like tail -f).
+                If False, read last N lines and return.
+            lines: Number of initial lines to emit.
+            on_line: Callback invoked for each line of text.
+            stop_event: Threading event to signal the method to stop following.
+            poll_interval: Seconds between re-reads when following.
+        """
+        raise NotImplementedError("tail_file is not supported by this backend")
