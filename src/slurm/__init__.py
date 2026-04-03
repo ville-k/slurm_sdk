@@ -12,12 +12,13 @@ except Exception:
     __version__ = "unknown"
 
 from .cluster import Cluster
-from .decorators import task, workflow
-from .job import Job
+from .decorators import task, workflow, parse_packaging_config
+from .job import Job, JobSnapshot
 from .task import SlurmTask
 from .runtime import JobContext
 from .workflow import WorkflowContext
 from .array_job import ArrayJob
+from .packaging import PackagingConfig
 from .callbacks import (
     BaseCallback,
     LoggerCallback,
@@ -35,16 +36,20 @@ from .errors import (
 )
 
 __all__ = [
-    # Decorators
+    # Decorators and utilities
     "task",
     "workflow",
+    "parse_packaging_config",
     # Core classes
     "Job",
+    "JobSnapshot",
     "ArrayJob",
     "Cluster",
     "SlurmTask",
     "JobContext",
     "WorkflowContext",
+    # Configuration
+    "PackagingConfig",
     # Callbacks
     "BaseCallback",
     "LoggerCallback",

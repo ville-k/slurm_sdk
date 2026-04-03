@@ -2,13 +2,70 @@
 Packaging strategies for SLURM jobs.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 from .base import PackagingStrategy
 from .none import NonePackagingStrategy
 from .container import ContainerPackagingStrategy
 from .wheel import WheelPackagingStrategy
 from .inherit import InheritPackagingStrategy
+
+
+class PackagingConfig(TypedDict, total=False):
+    """Configuration dictionary for packaging strategies.
+
+    All fields are optional. The ``type`` field determines which strategy
+    is used; other fields are strategy-specific.
+
+    This TypedDict documents the valid keys accepted by
+    :func:`get_packaging_strategy` and returned by
+    :func:`~slurm.decorators.parse_packaging_config`.
+    """
+
+    type: str
+    """Strategy type: ``"auto"``, ``"wheel"``, ``"none"``, ``"container"``, or ``"inherit"``."""
+
+    # Container-specific options
+    image: str
+    """Container image reference (e.g. ``"nvcr.io/nvidia/pytorch:24.01"``)."""
+    dockerfile: str
+    """Path to Dockerfile for building the image."""
+    context: str
+    """Docker build context directory."""
+    name: str
+    """Image name override."""
+    tag: str
+    """Image tag override."""
+    registry: str
+    """Registry URL for pushing/pulling images."""
+    platform: str
+    """Target platform (e.g. ``"linux/amd64"``)."""
+    build_args: Dict[str, Any]
+    """Docker build arguments."""
+    push: bool
+    """Whether to push the built image to the registry."""
+    use_digest: bool
+    """Pin image by SHA256 digest for reproducibility."""
+    no_cache: bool
+    """Disable Docker build cache."""
+    tls_verify: bool
+    """Verify TLS certificates when communicating with the registry."""
+    runtime: str
+    """Container runtime: ``"docker"`` or ``"podman"``."""
+    python_executable: str
+    """Python executable inside the container (e.g. ``"uv run python"``)."""
+    modules: List[str]
+    """Environment modules to load before execution."""
+    srun_args: List[str]
+    """Additional arguments passed to ``srun``."""
+    mount_job_dir: bool
+    """Whether to mount the job directory into the container."""
+    mounts: List[Any]
+    """Additional container mount specifications."""
+    build_secrets: List[Any]
+    """Docker build secrets."""
+    workdir: str
+    """Working directory inside the container."""
 
 
 _STRATEGIES = {
@@ -62,6 +119,7 @@ def get_packaging_strategy(config: Optional[Dict[str, Any]]) -> PackagingStrateg
 
 __all__ = [
     "get_packaging_strategy",
+    "PackagingConfig",
     "PackagingStrategy",
     "WheelPackagingStrategy",
     "NonePackagingStrategy",

@@ -262,7 +262,7 @@ def task(
     normalized_kwargs = normalize_sbatch_options(sbatch_only)
 
     # Build packaging configuration dict from string + kwargs
-    effective_packaging = _parse_packaging_config(packaging, packaging_kwargs)
+    effective_packaging = parse_packaging_config(packaging, packaging_kwargs)
 
     def decorator(inner: Callable[..., Any]) -> SlurmTask:
         effective_options = dict(normalized_kwargs)
@@ -280,24 +280,42 @@ def task(
     return decorator
 
 
-def _parse_packaging_config(
-    packaging: str, kwargs: Dict[str, Any]
+def parse_packaging_config(
+    packaging: str, kwargs: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
-    """Parse packaging string and kwargs into a configuration dict.
+    """Parse a packaging specification string into a configuration dict.
+
+    This is the public entry point for parsing packaging strings like
+    ``"container:registry/image:tag"`` into the configuration dicts that
+    :func:`~slurm.packaging.get_packaging_strategy` accepts.
 
     Args:
         packaging: Packaging strategy string. Options:
-            - "auto": Auto-detect (wheel if pyproject.toml exists, else none)
-            - "wheel": Build and install Python wheel
-            - "none": No packaging (code assumed available on cluster)
-            - "inherit": Inherit packaging from parent workflow
-            - "container:IMAGE:TAG": Use existing container image
-            - "IMAGE:TAG": Use existing container (shorthand without "container:" prefix)
-        kwargs: Additional packaging options from packaging_* parameters
+
+            - ``"auto"``: Auto-detect (wheel if pyproject.toml exists, else none)
+            - ``"wheel"``: Build and install Python wheel
+            - ``"none"``: No packaging (code assumed available on cluster)
+            - ``"inherit"``: Inherit packaging from parent workflow
+            - ``"container:IMAGE:TAG"``: Use existing container image
+            - ``"IMAGE:TAG"``: Use existing container (shorthand without
+              ``"container:"`` prefix)
+        kwargs: Additional packaging options to merge into the result
+            (e.g. from ``packaging_*`` parameters). Defaults to empty dict.
 
     Returns:
-        Packaging configuration dict, or None if packaging is None/empty
+        Packaging configuration dict, or ``None`` if packaging is None/empty.
+
+    Examples:
+        >>> parse_packaging_config("auto")
+        {'type': 'auto'}
+
+        >>> parse_packaging_config("container:nvcr.io/nvidia/pytorch:24.01")
+        {'type': 'container', 'image': 'nvcr.io/nvidia/pytorch:24.01'}
+
+        >>> parse_packaging_config("wheel", {"registry": "my-registry.com"})
+        {'type': 'wheel', 'registry': 'my-registry.com'}
     """
+    kwargs = kwargs or {}
     if not packaging:
         return None
 
@@ -330,3 +348,7 @@ def _parse_packaging_config(
         config["image"] = packaging
 
     return config if config else None
+
+
+# Backward-compatibility alias for internal callers
+_parse_packaging_config = parse_packaging_config
