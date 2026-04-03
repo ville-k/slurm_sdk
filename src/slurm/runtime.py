@@ -23,6 +23,22 @@ class JobContext:
     such as ``torchrun`` without requiring callers to parse the raw ``SLURM_*``
     environment. Values are populated directly from the job environment so the
     object can be reconstructed inside containers that do not ship ``scontrol``.
+
+    Examples:
+        Type annotation injection (recommended):
+
+            >>> @task(time="01:00:00")
+            ... def train(data: str, ctx: JobContext) -> dict:
+            ...     print(f"Job {ctx.job_id}, rank {ctx.rank}/{ctx.world_size}")
+            ...     env = ctx.torch_distributed_env()
+            ...     return {"rank": ctx.rank}
+
+        Parameter name injection (alternative):
+
+            >>> @task(time="01:00:00")
+            ... def train(data: str, job=None):
+            ...     # 'job' parameter is auto-populated with JobContext
+            ...     print(f"Running on node {job.node_rank}")
     """
 
     job_id: Optional[str]
