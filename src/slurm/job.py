@@ -5,6 +5,7 @@ import time
 # nosec B403 - pickle required for loading job results serialized by SDK runner
 import os
 import threading
+from dataclasses import dataclass
 
 from typing import IO, Optional, Any, Callable, Dict, TYPE_CHECKING, TypeVar, Generic
 
@@ -21,6 +22,43 @@ logger = logging.getLogger(__name__)
 
 # Type variable for Job's generic return type
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class JobSnapshot:
+    """Immutable point-in-time snapshot of a job's state and output.
+
+    Useful for dashboards, logging, status reporting, and integration
+    with external systems. All fields are populated at creation time;
+    the snapshot does not update.
+
+    Examples:
+        >>> snapshot = job.snapshot()
+        >>> print(f"Job {snapshot.job_id}: {snapshot.state}")
+
+        >>> snapshot = job.snapshot(tail_lines=20)
+        >>> if snapshot.is_terminal and not snapshot.is_successful:
+        ...     print(snapshot.stderr_tail)
+    """
+
+    job_id: str
+    """Slurm job ID."""
+    state: str
+    """Current Slurm state (e.g. PENDING, RUNNING, COMPLETED, FAILED)."""
+    exit_code: Optional[str]
+    """Slurm exit code string (e.g. ``"0:0"``) or None if not yet available."""
+    reason: Optional[str]
+    """Slurm state reason or error description."""
+    stdout_tail: str
+    """Last N lines of stdout (empty string if unavailable)."""
+    stderr_tail: str
+    """Last N lines of stderr (empty string if unavailable)."""
+    elapsed_seconds: Optional[float]
+    """Wall-clock seconds since job started, or None if not yet started."""
+    is_terminal: bool
+    """Whether the job has reached a terminal state."""
+    is_successful: bool
+    """Whether the job completed successfully (COMPLETED with exit code 0:0)."""
 
 
 class Job(Generic[T]):
@@ -923,6 +961,69 @@ class Job(Generic[T]):
         script_path = os.path.join(self.target_job_dir, script_filename)
 
         return self._read_remote_file(script_path, "script")
+
+    def snapshot(self, tail_lines: int = 80) -> JobSnapshot:
+        """Capture a point-in-time snapshot of this job's state and output.
+
+        Gathers the current Slurm status, the trailing lines of stdout and
+        stderr, and computed metadata into a frozen :class:`JobSnapshot`
+        dataclass.  Useful for dashboards, logging, and integration with
+        external orchestration systems.
+
+        Args:
+            tail_lines: Number of trailing lines to include from stdout
+                and stderr.  Defaults to 80.
+
+        Returns:
+            An immutable :class:`JobSnapshot` with the current state.
+
+        Examples:
+            >>> snap = job.snapshot()
+            >>> print(f"Job {snap.job_id}: {snap.state}")
+
+            >>> snap = job.snapshot(tail_lines=20)
+            >>> if snap.is_terminal and not snap.is_successful:
+            ...     print(snap.stderr_tail)
+        """
+        status = self.get_status()
+        state = status.get("JobState", "UNKNOWN")
+        exit_code = status.get("ExitCode")
+        reason = status.get("Reason") or status.get("Error") or status.get("StateDesc")
+
+        stdout_tail = ""
+        if self.stdout_path:
+            try:
+                full = self.get_stdout()
+                lines = full.splitlines()
+                stdout_tail = "\n".join(lines[-tail_lines:]) if lines else ""
+            except (FileNotFoundError, RuntimeError, OSError):
+                pass
+
+        stderr_tail = ""
+        if self.stderr_path:
+            try:
+                full = self.get_stderr()
+                lines = full.splitlines()
+                stderr_tail = "\n".join(lines[-tail_lines:]) if lines else ""
+            except (FileNotFoundError, RuntimeError, OSError):
+                pass
+
+        elapsed: Optional[float] = None
+        if self.started_at:
+            end = self.finished_at or time.time()
+            elapsed = end - self.started_at
+
+        return JobSnapshot(
+            job_id=self.id,
+            state=state,
+            exit_code=exit_code,
+            reason=reason,
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+            elapsed_seconds=elapsed,
+            is_terminal=state in self.TERMINAL_STATES,
+            is_successful=self.is_successful(),
+        )
 
     def _read_remote_file(self, remote_path: str, file_type: str) -> str:
         """Read a file from the cluster (SSH or local).

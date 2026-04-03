@@ -322,20 +322,86 @@ with Cluster(backend_type="ssh", hostname="hpc.example.com") as cluster:
     print(f"Best config: {best}")
 ```
 
+### 17. Stream job output while waiting
+
+```python
+from slurm import Cluster, task
+
+@task(time="01:00:00")
+def train(lr: float) -> dict:
+    print("Training started...")
+    return {"accuracy": 0.95}
+
+with Cluster(backend_type="ssh", hostname="hpc.example.com") as cluster:
+    job = train(lr=0.001)
+    # tail() blocks until job completes, streaming output in real-time
+    job.tail()
+    # Job is now complete
+    if job.is_successful():
+        print(job.get_result())
+```
+
+### 18. Capture job output to a buffer or file
+
+```python
+import io
+from slurm import Cluster, task
+
+with Cluster(backend_type="ssh", hostname="hpc.example.com") as cluster:
+    job = train(lr=0.001)
+
+    # Capture to string buffer
+    buf = io.StringIO()
+    job.tail(output=buf, follow=True)
+    log_content = buf.getvalue()
+
+    # Or write to a file
+    with open("job.log", "w") as f:
+        job.tail(output=f, follow=True)
+```
+
+### 19. Get a job status snapshot
+
+```python
+from slurm import Cluster, task
+
+with Cluster(backend_type="ssh", hostname="hpc.example.com") as cluster:
+    job = train(lr=0.001)
+    snap = job.snapshot(tail_lines=20)
+    print(f"Job {snap.job_id}: {snap.state}")
+    if snap.is_terminal and not snap.is_successful:
+        print(snap.stderr_tail)
+```
+
+### 20. Parse a packaging config string
+
+```python
+from slurm import parse_packaging_config
+
+config = parse_packaging_config("container:nvcr.io/nvidia/pytorch:24.01")
+# {'type': 'container', 'image': 'nvcr.io/nvidia/pytorch:24.01'}
+
+config = parse_packaging_config("wheel", {"registry": "my-registry.com"})
+# {'type': 'wheel', 'registry': 'my-registry.com'}
+```
+
 ## Public API Reference
 
-### Exports from `slurm` (17 items)
+### Exports from `slurm` (20 items)
 
 | Name | Type | Description |
 |------|------|-------------|
 | `task` | decorator | Marks a function as a Slurm task with SBATCH options |
 | `workflow` | decorator | Marks a function as a workflow orchestrator |
+| `parse_packaging_config` | function | Parse packaging spec strings into config dicts |
 | `Cluster` | class | Connection to a Slurm cluster; use as context manager |
 | `Job` | class | A submitted Slurm job |
+| `JobSnapshot` | dataclass | Frozen point-in-time snapshot of job state and output |
 | `ArrayJob` | class | A submitted array job (from `.map()`) |
 | `SlurmTask` | class | A decorated task function with submission methods |
 | `JobContext` | dataclass | Runtime metadata injected into tasks on compute nodes |
 | `WorkflowContext` | dataclass | Context injected into workflow functions |
+| `PackagingConfig` | TypedDict | Valid keys for packaging configuration dicts |
 | `BaseCallback` | class | Base class for lifecycle event callbacks |
 | `LoggerCallback` | class | Logs job lifecycle events to Python logging |
 | `BenchmarkCallback` | class | Records timing metrics for jobs |
@@ -398,9 +464,14 @@ task_func.unwrapped(*args, **kwargs)            # Call directly (no Slurm)
 # Job
 job.wait(timeout=None) -> bool         # Block until done; True=success
 job.get_result(timeout=None) -> T      # Wait + download + deserialize result
+job.tail(follow=True, stderr=False, lines=10, output=sys.stdout) -> None
+job.snapshot(tail_lines=80) -> JobSnapshot  # Frozen state + output tails
 job.cancel() -> None                   # Cancel the job
 job.status() -> dict                   # Query current SLURM status
 job.id -> str                          # SLURM job ID
+
+# Utilities
+parse_packaging_config(packaging: str, kwargs=None) -> Optional[dict]
 
 # ArrayJob
 array_job.get_results(timeout=None) -> List[T]  # Wait + collect all results
