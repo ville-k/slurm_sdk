@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Container image digest pinning via registry HTTP API; resolves digests with
+  a single HEAD request instead of pulling the full image
 - `llms.txt` file with complete API recipes, decision tree, and method signatures
   for AI coding agent consumption
 - How-to guide for creating custom task and workflow decorators using existing
@@ -31,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Container packaging `use_digest` default changed from `False` to `True` for
+  reproducible deployments; pass `use_digest=False` to restore previous behavior
+- Pre-existing container images no longer require `docker pull` for digest
+  resolution when the registry API is accessible
 - Restructured GPU, container dependency, and parallelization how-to guides
   with proper problem statements, prerequisites, steps, and verification
   sections following Diataxis how-to guide format

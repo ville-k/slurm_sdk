@@ -117,7 +117,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         self.platform: str = self.config.get("platform", "linux/amd64")
         self.build_args: Dict[str, Any] = self.config.get("build_args", {})
         self.push: bool = bool(self.config.get("push", True))
-        self.use_digest: bool = bool(self.config.get("use_digest", False))
+        self.use_digest: bool = bool(self.config.get("use_digest", True))
         self.no_cache: bool = bool(self.config.get("no_cache", False))
         self.tls_verify: bool = bool(self.config.get("tls_verify", True))
         self.python_executable: str = self.config.get("python_executable", "python")
@@ -241,19 +241,12 @@ class ContainerPackagingStrategy(PackagingStrategy):
                 "Container packaging requires either 'image' or 'dockerfile' in the configuration."
             )
 
-        # Pre-existing image — only pull if we need the digest
+        # Pre-existing image — digest resolved via registry API, no pull needed
         if self.use_digest:
-            try:
-                pull_cmd = [runtime, "pull", image_ref]
-                logger.debug("Pulling pre-existing image to get digest: %s", image_ref)
-                subprocess.run(
-                    pull_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-            except subprocess.CalledProcessError as e:
-                logger.warning("Failed to pull image %s: %s", image_ref, e.stderr)
+            logger.debug(
+                "Skipping pull for pre-existing image; digest resolved via registry API: %s",
+                image_ref,
+            )
 
         return False
 
@@ -269,16 +262,25 @@ class ContainerPackagingStrategy(PackagingStrategy):
     def _resolve_final_reference(self, runtime: str, image_ref: str) -> None:
         """Resolve image digest (if requested) and convert to enroot format."""
         if self.use_digest:
-            digest_ref = self._get_image_digest(runtime, image_ref)
+            # Fast path: registry HTTP API (no local docker needed)
+            from ._registry import resolve_digest
+
+            digest_ref = resolve_digest(image_ref, tls_verify=self.tls_verify)
             if digest_ref:
                 self._image_reference = digest_ref
-                logger.debug("Using digest-based image reference: %s", digest_ref)
+                logger.debug("Using registry-resolved digest: %s", digest_ref)
             else:
-                self._image_reference = image_ref
-                logger.warning(
-                    "Could not resolve image digest, using tag-based reference: %s",
-                    image_ref,
-                )
+                # Fallback: local docker/podman inspect
+                digest_ref = self._get_image_digest(runtime, image_ref)
+                if digest_ref:
+                    self._image_reference = digest_ref
+                    logger.debug("Using locally-inspected digest: %s", digest_ref)
+                else:
+                    self._image_reference = image_ref
+                    logger.warning(
+                        "Could not resolve image digest, using tag-based reference: %s",
+                        image_ref,
+                    )
         else:
             self._image_reference = image_ref
             logger.debug("Using tag-based image reference: %s", image_ref)
