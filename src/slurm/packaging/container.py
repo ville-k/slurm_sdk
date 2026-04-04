@@ -136,6 +136,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         self.container_workdir: Optional[str] = self.config.get("workdir")
 
         self._image_reference: Optional[str] = None
+        self._resolved_digest: Optional[str] = None
         self._runtime_cmd: Optional[str] = None
         self.last_prepare_result: Optional[Dict[str, Any]] = None
         self._active_build_secrets: List[str] = []
@@ -260,30 +261,40 @@ class ContainerPackagingStrategy(PackagingStrategy):
         return False
 
     def _resolve_final_reference(self, runtime: str, image_ref: str) -> None:
-        """Resolve image digest (if requested) and convert to enroot format."""
+        """Resolve image digest (if requested) and convert to enroot format.
+
+        When ``use_digest`` is enabled, the digest is resolved and logged for
+        provenance, but the **tag-based** reference is passed to Pyxis/enroot.
+        This is because enroot < 3.5 does not support ``@sha256:`` in image
+        URIs.  The unique per-build tag (``build-{uuid}``) already provides
+        practical immutability; the digest adds content-addressable verification
+        in the log output.
+        """
         if self.use_digest:
             # Fast path: registry HTTP API (no local docker needed)
             from ._registry import resolve_digest
 
             digest_ref = resolve_digest(image_ref, tls_verify=self.tls_verify)
             if digest_ref:
-                self._image_reference = digest_ref
-                logger.debug("Using registry-resolved digest: %s", digest_ref)
+                logger.info("Resolved image digest: %s", digest_ref)
             else:
                 # Fallback: local docker/podman inspect
                 digest_ref = self._get_image_digest(runtime, image_ref)
                 if digest_ref:
-                    self._image_reference = digest_ref
-                    logger.debug("Using locally-inspected digest: %s", digest_ref)
+                    logger.info("Resolved image digest: %s", digest_ref)
                 else:
-                    self._image_reference = image_ref
                     logger.warning(
-                        "Could not resolve image digest, using tag-based reference: %s",
+                        "Could not resolve image digest for: %s",
                         image_ref,
                     )
-        else:
-            self._image_reference = image_ref
-            logger.debug("Using tag-based image reference: %s", image_ref)
+
+            # Store digest for metadata/provenance but use tag for Pyxis
+            self._resolved_digest = digest_ref
+
+        # Always pass the tag-based reference to Pyxis (enroot < 3.5
+        # does not support @sha256: in image URIs)
+        self._image_reference = image_ref
+        logger.debug("Using tag-based image reference for Pyxis: %s", image_ref)
 
         self._image_reference = self._convert_to_enroot_format(self._image_reference)
 
@@ -360,7 +371,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
             job_base_dir_expr = f"$(dirname $(dirname {job_dir_expr}))"
             mounts.append(f"{job_base_dir_expr}:{job_base_dir_expr}:rw")
 
-        srun_parts: List[str] = ["srun"]
+        srun_parts: List[str] = ["srun", "--unbuffered"]
         srun_parts.extend(self.srun_args)
         srun_parts.append(f"--container-image={shlex.quote(self._image_reference)}")
 

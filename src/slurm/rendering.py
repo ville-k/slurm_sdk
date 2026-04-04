@@ -406,6 +406,9 @@ def render_job_script(ctx: RenderContext) -> str:
     script_lines.append("PY_EXEC_RESOLVED=${PY_EXEC:-python}")
     script_lines.append("export PY_EXEC_RESOLVED")
 
+    # Ensure Python output is unbuffered so job.tail() sees lines in real-time
+    script_lines.append("export PYTHONUNBUFFERED=1")
+
     # For array jobs, set up filenames with bash variable substitution (expand %a to actual array task ID)
     if is_array_job:
         script_lines.append("")
