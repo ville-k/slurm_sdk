@@ -192,11 +192,9 @@ def test_mount_dict_entries_render(monkeypatch):
     assert '--container-mounts="/data:/mnt/data:ro,/opt/tools:/opt/tools:ro"' in command
 
 
-def test_use_digest_default_is_false():
-    # Digest references are not supported by enroot/Pyxis, so the default
-    # remains False until a verification mechanism is implemented.
+def test_use_digest_default_is_true():
     strategy = ContainerPackagingStrategy({})
-    assert strategy.use_digest is False
+    assert strategy.use_digest is True
 
 
 def test_use_digest_explicit_false():

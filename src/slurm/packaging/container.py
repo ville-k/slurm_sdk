@@ -117,7 +117,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         self.platform: str = self.config.get("platform", "linux/amd64")
         self.build_args: Dict[str, Any] = self.config.get("build_args", {})
         self.push: bool = bool(self.config.get("push", True))
-        self.use_digest: bool = bool(self.config.get("use_digest", False))
+        self.use_digest: bool = bool(self.config.get("use_digest", True))
         self.no_cache: bool = bool(self.config.get("no_cache", False))
         self.tls_verify: bool = bool(self.config.get("tls_verify", True))
         self.python_executable: str = self.config.get("python_executable", "python")
@@ -747,11 +747,6 @@ class ContainerPackagingStrategy(PackagingStrategy):
             Enroot-compatible image reference
                 (e.g., ``nvcr.io#team/image:tag`` or ``registry:5000#image:tag``)
         """
-        # Digest references (image@sha256:...) are unambiguous and should not
-        # be converted — enroot/Pyxis rejects the # format for digests.
-        if "@sha256:" in image_ref:
-            return image_ref
-
         # Match registry with domain name (nvcr.io/path, ghcr.io/path)
         # or explicit port (localhost:5000/path, registry:5000/path)
         match = re.match(
