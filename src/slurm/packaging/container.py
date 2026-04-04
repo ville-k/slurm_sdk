@@ -732,19 +732,30 @@ class ContainerPackagingStrategy(PackagingStrategy):
     def _convert_to_enroot_format(self, image_ref: str) -> str:
         """Convert image reference to enroot format.
 
-        Enroot requires registry:port#path format instead of registry:port/path.
+        Enroot requires ``registry#path`` format instead of ``registry/path``.
+        The first ``/`` after a registry hostname is replaced with ``#``.
+
+        A component is recognized as a registry hostname (rather than a
+        Docker Hub repository path) when it contains a ``.`` (domain name)
+        or a ``:`` followed by digits (explicit port).
 
         Args:
-            image_ref: Docker-style image reference (e.g., registry:5000/path/image:tag)
+            image_ref: Docker-style image reference
+                (e.g., ``nvcr.io/team/image:tag`` or ``registry:5000/image:tag``)
 
         Returns:
-            Enroot-compatible image reference (e.g., registry:5000#path/image:tag)
+            Enroot-compatible image reference
+                (e.g., ``nvcr.io#team/image:tag`` or ``registry:5000#image:tag``)
         """
-        match = re.match(r"^([^/]+:\d+)/(.*)", image_ref)
+        # Match registry with domain name (nvcr.io/path, ghcr.io/path)
+        # or explicit port (localhost:5000/path, registry:5000/path)
+        match = re.match(
+            r"^([^/]+(?:(?:\.\w+)+(?::\d+)?|:\d+))/(.+)", image_ref
+        )
         if match:
-            registry_with_port = match.group(1)
+            registry = match.group(1)
             image_path = match.group(2)
-            converted = f"{registry_with_port}#{image_path}"
+            converted = f"{registry}#{image_path}"
             logger.info(
                 "Converted image reference to enroot format: %s → %s",
                 image_ref,

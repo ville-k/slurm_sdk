@@ -116,9 +116,12 @@ def test_prepare_builds_and_pushes(monkeypatch, tmp_path):
         job_dir='"$JOB_DIR"',
     )
 
+    # After enroot conversion, registry.example.com/team/demo:v1
+    # becomes registry.example.com#team/demo:v1
     assert wrapped.startswith(
-        "srun --mpi=none --container-image=registry.example.com/team/demo:v1"
+        "srun --mpi=none --container-image="
     )
+    assert "registry.example.com#team/demo:v1" in wrapped
     assert (
         '--container-mounts="$(dirname $(dirname $JOB_DIR)):$(dirname $(dirname $JOB_DIR)):rw"'
         in wrapped
