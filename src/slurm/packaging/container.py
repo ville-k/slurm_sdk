@@ -117,7 +117,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         self.platform: str = self.config.get("platform", "linux/amd64")
         self.build_args: Dict[str, Any] = self.config.get("build_args", {})
         self.push: bool = bool(self.config.get("push", True))
-        self.use_digest: bool = bool(self.config.get("use_digest", True))
+        self.use_digest: bool = bool(self.config.get("use_digest", False))
         self.no_cache: bool = bool(self.config.get("no_cache", False))
         self.tls_verify: bool = bool(self.config.get("tls_verify", True))
         self.python_executable: str = self.config.get("python_executable", "python")

@@ -192,9 +192,11 @@ def test_mount_dict_entries_render(monkeypatch):
     assert '--container-mounts="/data:/mnt/data:ro,/opt/tools:/opt/tools:ro"' in command
 
 
-def test_use_digest_default_is_true():
+def test_use_digest_default_is_false():
+    # enroot < 3.5 does not support @sha256: in image URIs, so digest
+    # pinning defaults to off until enroot adoption catches up.
     strategy = ContainerPackagingStrategy({})
-    assert strategy.use_digest is True
+    assert strategy.use_digest is False
 
 
 def test_use_digest_explicit_false():
