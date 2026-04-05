@@ -62,28 +62,24 @@ class TestMCPTools:
 
             mcp = create_mcp_server(slurmfile=str(slurmfile))
 
-            list_jobs_tool = None
-            for tool in mcp._tool_manager._tools.values():
-                if tool.name == "list_jobs":
-                    list_jobs_tool = tool
-                    break
+            import asyncio
 
-            assert list_jobs_tool is not None
+            tools = asyncio.run(mcp.list_tools())
+            tool_names = [t.name for t in tools]
+            assert "list_jobs" in tool_names
 
     def test_list_environments_tool(self, tmp_path):
         """Test list_environments tool returns configured environments."""
+        import asyncio
+
         from slurm.mcp_server import create_mcp_server
 
         slurmfile = _write_sample_slurmfile(tmp_path)
         mcp = create_mcp_server(slurmfile=str(slurmfile))
 
-        list_envs_tool = None
-        for tool in mcp._tool_manager._tools.values():
-            if tool.name == "list_environments":
-                list_envs_tool = tool
-                break
-
-        assert list_envs_tool is not None
+        tools = asyncio.run(mcp.list_tools())
+        tool_names = [t.name for t in tools]
+        assert "list_environments" in tool_names
 
 
 class TestMCPResources:
@@ -96,7 +92,10 @@ class TestMCPResources:
         slurmfile = _write_sample_slurmfile(tmp_path)
         mcp = create_mcp_server(slurmfile=str(slurmfile))
 
-        assert mcp._resource_manager is not None
+        import asyncio
+
+        resources = asyncio.run(mcp.list_resources())
+        assert len(resources) > 0
 
 
 class TestMCPStatusCommand:
