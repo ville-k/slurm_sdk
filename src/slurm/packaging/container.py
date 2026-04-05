@@ -762,9 +762,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         """
         # Match registry with domain name (nvcr.io/path, ghcr.io/path)
         # or explicit port (localhost:5000/path, registry:5000/path)
-        match = re.match(
-            r"^([^/]+(?:(?:\.\w+)+(?::\d+)?|:\d+))/(.+)", image_ref
-        )
+        match = re.match(r"^([^/]+(?:(?:\.\w+)+(?::\d+)?|:\d+))/(.+)", image_ref)
         if match:
             registry = match.group(1)
             image_path = match.group(2)

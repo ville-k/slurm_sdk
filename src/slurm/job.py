@@ -991,9 +991,7 @@ class Job(Generic[T]):
         status = self.get_status()
         state = status.get("JobState", "UNKNOWN")
         exit_code = status.get("ExitCode")
-        reason = (
-            status.get("Reason") or status.get("Error") or status.get("StateDesc")
-        )
+        reason = status.get("Reason") or status.get("Error") or status.get("StateDesc")
 
         # Derive terminal/success from the single status dict above
         is_terminal = state in self.TERMINAL_STATES
