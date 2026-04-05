@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated import paths in tutorials and how-to guides to use public API
   (`from slurm.callbacks import ...`) instead of internal modules
 - Removed unused imports from workflow graph visualization tutorial
+- Fixed `_convert_to_enroot_format` to handle domain-name registries (nvcr.io,
+  ghcr.io) without explicit ports, not just `registry:PORT` format
+- Rendered job scripts now export `PYTHONUNBUFFERED=1` and use `srun --unbuffered`
+  to ensure real-time stdout streaming with `job.tail()`
+- `Job.snapshot()` derives `is_terminal`/`is_successful` from a single status
+  query to avoid inconsistency when the status cache expires mid-call
+- `Job.snapshot()` uses `tail_file(follow=False)` for efficient log tails instead
+  of downloading entire stdout/stderr files on remote backends
 
 ### Added
 
@@ -28,8 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BackendBase.tail_file()` method with implementations for SSH and local backends
 - `slurm jobs tail <job-id>` CLI command with `--stderr`, `--no-follow`, and
   `--lines` options
-- Container image digest pinning via registry HTTP API; resolves digests with
-  a single HEAD request instead of pulling the full image
+- Container image digest resolution via registry HTTP API; resolved digest is
+  recorded as a comment in the job script for provenance and debugging
 - Usage examples in docstrings for `SlurmTask.__call__()`, `ArrayJob.get_results()`,
   `WorkflowContext`, and `JobContext`
 - `llms.txt` file with complete API recipes, decision tree, and method signatures
@@ -46,10 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Container packaging `use_digest` default changed from `False` to `True` for
-  reproducible deployments; pass `use_digest=False` to restore previous behavior
 - Pre-existing container images no longer require `docker pull` for digest
-  resolution when the registry API is accessible
+  resolution when the registry API is accessible; digest is recorded in the
+  job script as a comment (`use_digest` defaults to `False` because enroot
+  < 3.5 does not support `@sha256:` in image URIs)
 - Expanded container packaging explanation with details on multi-word Python
   executables, container mounts, working directory, and array job naming
 - Restructured GPU, container dependency, and parallelization how-to guides

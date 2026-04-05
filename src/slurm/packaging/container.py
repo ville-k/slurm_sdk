@@ -117,7 +117,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         self.platform: str = self.config.get("platform", "linux/amd64")
         self.build_args: Dict[str, Any] = self.config.get("build_args", {})
         self.push: bool = bool(self.config.get("push", True))
-        self.use_digest: bool = bool(self.config.get("use_digest", True))
+        self.use_digest: bool = bool(self.config.get("use_digest", False))
         self.no_cache: bool = bool(self.config.get("no_cache", False))
         self.tls_verify: bool = bool(self.config.get("tls_verify", True))
         self.python_executable: str = self.config.get("python_executable", "python")
@@ -136,6 +136,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
         self.container_workdir: Optional[str] = self.config.get("workdir")
 
         self._image_reference: Optional[str] = None
+        self._resolved_digest: Optional[str] = None
         self._runtime_cmd: Optional[str] = None
         self.last_prepare_result: Optional[Dict[str, Any]] = None
         self._active_build_secrets: List[str] = []
@@ -171,7 +172,8 @@ class ContainerPackagingStrategy(PackagingStrategy):
             prepare_result = {
                 "status": "success",
                 "image": image_ref,
-                "image_digest": self._image_reference,
+                "image_reference": self._image_reference,
+                "image_digest": None,
                 "built": False,
                 "pushed": False,
             }
@@ -189,7 +191,8 @@ class ContainerPackagingStrategy(PackagingStrategy):
         prepare_result = {
             "status": "success",
             "image": image_ref,
-            "image_digest": self._image_reference,
+            "image_reference": self._image_reference,
+            "image_digest": self._resolved_digest,
             "built": built,
             "pushed": pushed,
             "runtime": runtime,
@@ -260,30 +263,40 @@ class ContainerPackagingStrategy(PackagingStrategy):
         return False
 
     def _resolve_final_reference(self, runtime: str, image_ref: str) -> None:
-        """Resolve image digest (if requested) and convert to enroot format."""
+        """Resolve image digest (if requested) and convert to enroot format.
+
+        When ``use_digest`` is enabled, the digest is resolved and logged for
+        provenance, but the **tag-based** reference is passed to Pyxis/enroot.
+        This is because enroot < 3.5 does not support ``@sha256:`` in image
+        URIs.  The unique per-build tag (``build-{uuid}``) already provides
+        practical immutability; the digest adds content-addressable verification
+        in the log output.
+        """
         if self.use_digest:
             # Fast path: registry HTTP API (no local docker needed)
             from ._registry import resolve_digest
 
             digest_ref = resolve_digest(image_ref, tls_verify=self.tls_verify)
             if digest_ref:
-                self._image_reference = digest_ref
-                logger.debug("Using registry-resolved digest: %s", digest_ref)
+                logger.info("Resolved image digest: %s", digest_ref)
             else:
                 # Fallback: local docker/podman inspect
                 digest_ref = self._get_image_digest(runtime, image_ref)
                 if digest_ref:
-                    self._image_reference = digest_ref
-                    logger.debug("Using locally-inspected digest: %s", digest_ref)
+                    logger.info("Resolved image digest: %s", digest_ref)
                 else:
-                    self._image_reference = image_ref
                     logger.warning(
-                        "Could not resolve image digest, using tag-based reference: %s",
+                        "Could not resolve image digest for: %s",
                         image_ref,
                     )
-        else:
-            self._image_reference = image_ref
-            logger.debug("Using tag-based image reference: %s", image_ref)
+
+            # Store digest for metadata/provenance but use tag for Pyxis
+            self._resolved_digest = digest_ref
+
+        # Always pass the tag-based reference to Pyxis (enroot < 3.5
+        # does not support @sha256: in image URIs)
+        self._image_reference = image_ref
+        logger.debug("Using tag-based image reference for Pyxis: %s", image_ref)
 
         self._image_reference = self._convert_to_enroot_format(self._image_reference)
 
@@ -360,7 +373,7 @@ class ContainerPackagingStrategy(PackagingStrategy):
             job_base_dir_expr = f"$(dirname $(dirname {job_dir_expr}))"
             mounts.append(f"{job_base_dir_expr}:{job_base_dir_expr}:rw")
 
-        srun_parts: List[str] = ["srun"]
+        srun_parts: List[str] = ["srun", "--unbuffered"]
         srun_parts.extend(self.srun_args)
         srun_parts.append(f"--container-image={shlex.quote(self._image_reference)}")
 
@@ -732,19 +745,28 @@ class ContainerPackagingStrategy(PackagingStrategy):
     def _convert_to_enroot_format(self, image_ref: str) -> str:
         """Convert image reference to enroot format.
 
-        Enroot requires registry:port#path format instead of registry:port/path.
+        Enroot requires ``registry#path`` format instead of ``registry/path``.
+        The first ``/`` after a registry hostname is replaced with ``#``.
+
+        A component is recognized as a registry hostname (rather than a
+        Docker Hub repository path) when it contains a ``.`` (domain name)
+        or a ``:`` followed by digits (explicit port).
 
         Args:
-            image_ref: Docker-style image reference (e.g., registry:5000/path/image:tag)
+            image_ref: Docker-style image reference
+                (e.g., ``nvcr.io/team/image:tag`` or ``registry:5000/image:tag``)
 
         Returns:
-            Enroot-compatible image reference (e.g., registry:5000#path/image:tag)
+            Enroot-compatible image reference
+                (e.g., ``nvcr.io#team/image:tag`` or ``registry:5000#image:tag``)
         """
-        match = re.match(r"^([^/]+:\d+)/(.*)", image_ref)
+        # Match registry with domain name (nvcr.io/path, ghcr.io/path)
+        # or explicit port (localhost:5000/path, registry:5000/path)
+        match = re.match(r"^([^/]+(?:(?:\.\w+)+(?::\d+)?|:\d+))/(.+)", image_ref)
         if match:
-            registry_with_port = match.group(1)
+            registry = match.group(1)
             image_path = match.group(2)
-            converted = f"{registry_with_port}#{image_path}"
+            converted = f"{registry}#{image_path}"
             logger.info(
                 "Converted image reference to enroot format: %s → %s",
                 image_ref,

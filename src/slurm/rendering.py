@@ -193,6 +193,11 @@ def render_job_script(ctx: RenderContext) -> str:
         else:
             script_lines.append(f"#SBATCH --{flag}={value_to_emit}")
 
+    # Record resolved container digest for provenance (if available)
+    resolved_digest = getattr(packaging_strategy, "_resolved_digest", None)
+    if resolved_digest:
+        script_lines.append(f"# Container digest: {resolved_digest}")
+
     script_lines.append("")
     script_lines.append(f'echo "Target Job Directory (from Python): {target_job_dir}"')
     script_lines.append(f"export JOB_DIR={shlex.quote(target_job_dir)}")
@@ -405,6 +410,9 @@ def render_job_script(ctx: RenderContext) -> str:
 
     script_lines.append("PY_EXEC_RESOLVED=${PY_EXEC:-python}")
     script_lines.append("export PY_EXEC_RESOLVED")
+
+    # Ensure Python output is unbuffered so job.tail() sees lines in real-time
+    script_lines.append("export PYTHONUNBUFFERED=1")
 
     # For array jobs, set up filenames with bash variable substitution (expand %a to actual array task ID)
     if is_array_job:

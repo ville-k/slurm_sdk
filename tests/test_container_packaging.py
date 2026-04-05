@@ -116,9 +116,10 @@ def test_prepare_builds_and_pushes(monkeypatch, tmp_path):
         job_dir='"$JOB_DIR"',
     )
 
-    assert wrapped.startswith(
-        "srun --mpi=none --container-image=registry.example.com/team/demo:v1"
-    )
+    # After enroot conversion, registry.example.com/team/demo:v1
+    # becomes registry.example.com#team/demo:v1
+    assert wrapped.startswith("srun --unbuffered --mpi=none --container-image=")
+    assert "registry.example.com#team/demo:v1" in wrapped
     assert (
         '--container-mounts="$(dirname $(dirname $JOB_DIR)):$(dirname $(dirname $JOB_DIR)):rw"'
         in wrapped
@@ -189,9 +190,11 @@ def test_mount_dict_entries_render(monkeypatch):
     assert '--container-mounts="/data:/mnt/data:ro,/opt/tools:/opt/tools:ro"' in command
 
 
-def test_use_digest_default_is_true():
+def test_use_digest_default_is_false():
+    # enroot < 3.5 does not support @sha256: in image URIs, so digest
+    # pinning defaults to off until enroot adoption catches up.
     strategy = ContainerPackagingStrategy({})
-    assert strategy.use_digest is True
+    assert strategy.use_digest is False
 
 
 def test_use_digest_explicit_false():
