@@ -45,7 +45,10 @@ class PackagingConfig(TypedDict, total=False):
     push: bool
     """Whether to push the built image to the registry."""
     use_digest: bool
-    """Pin image by SHA256 digest for reproducibility."""
+    """Resolve and record the image SHA256 digest for provenance.
+    The digest is written as a comment in the job script; the tag-based
+    reference is still passed to Pyxis because enroot < 3.5 does not
+    support ``@sha256:`` in image URIs.  Defaults to ``False``."""
     no_cache: bool
     """Disable Docker build cache."""
     tls_verify: bool

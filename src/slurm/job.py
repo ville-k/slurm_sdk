@@ -965,10 +965,13 @@ class Job(Generic[T]):
     def snapshot(self, tail_lines: int = 80) -> JobSnapshot:
         """Capture a point-in-time snapshot of this job's state and output.
 
-        Gathers the current Slurm status, the trailing lines of stdout and
-        stderr, and computed metadata into a frozen :class:`JobSnapshot`
-        dataclass.  Useful for dashboards, logging, and integration with
-        external orchestration systems.
+        All derived fields (``is_terminal``, ``is_successful``) are computed
+        from the single status query at the start, so the snapshot is
+        internally consistent even if the job transitions during the call.
+
+        Log tails are fetched efficiently: on remote backends, only the
+        last *tail_lines* are read (via ``tail -n``) rather than
+        downloading the entire file.
 
         Args:
             tail_lines: Number of trailing lines to include from stdout
@@ -988,25 +991,16 @@ class Job(Generic[T]):
         status = self.get_status()
         state = status.get("JobState", "UNKNOWN")
         exit_code = status.get("ExitCode")
-        reason = status.get("Reason") or status.get("Error") or status.get("StateDesc")
+        reason = (
+            status.get("Reason") or status.get("Error") or status.get("StateDesc")
+        )
 
-        stdout_tail = ""
-        if self.stdout_path:
-            try:
-                full = self.get_stdout()
-                lines = full.splitlines()
-                stdout_tail = "\n".join(lines[-tail_lines:]) if lines else ""
-            except (FileNotFoundError, RuntimeError, OSError):
-                pass
+        # Derive terminal/success from the single status dict above
+        is_terminal = state in self.TERMINAL_STATES
+        is_successful = is_terminal and state == "COMPLETED" and exit_code == "0:0"
 
-        stderr_tail = ""
-        if self.stderr_path:
-            try:
-                full = self.get_stderr()
-                lines = full.splitlines()
-                stderr_tail = "\n".join(lines[-tail_lines:]) if lines else ""
-            except (FileNotFoundError, RuntimeError, OSError):
-                pass
+        stdout_tail = self._read_tail(self.stdout_path, tail_lines)
+        stderr_tail = self._read_tail(self.stderr_path, tail_lines)
 
         elapsed: Optional[float] = None
         if self.started_at:
@@ -1021,9 +1015,45 @@ class Job(Generic[T]):
             stdout_tail=stdout_tail,
             stderr_tail=stderr_tail,
             elapsed_seconds=elapsed,
-            is_terminal=state in self.TERMINAL_STATES,
-            is_successful=self.is_successful(),
+            is_terminal=is_terminal,
+            is_successful=is_successful,
         )
+
+    def _read_tail(self, path: Optional[str], tail_lines: int) -> str:
+        """Read the last *tail_lines* lines from a file efficiently.
+
+        Uses ``backend.tail_file(follow=False)`` when available so that
+        remote backends only transfer the tail rather than the whole file.
+        Falls back to a full read + slice if ``tail_file`` is not
+        implemented.
+        """
+        if not path:
+            return ""
+
+        # Prefer tail_file (efficient: only transfers last N lines)
+        tail_fn = getattr(self.backend, "tail_file", None)
+        if tail_fn is not None:
+            try:
+                collected: list[str] = []
+                tail_fn(
+                    path,
+                    follow=False,
+                    lines=tail_lines,
+                    on_line=collected.append,
+                )
+                return "\n".join(collected)
+            except NotImplementedError:
+                pass  # fall through to full-read path
+            except (FileNotFoundError, RuntimeError, OSError):
+                return ""
+
+        # Fallback: download full file and slice locally
+        try:
+            full = self._read_remote_file(path, "output")
+            lines = full.splitlines()
+            return "\n".join(lines[-tail_lines:]) if lines else ""
+        except (FileNotFoundError, RuntimeError, OSError):
+            return ""
 
     def _read_remote_file(self, remote_path: str, file_type: str) -> str:
         """Read a file from the cluster (SSH or local).

@@ -172,7 +172,8 @@ class ContainerPackagingStrategy(PackagingStrategy):
             prepare_result = {
                 "status": "success",
                 "image": image_ref,
-                "image_digest": self._image_reference,
+                "image_reference": self._image_reference,
+                "image_digest": None,
                 "built": False,
                 "pushed": False,
             }
@@ -190,7 +191,8 @@ class ContainerPackagingStrategy(PackagingStrategy):
         prepare_result = {
             "status": "success",
             "image": image_ref,
-            "image_digest": self._image_reference,
+            "image_reference": self._image_reference,
+            "image_digest": self._resolved_digest,
             "built": built,
             "pushed": pushed,
             "runtime": runtime,
