@@ -7,7 +7,7 @@ description: Detailed Diataxis documentation guidelines — templates, decision 
 
 Follow these guidelines when writing or updating any documentation in this project.
 
-!`cat DOCUMENTATION_GUIDE.md`
+!`cat .agents/skills/docs/DOCUMENTATION_GUIDE.md`
 
 ## Project-Specific Notes
 
