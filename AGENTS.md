@@ -10,9 +10,11 @@
 
 ## Build, Test, and Development Commands
 
-- `uv pip install -e .` installs the package in editable mode for local development.
+All commands are run through `uv run`, which automatically syncs the project environment (installs/updates dependencies from the lockfile) before execution. No manual install step is needed.
+
 - `uv run pytest` executes the offline unit suite against the local backend.
 - `uv run pytest -n auto` runs tests in parallel using all available CPU cores (via pytest-xdist).
+- `uv run ty check` runs the ty type checker against `src/`.
 - `uv run python -m slurm.examples.hello_world` performs a smoke test of job submission without SLURM access.
 - `uv run mkdocs serve` launches the documentation preview at `http://127.0.0.1:8000`; stop with `Ctrl+C`.
 - `uv run mkdocs build` builds the documentation and checks for warnings and errors.
@@ -60,6 +62,7 @@ Before committing, run all quality checks:
 ```bash
 uv format
 uv run ruff check --fix
+uv run ty check
 uv run bandit -r src/ -ll
 uv run mdformat docs/tutorials docs/how-to docs/explanation docs/reference docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md
 uv run mkdocs build
@@ -287,12 +290,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ❌ **Don't**: Use commit messages as changelog entries
 - ❌ **Don't**: Forget to mention breaking changes or deprecations
 
+## Type Checking
+
+Types are checked using [ty](https://docs.astral.sh/ty/), configured in `pyproject.toml` under `[tool.ty]`.
+
+- `uv run ty check` runs the type checker against `src/` (as configured in `[tool.ty.src]`).
+- `uv run ty check --watch` watches for file changes and rechecks incrementally.
+- `uv run ty explain <rule>` explains a specific diagnostic rule.
+
+The project uses gradual adoption: noisy rules (e.g., `unresolved-attribute`, `invalid-type-form`) are set to `"warn"` and should be promoted to `"error"` as violations are fixed. New code should not introduce new type errors or warnings.
+
 ## Testing Guidelines
 
 - Base tests on `pytest`; name files `test_*.py` and co-locate fixtures or builders under `tests/helpers/`.
 - Cover new behaviors with local-backend tests; mock SSH interactions unless explicitly targeting integration scenarios.
 - Mark slower or external tests clearly (e.g., `pytest.mark.ssh`) and keep them skipped by default.
 - Run `uv run pytest` before opening a PR and document any deviations.
+
+## Error Handling
+
+- Define custom exception classes for domain-specific errors; inherit from a common project base exception to allow callers to catch broadly when appropriate.
+- Let unexpected errors bubble up — don't catch broad `Exception` unless logging and re-raising. Silent swallowing masks bugs.
+- Validate at system boundaries (user input, API requests, external data); trust internal code and framework guarantees within the core.
+- Use structured error messages with actionable context: include what failed, why, and what the user can do about it.
+- Log errors at the appropriate level: `WARNING` for recoverable issues, `ERROR` for failures that need attention, `CRITICAL` for system-level failures.
+
+## Dependency Management
+
+Dependencies are managed entirely through UV. Never use `pip install` directly.
+
+- `uv add <package>` adds a dependency to `pyproject.toml` and updates `uv.lock`.
+- `uv add --dev <package>` adds a development-only dependency.
+- `uv remove <package>` removes a dependency.
+- `uv sync` syncs the environment to match the lockfile without running a command.
+- `uv lock --upgrade-package <package>` upgrades a specific package within its version constraints.
+- `uv tree` displays the project's dependency tree.
 
 ## Commit & Pull Request Guidelines
 

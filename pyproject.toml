@@ -53,6 +53,7 @@ dev = [
     "pytest-integration>=0.2.3",
     "pytest-testinfra>=10.0.0",
     "pytest-xdist>=3.5.0",
+    "ty>=0.0.29",
 ]
 
 [tool.pytest.ini_options]
@@ -73,3 +74,41 @@ markers = [
     "container_runtime: marks tests that run containers using prebuilt images",
     "container_build: marks tests that build containers from Dockerfiles",
 ]
+
+# -- ty type checker ---------------------------------------------------------
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["src"]
+
+[tool.ty.analysis]
+# Optional/runtime-only imports that won't be in the dev environment
+allowed-unresolved-imports = ["debugpy", "tomli", "torch"]
+
+[tool.ty.rules]
+# Gradually adopt: warn on noisy rules, error on the rest (default).
+# TODO: promote these to "error" as violations are fixed
+unresolved-attribute = "warn"
+invalid-type-form = "warn"
+invalid-assignment = "warn"
+invalid-argument-type = "warn"
+unknown-argument = "warn"
+# Forward string references ty can't resolve across modules
+unresolved-reference = "warn"
+# Pickle deserialization returns `object`; ty can't infer actual types
+invalid-return-type = "warn"
+unsupported-operator = "warn"
+no-matching-overload = "warn"
+not-subscriptable = "warn"
+call-non-callable = "warn"
+call-top-callable = "warn"
+
+# Relax rules for tests
+[[tool.ty.overrides]]
+include = ["tests/**"]
+
+[tool.ty.overrides.rules]
+unresolved-attribute = "ignore"
+invalid-type-form = "ignore"
+invalid-assignment = "ignore"

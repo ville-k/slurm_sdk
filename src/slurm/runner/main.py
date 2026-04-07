@@ -299,23 +299,14 @@ def run_task_with_callbacks(
     run_end_time = time.time()
     try:
         end_ctx = RunEndContext(
-            module=args.module,
-            function=args.function,
-            args_file=args.args_file,
-            kwargs_file=args.kwargs_file,
+            status="success",
             output_file=args.output_file,
             job_id=job_id,
             job_dir=job_dir,
             hostname=hostname,
-            python_executable=python_executable,
-            python_version=python_version,
-            working_directory=working_directory,
-            environment_snapshot=environment_snapshot,
             start_time=run_start_time,
             end_time=run_end_time,
             duration=run_end_time - run_start_time,
-            result=result,
-            exception=None,
             job_context=job_context,
         )
         run_callbacks(callbacks, "on_end_run_job_ctx", end_ctx)
