@@ -84,7 +84,7 @@ include = ["src"]
 
 [tool.ty.analysis]
 # Optional/runtime-only imports that won't be in the dev environment
-allowed-unresolved-imports = ["debugpy", "tomli", "torch"]
+allowed-unresolved-imports = ["debugpy", "tomli", "torch", "textual.**"]
 
 [tool.ty.rules]
 # Gradually adopt: warn on noisy rules, error on the rest (default).
