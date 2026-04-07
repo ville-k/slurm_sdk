@@ -10,9 +10,11 @@
 
 ## Build, Test, and Development Commands
 
-- `uv pip install -e .` installs the package in editable mode for local development.
+All commands are run through `uv run`, which automatically syncs the project environment (installs/updates dependencies from the lockfile) before execution. No manual install step is needed.
+
 - `uv run pytest` executes the offline unit suite against the local backend.
 - `uv run pytest -n auto` runs tests in parallel using all available CPU cores (via pytest-xdist).
+- `uv run ty check` runs the ty type checker against `src/`.
 - `uv run python -m slurm.examples.hello_world` performs a smoke test of job submission without SLURM access.
 - `uv run mkdocs serve` launches the documentation preview at `http://127.0.0.1:8000`; stop with `Ctrl+C`.
 - `uv run mkdocs build` builds the documentation and checks for warnings and errors.
@@ -49,7 +51,7 @@ Write code and tests together, maintaining high coverage:
 
 When coding is complete:
 
-- Update or add documentation following the Diataxis framework
+- Update or add documentation following the Diataxis framework (invoke `/docs` for detailed guidance)
 - Add changelog entries to `docs/CHANGELOG.md` under `## [Unreleased]`
 - Ensure docstrings are complete for public APIs
 
@@ -60,6 +62,7 @@ Before committing, run all quality checks:
 ```bash
 uv format
 uv run ruff check --fix
+uv run ty check
 uv run bandit -r src/ -ll
 uv run mdformat docs/tutorials docs/how-to docs/explanation docs/reference docs/CHANGELOG.md docs/CONTRIBUTING.md README.md AGENTS.md
 uv run mkdocs build
@@ -92,67 +95,7 @@ gh pr create --fill
 
 ## Publishing to PyPI
 
-The package is published to PyPI via GitHub Actions using trusted publishing (no API tokens needed).
-
-### Dev Releases
-
-Dev releases publish the current version in `pyproject.toml` (e.g., `0.4.5-dev`) for testing:
-
-```bash
-gh workflow run publish.yml -f version_type=dev
-```
-
-To test the build without uploading:
-
-```bash
-gh workflow run publish.yml -f version_type=dev -f dry_run=true
-```
-
-### Production Releases
-
-Production releases require a clean version number and updated changelog:
-
-1. **Update version** in `pyproject.toml` (remove `-dev` suffix):
-
-   ```python
-   version = "0.4.5"  # was "0.4.5-dev"
-   ```
-
-1. **Update changelog** in `docs/CHANGELOG.md`:
-
-   - Move entries from `## [Unreleased]` to new section `## [0.4.5] - YYYY-MM-DD`
-   - Keep an empty `## [Unreleased]` section at the top
-
-1. **Commit, tag, and create GitHub release**:
-
-   ```bash
-   git add pyproject.toml docs/CHANGELOG.md
-   git commit -m "chore: release v0.4.5"
-   git tag v0.4.5
-   git push origin main --tags
-   gh release create v0.4.5 --generate-notes
-   ```
-
-   The GitHub release event automatically triggers PyPI publishing.
-
-1. **Prepare for next development cycle**:
-
-   ```bash
-   # Update version to next dev version
-   # version = "0.4.6-dev"
-   git commit -am "chore: bump version to 0.4.6-dev"
-   git push
-   ```
-
-### Manual Production Release
-
-If you need to publish a release without creating a GitHub release:
-
-```bash
-gh workflow run publish.yml -f version_type=release
-```
-
-This validates that the version doesn't contain `-dev`, `-alpha`, or `-beta` suffixes.
+The package is published to PyPI via GitHub Actions using trusted publishing. Invoke the `/release` skill for detailed steps on dev releases, production releases, version bumps, and changelog updates.
 
 ## Coding Style & Naming Conventions
 
@@ -287,12 +230,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ❌ **Don't**: Use commit messages as changelog entries
 - ❌ **Don't**: Forget to mention breaking changes or deprecations
 
+## Type Checking
+
+Types are checked using [ty](https://docs.astral.sh/ty/), configured in `pyproject.toml` under `[tool.ty]`.
+
+- `uv run ty check` runs the type checker against `src/` (as configured in `[tool.ty.src]`).
+- `uv run ty check --watch` watches for file changes and rechecks incrementally.
+- `uv run ty explain <rule>` explains a specific diagnostic rule.
+
+The project uses gradual adoption: noisy rules (e.g., `unresolved-attribute`, `invalid-type-form`) are set to `"warn"` and should be promoted to `"error"` as violations are fixed. New code should not introduce new type errors or warnings.
+
 ## Testing Guidelines
 
 - Base tests on `pytest`; name files `test_*.py` and co-locate fixtures or builders under `tests/helpers/`.
 - Cover new behaviors with local-backend tests; mock SSH interactions unless explicitly targeting integration scenarios.
 - Mark slower or external tests clearly (e.g., `pytest.mark.ssh`) and keep them skipped by default.
 - Run `uv run pytest` before opening a PR and document any deviations.
+
+## Error Handling
+
+- Define custom exception classes for domain-specific errors; inherit from a common project base exception to allow callers to catch broadly when appropriate.
+- Let unexpected errors bubble up — don't catch broad `Exception` unless logging and re-raising. Silent swallowing masks bugs.
+- Validate at system boundaries (user input, API requests, external data); trust internal code and framework guarantees within the core.
+- Use structured error messages with actionable context: include what failed, why, and what the user can do about it.
+- Log errors at the appropriate level: `WARNING` for recoverable issues, `ERROR` for failures that need attention, `CRITICAL` for system-level failures.
+
+## Dependency Management
+
+Dependencies are managed entirely through UV. Never use `pip install` directly.
+
+- `uv add <package>` adds a dependency to `pyproject.toml` and updates `uv.lock`.
+- `uv add --dev <package>` adds a development-only dependency.
+- `uv remove <package>` removes a dependency.
+- `uv sync` syncs the environment to match the lockfile without running a command.
+- `uv lock --upgrade-package <package>` upgrades a specific package within its version constraints.
+- `uv tree` displays the project's dependency tree.
 
 ## Commit & Pull Request Guidelines
 
@@ -404,469 +376,19 @@ Refs: #1234
 - Easier navigation of git history
 - Structured history for tooling
 
-## Documentation Management (Diataxis Framework)
+## Documentation Management
 
-When modifying code, always keep documentation synchronized following the [Diataxis framework](https://diataxis.fr/). Documentation should be organized into four distinct types, each serving different user needs.
+Documentation follows the [Diataxis](https://diataxis.fr/) framework with four types: tutorials, how-to guides, reference, and explanation. **Never mix documentation types** — each serves a fundamentally different user need.
 
-### Core Principle
+When writing or updating documentation, invoke the `/docs` skill for detailed templates, decision guides, and common mistakes to avoid.
 
-**Never mix documentation types.** Each type serves a fundamentally different user need and must remain separate. Blurring boundaries is the root cause of most documentation problems.
+Key rules:
 
-### The Four Documentation Types
-
-#### 1. **Tutorials** (Learning-Oriented)
-
-**Purpose**: Guide beginners through a complete learning experience\
-**Audience**: New users acquiring basic competence\
-**Focus**: Practical lessons that build confidence through successful completion
-
-**Characteristics**:
-
-- Take users step-by-step through a concrete project
-- Always reach a meaningful, working conclusion
-- Prioritize learning over explaining _why_
-- Avoid distractions, alternatives, or edge cases
-- Ensure every step produces expected results
-- Use concrete examples, not abstractions
-
-**Example titles**:
-
-- "Build your first neural network training pipeline"
-- "Create a simple distributed training job"
-- "Getting started with AutoBot"
-
-**Structure**:
-
-```markdown
-# Tutorial: [Specific achievable goal]
-
-## What you'll build
-[Concrete outcome description]
-
-## Prerequisites
-[Exact requirements - versions, tools, accounts]
-
-## Step 1: [Action verb]
-[Concrete instruction]
-[Expected result]
-
-## Step 2: [Action verb]
-[Continue with clear steps...]
-
-## Summary
-[What they accomplished, what they learned]
-[Links to related how-to guides and explanations]
-```
-
-**Writing guidelines**:
-
-- ✅ "Now run `train.py` - you'll see the training loss decreasing"
-- ✅ "We use HTTPS here because it's more secure ([learn more](link))"
-- ❌ Don't explain concepts in depth - link to explanations instead
-- ❌ Don't show alternative approaches - stay focused on one path
-- ❌ Don't assume prior knowledge beyond prerequisites
-
-______________________________________________________________________
-
-#### 2. **How-To Guides** (Task-Oriented)
-
-**Purpose**: Help competent users accomplish specific real-world tasks\
-**Audience**: Experienced users solving practical problems\
-**Focus**: Efficient solutions to common problems
-
-**Characteristics**:
-
-- Address a specific goal or problem
-- Assume user competence and familiarity
-- Show the steps, skip the explanation
-- Allow users to adapt to their context
-- Don't need to be comprehensive end-to-end
-
-**Example titles**:
-
-- "How to configure multi-node training"
-- "How to monitor GPU memory usage"
-- "How to troubleshoot out-of-memory errors"
-- "How to integrate with MLflow"
-
-**Structure**:
-
-````markdown
-# How to [solve specific problem]
-
-## Problem
-[Clear description of what this solves]
-
-## Prerequisites
-- [Assumed knowledge/setup]
-
-## Steps
-
-1. [Do specific action]
-```bash
-   [exact commands]
-```
-
-2. [Next action]
-   [Brief context if needed]
-
-3. [Continue...]
-
-## Verification
-[How to confirm it worked]
-
-## Troubleshooting
-[Common issues and fixes]
-
-## See also
-- [Related how-to guides]
-- [Relevant reference documentation]
-````
-
-**Writing guidelines**:
-
-- ✅ Use conditional imperatives: "To achieve X, do Y"
-- ✅ Focus on the task, not the tool
-- ✅ Link to reference for complete option lists
-- ❌ Don't explain why unless critical to success
-- ❌ Don't teach - assume they know the basics
-- ❌ Don't provide full end-to-end setup
-
-______________________________________________________________________
-
-#### 3. **Reference** (Information-Oriented)
-
-**Purpose**: Provide accurate technical descriptions for users at work\
-**Audience**: Users who need to look up specific facts\
-**Focus**: Comprehensive, accurate, consistent information
-
-**Characteristics**:
-
-- Describes the machinery/API/system as it is
-- Factual, neutral, free of opinion
-- Structured to mirror the code/system architecture
-- Designed for quick lookup during work
-- Complete and authoritative
-
-**Example sections**:
-
-- "API Reference"
-- "Configuration Options"
-- "Command-Line Interface"
-- "Error Codes"
-
-**Structure**:
-
-````markdown
-# [Module/Class/Function] Reference
-
-## Overview
-[One-sentence description]
-
-## Signature
-```python
-def train_model(
-    config: TrainingConfig,
-    data_path: str,
-    *,
-    checkpoint_dir: Optional[str] = None,
-    distributed: bool = False
-) -> TrainingResult
-```
-
-## Parameters
-
-### config (TrainingConfig)
-[Neutral description of what it is and what it controls]
-
-### data_path (str)
-[Description]
-
-### checkpoint_dir (Optional[str], default=None)
-[Description]
-
-### distributed (bool, default=False)
-[Description]
-
-## Returns
-
-### TrainingResult
-[Description of return value]
-
-## Raises
-
-### ValueError
-[When this is raised]
-
-### RuntimeError
-[When this is raised]
-
-## Examples
-```python
-# Basic usage
-config = TrainingConfig(batch_size=32, lr=0.001)
-result = train_model(config, "/data/training")
-```
-
-## See Also
-- [Related functions]
-- [How-to guide for common usage]
-````
-
-**Writing guidelines**:
-
-- ✅ Be accurate and complete
-- ✅ Follow consistent structure
-- ✅ Mirror code/system organization
-- ✅ Include minimal illustrative examples
-- ❌ Don't explain concepts - link to explanations
-- ❌ Don't provide instructions - link to how-tos
-- ❌ Don't include opinions or recommendations
-
-______________________________________________________________________
-
-#### 4. **Explanation** (Understanding-Oriented)
-
-**Purpose**: Deepen understanding of topics and design decisions\
-**Audience**: Users wanting to understand "why" and context\
-**Focus**: Clarification, discussion, multiple perspectives
-
-**Characteristics**:
-
-- Discusses concepts, design, alternatives, context
-- Can include opinions and perspectives
-- Approaches topics from multiple angles
-- Not tied to specific tasks or code
-- For study, not for work
-
-**Example titles**:
-
-- "Understanding distributed training strategies"
-- "Why we use gradient accumulation"
-- "Design principles of the training pipeline"
-- "Training at scale: architectural considerations"
-
-**Structure**:
-
-```markdown
-# [Topic] Explained
-
-## Overview
-[What this explanation covers and why it matters]
-
-## Context
-[Background, history, or situation that motivates this topic]
-
-## [Key Concept 1]
-[Discussion of concept with examples]
-
-### Why this matters
-[Implications and reasoning]
-
-## [Key Concept 2]
-[Continue discussing related aspects]
-
-## Trade-offs and Alternatives
-[Compare different approaches]
-
-## Common Misconceptions
-[Clear up confusion]
-
-## Conclusion
-[Synthesis of key insights]
-
-## Further Reading
-- [Related explanations]
-- [Academic papers or external resources]
-```
-
-**Writing guidelines**:
-
-- ✅ Circle around the topic from different angles
-- ✅ Make connections to other concepts
-- ✅ Provide context and history
-- ✅ Include diagrams and comparisons
-- ✅ Express informed opinions when helpful
-- ❌ Don't give step-by-step instructions
-- ❌ Don't turn into reference material with tables of facts
-
-______________________________________________________________________
-
-### Documentation Workflow
-
-#### When Writing New Code
-
-1. **Identify which documentation types need updates**
-
-   - New feature → Tutorial (if fundamental) + How-to + Reference
-   - Bug fix → Update relevant How-to or Reference
-   - API change → Always update Reference
-   - Design decision → Add/update Explanation
-
-1. **Update each type appropriately**
-
-   - Keep types separate (no explanations in tutorials!)
-   - Update related cross-links
-   - Ensure examples still work
-
-1. **Verify documentation matches code**
-
-   - Test all code examples
-   - Validate parameter descriptions
-   - Confirm error messages match
-
-#### Directory Structure
-
-```text
-docs/
-├── tutorials/           # Learning-oriented lessons
-│   ├── getting-started.md
-│   └── first-training-job.md
-├── how-to/             # Task-oriented guides
-│   ├── configure-distributed.md
-│   ├── monitor-memory.md
-│   └── troubleshooting.md
-├── reference/          # Information-oriented specs
-│   ├── api/
-│   ├── cli.md
-│   └── config-options.md
-└── explanation/        # Understanding-oriented discussion
-    ├── architecture.md
-    ├── training-strategies.md
-    └── design-principles.md
-```
-
-### Quick Decision Guide
-
-**Ask yourself:**
-
-1. **Is the user learning or working?**
-
-   - Learning → Tutorial or Explanation
-   - Working → How-to or Reference
-
-1. **Do they need to follow steps?**
-
-   - Yes, learning → Tutorial
-   - Yes, solving problem → How-to
-
-1. **Do they need facts or understanding?**
-
-   - Facts to use → Reference
-   - Understanding → Explanation
-
-### Common Mistakes to Avoid
-
-❌ **Tutorial mistakes**:
-
-- Explaining concepts in depth (use brief notes + links)
-- Showing multiple ways to do things
-- Skipping steps or assuming knowledge beyond prerequisites
-- Not testing that each step produces expected results
-
-❌ **How-to mistakes**:
-
-- Teaching basics (assume competence)
-- Explaining why things work (link to explanations)
-- Making it comprehensive end-to-end (focus on the task)
-
-❌ **Reference mistakes**:
-
-- Including "how to use this" instructions (link to how-tos)
-- Explaining design decisions (link to explanations)
-- Using inconsistent structure
-- Being incomplete or ambiguous
-
-❌ **Explanation mistakes**:
-
-- Providing step-by-step instructions (link to tutorials/how-tos)
-- Just listing facts (that's reference)
-- Staying too abstract without examples
-
-### Links and Cross-References
-
-Create clear pathways between documentation types:
-
-- **From Tutorials**: Link to related how-tos and explanations for "next steps"
-- **From How-tos**: Link to reference for complete options, explanations for context
-- **From Reference**: Link to how-tos for common usage patterns
-- **From Explanations**: Link to tutorials and how-tos for practical application
-
-### Quality Checklist
-
-Before committing documentation changes, verify:
-
-- [ ] Content is in the correct documentation type
-- [ ] No mixing of types (e.g., no explanations in tutorials)
-- [ ] Code examples are tested and work
-- [ ] Cross-references are updated
-- [ ] User need is clearly served
-- [ ] Writing style matches the type (instructive vs. informative vs. explanatory)
-
-### Using Diagrams
-
-Add diagrams where they help achieve learning objectives or clarify complex concepts. Visual representations are especially valuable for:
-
-- System architecture and component relationships
-- Data flow and execution sequences
-- State machines and lifecycle diagrams
-- Decision trees and branching logic
-
-**Preferred format**: Use [Mermaid.js](https://mermaid.js.org/) diagrams embedded in markdown. Mermaid is natively supported by MkDocs Material and renders directly in documentation.
-
-````markdown
-```mermaid
-graph LR
-    A[Submit Task] --> B{Packaging?}
-    B -->|wheel| C[Build Wheel]
-    B -->|container| D[Build Container]
-    C --> E[Upload to Cluster]
-    D --> E
-    E --> F[Run sbatch]
-```
-````
-
-**Docstrings with diagrams**: Public API docstrings can include Mermaid diagrams, markdown formatting, and ASCII art. These are rendered in the reference documentation via mkdocstrings. Use diagrams in docstrings when they help users understand:
-
-- Method call sequences
-- Object relationships
-- State transitions
-- Complex return structures
-
-Example docstring with Mermaid:
-
-````python
-def submit(self, task_func: SlurmTask) -> Job:
-    """Submit a task to the cluster.
-
-    Execution flow:
-
-    ```mermaid
-    sequenceDiagram
-        participant User
-        participant Cluster
-        participant SLURM
-        User->>Cluster: submit(task)
-        Cluster->>SLURM: sbatch script.sh
-        SLURM-->>Cluster: job_id
-        Cluster-->>User: Job object
-    ```
-    """
-````
-
-**When to use ASCII art**: For simple inline diagrams in docstrings where Mermaid would be overkill, ASCII art is acceptable:
-
-```python
-def process_pipeline(self):
-    """Run the processing pipeline.
-
-    Pipeline structure:
-        Input -> [Preprocess] -> [Transform] -> [Validate] -> Output
-                      |               |
-                      v               v
-                   Logs           Metrics
-    """
-```
+- All public and private APIs have Google-style docstrings.
+- Documentation is published using Material for MkDocs.
+- Use [Mermaid.js](https://mermaid.js.org/) diagrams where they clarify complex concepts.
+- Add navigation entries in `mkdocs.yml` for new pages.
+- `docs/index.md` is excluded from mdformat (uses special MkDocs Material grid syntax).
 
 ## Security & Configuration Tips
 
