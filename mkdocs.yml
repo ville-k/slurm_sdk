@@ -24,6 +24,7 @@ nav:
       - Running GPU Tasks in Containers: how-to/hello_torch.md
       - SSH Security: how-to/ssh_security.md
       - Custom Task Decorators: how-to/custom-task-decorators.md
+      - Streaming Live Job Output: how-to/log-streaming.md
   - Reference:
       - reference/index.md
       - CLI Reference: reference/cli.md
