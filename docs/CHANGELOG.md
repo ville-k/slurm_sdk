@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Job.snapshot()` uses `tail_file(follow=False)` for efficient log tails instead
   of downloading entire stdout/stderr files on remote backends
 
+### Changed
+
+- Dev releases now use timestamped versions (`X.Y.Z.devYYYYMMDDHHMM`) instead of
+  static `.dev0`, allowing multiple dev releases per day without version conflicts
+
 ### Added
 
 - `parse_packaging_config()` as a public API for parsing packaging specification

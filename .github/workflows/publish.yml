@@ -53,12 +53,20 @@ jobs:
 
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
-      - name: Validate version for dev
+      - name: Set timestamped dev version
         if: github.event_name == 'workflow_dispatch' && inputs.version_type == 'dev'
         run: |
           VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
           echo "Version in pyproject.toml: $VERSION"
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+          # Strip -dev suffix and append .devYYYYMMDDHHMM timestamp
+          BASE_VERSION="${VERSION%-dev}"
+          TIMESTAMP=$(date -u +'%Y%m%d%H%M')
+          DEV_VERSION="${BASE_VERSION}.dev${TIMESTAMP}"
+          echo "Publishing dev version: $DEV_VERSION"
+
+          sed -i "s/^version = .*/version = \"${DEV_VERSION}\"/" pyproject.toml
+          echo "VERSION=$DEV_VERSION" >> $GITHUB_ENV
 
       - name: Build package
         run: |
