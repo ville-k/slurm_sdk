@@ -37,6 +37,25 @@ jobs:
             coverage_html/
           retention-days: 30
 
+  type-check:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run type checker
+        run: uv run ty check --output-format github
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -113,7 +132,7 @@ jobs:
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
-    needs: [unit-tests, lint, security]
+    needs: [unit-tests, type-check, lint, security]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
