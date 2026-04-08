@@ -156,6 +156,7 @@ def _create_cluster_with_path(
         Tuple of (cluster, parent_packaging_type).
     """
 
+    assert config.slurmfile_path is not None
     slurmfile_path = config.slurmfile_path
     parent_packaging_type: Optional[str] = None
 

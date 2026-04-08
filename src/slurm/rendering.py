@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING
 
 from ._serialization import dumps_pickled
+from .task import _NamedCallable
 import inspect
 import sys
 import traceback
@@ -101,7 +102,7 @@ class RenderContext:
     callers pass a single object instead of 12 positional arguments.
     """
 
-    task_func: Callable[..., Any]
+    task_func: _NamedCallable
     task_args: Tuple[Any, ...]
     task_kwargs: Dict[str, Any]
     task_definition: Dict[str, Any]
@@ -441,9 +442,12 @@ def render_job_script(ctx: RenderContext) -> str:
 
     # For array jobs, provide array-specific arguments
     if is_array_job:
+        assert array_items_file is not None
         runner_parts.append('--array-index "$SLURM_ARRAY_TASK_ID"')
         runner_parts.append(f'--array-items-file "{_escape_quotes(array_items_file)}"')
     else:
+        assert args_file_path_str is not None
+        assert kwargs_file_path_str is not None
         # For regular jobs, provide args/kwargs files
         runner_parts.append(f'--args-file "{_escape_quotes(args_file_path_str)}"')
         runner_parts.append(f'--kwargs-file "{_escape_quotes(kwargs_file_path_str)}"')

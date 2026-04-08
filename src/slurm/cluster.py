@@ -172,6 +172,15 @@ class Cluster:
         self.default_account = default_account
         self.default_partition = default_partition
 
+        # Attributes set by from_env() when loading from a Slurmfile
+        self.env_name: Optional[str] = None
+        self.slurmfile_path: Optional[str] = None
+        self.environment_config: Optional[Dict[str, Any]] = None
+        self.packaging_defaults: Optional[Dict[str, Any]] = None
+        self.submit_defaults: Optional[Dict[str, Any]] = None
+
+        self._prebuilt_dependency_images: Dict[str, str] = {}
+
         # Extract default_packaging_* kwargs and store them separately
         self.default_packaging_kwargs: Dict[str, Any] = {}
         backend_only_kwargs = {}
@@ -401,13 +410,13 @@ class Cluster:
             **backend_config,
         )
 
-        cluster_instance.env_name = environment.name  # type: ignore[attr-defined]
-        cluster_instance.slurmfile_path = str(environment.path)  # type: ignore[attr-defined]
-        cluster_instance.environment_config = environment.config  # type: ignore[attr-defined]
-        cluster_instance.packaging_defaults = environment.config.get(  # type: ignore[attr-defined]
+        cluster_instance.env_name = environment.name
+        cluster_instance.slurmfile_path = str(environment.path)
+        cluster_instance.environment_config = environment.config
+        cluster_instance.packaging_defaults = environment.config.get(
             "packaging",
         )
-        cluster_instance.submit_defaults = environment.config.get(  # type: ignore[attr-defined]
+        cluster_instance.submit_defaults = environment.config.get(
             "submit",
         )
 
@@ -766,7 +775,6 @@ class Cluster:
         # Process dependency parameter (after)
         if after is not None:
             # Convert Job or List[Job] to dependency string
-            job_ids = []
             if isinstance(after, list):
                 job_ids = [job.id for job in after]
             else:

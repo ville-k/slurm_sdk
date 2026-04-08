@@ -133,6 +133,12 @@ def test_tail_file_base_raises():
         def is_remote(self):
             return False
 
+        def read_file(self, file_path):
+            pass
+
+        def execute_command(self, command):
+            pass
+
     with pytest.raises(NotImplementedError):
         MinimalBackend().tail_file("path", on_line=lambda line: None)
 

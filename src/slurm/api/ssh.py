@@ -86,6 +86,9 @@ class SSHCommandBackend(BackendBase):
                 logged warning, or "auto" to silently accept and save
                 unknown keys (least secure).
         """
+        self.client: Optional[paramiko.SSHClient] = None
+        self.sftp: Optional[paramiko.SFTPClient] = None
+
         self.hostname = hostname
         self.username = username
         self.password = password
@@ -245,6 +248,7 @@ class SSHCommandBackend(BackendBase):
         Raises:
             RuntimeError: If the command fails after all retries.
         """
+        assert self.client is not None, "SSH client not connected"
         for attempt in range(retry_count):
             try:
                 # Set socket timeout to prevent hanging on recv_exit_status()
@@ -327,20 +331,20 @@ class SSHCommandBackend(BackendBase):
         parts.append(shlex.quote(script_path))
         return " ".join(parts)
 
-    def _upload_string_to_file(self, content: str, remote_path: str) -> None:
+    def _upload_string_to_file(self, content: str, file_path: str) -> None:
         """
         Upload a string to a file on the remote host.
 
         Args:
             content: The string content to upload.
-            remote_path: The path to the remote file.
+            file_path: The path to the remote file.
 
         Raises:
             Exception: If the upload fails.
         """
         try:
             # Create parent directory if it doesn't exist
-            parent_dir = os.path.dirname(remote_path)
+            parent_dir = os.path.dirname(file_path)
             if parent_dir:
                 self._run_command(f"mkdir -p {shlex.quote(parent_dir)}")
 
@@ -353,7 +357,8 @@ class SSHCommandBackend(BackendBase):
 
             # Upload the temporary file
             try:
-                self.sftp.put(temp_file_path, remote_path)
+                assert self.sftp is not None, "SFTP client not connected"
+                self.sftp.put(temp_file_path, file_path)
             finally:
                 # Clean up the temporary file
                 os.unlink(temp_file_path)
@@ -955,40 +960,41 @@ class SSHCommandBackend(BackendBase):
         """Clean up resources when the object is destroyed."""
         self.close()
 
-    def _upload_file(self, local_path: str, remote_path: str) -> None:
+    def _upload_file(self, local_path: str, file_path: str) -> None:
         """
         Upload a file to the remote host using the paramiko SFTP client.
 
         Args:
             local_path: Path to the local file
-            remote_path: Path to the remote file
+            file_path: Path to the remote file
 
         Raises:
             RuntimeError: If the upload fails
         """
         try:
             # Expand ~ in remote path if present
-            if remote_path.startswith("~"):
+            if file_path.startswith("~"):
                 # Get the home directory
                 stdout, stderr, return_code = self._run_command("echo $HOME")
                 if return_code != 0:
                     raise RuntimeError(f"Failed to get home directory: {stderr}")
 
                 home_dir = stdout.strip()
-                remote_path = remote_path.replace("~", home_dir, 1)
+                file_path = file_path.replace("~", home_dir, 1)
 
             # Create the directory if it doesn't exist
-            remote_dir = os.path.dirname(remote_path)
+            remote_dir = os.path.dirname(file_path)
             if remote_dir:
                 self._run_command(f"mkdir -p {shlex.quote(remote_dir)}")
 
             # Ensure we have an SFTP connection
-            if not hasattr(self, "sftp") or self.sftp is None:
+            assert self.client is not None, "SSH client not connected"
+            if self.sftp is None:
                 self.sftp = self.client.open_sftp()
 
             # Upload the file
-            logger.info("Uploading %s to %s", local_path, remote_path)
-            self.sftp.put(local_path, remote_path)
+            logger.info("Uploading %s to %s", local_path, file_path)
+            self.sftp.put(local_path, file_path)
             logger.info("Upload successful")
 
         except Exception as e:
@@ -1020,6 +1026,7 @@ class SSHCommandBackend(BackendBase):
         """Execute a command without retry logic."""
         if not self.client:
             self._connect()
+        assert self.client is not None, "SSH client not connected"
 
         try:
             stdin, stdout, stderr = self.client.exec_command(command)  # nosec B601
@@ -1100,20 +1107,20 @@ class SSHCommandBackend(BackendBase):
             logger.error(f"Failed to open SFTP session: {e}")
             raise RuntimeError("Failed to open SFTP session") from e
 
-    def upload_file(self, local_path: str, remote_path: str):
+    def upload_file(self, local_path: str, file_path: str):
         """
         Uploads a local file to the remote host.
 
         Args:
             local_path: Path to the local file.
-            remote_path: Path to the destination on the remote host.
+            file_path: Path to the destination on the remote host.
         """
-        logger.debug(f"Uploading {local_path} to {self.hostname}:{remote_path}")
+        logger.debug(f"Uploading {local_path} to {self.hostname}:{file_path}")
         sftp = None
         try:
             sftp = self._get_sftp_client()
             # Ensure remote directory exists (optional, but helpful)
-            remote_dir = os.path.dirname(remote_path)
+            remote_dir = os.path.dirname(file_path)
             if remote_dir:
                 try:
                     # Use POSIX path separators for remote commands
@@ -1124,13 +1131,13 @@ class SSHCommandBackend(BackendBase):
                         f"Could not create remote directory {remote_dir}: {mkdir_e}. Upload might fail."
                     )
 
-            sftp.put(local_path, remote_path)
-            logger.debug(f"Successfully uploaded {local_path} to {remote_path}")
+            sftp.put(local_path, file_path)
+            logger.debug(f"Successfully uploaded {local_path} to {file_path}")
         except FileNotFoundError:
             logger.error(f"Local file not found: {local_path}")
             raise
         except Exception as e:
-            logger.error(f"Failed to upload file {local_path} to {remote_path}: {e}")
+            logger.error(f"Failed to upload file {local_path} to {file_path}: {e}")
             raise RuntimeError(f"SFTP upload failed: {e}") from e
         finally:
             if sftp:
@@ -1142,12 +1149,12 @@ class SSHCommandBackend(BackendBase):
             raise RuntimeError("Job base directory not resolved yet.")
         return self.job_base_dir
 
-    def read_file(self, remote_path: str) -> str:
+    def read_file(self, file_path: str) -> str:
         """
         Read a file from the remote host.
 
         Args:
-            remote_path: The path to the remote file.
+            file_path: The path to the remote file.
 
         Returns:
             str: The file contents as a string.
@@ -1157,23 +1164,23 @@ class SSHCommandBackend(BackendBase):
             RuntimeError: If the read operation fails.
         """
         try:
-            logger.debug(f"Reading remote file: {remote_path}")
+            logger.debug(f"Reading remote file: {file_path}")
             sftp = self._get_sftp_client()
 
-            with sftp.open(remote_path, "r") as remote_file:
+            with sftp.open(file_path, "r") as remote_file:
                 content = remote_file.read().decode("utf-8")
 
-            logger.debug(f"Successfully read {len(content)} bytes from {remote_path}")
+            logger.debug(f"Successfully read {len(content)} bytes from {file_path}")
             return content
 
         except IOError as e:
             # Paramiko raises IOError for file not found
             if e.errno == 2:  # ENOENT - No such file or directory
-                raise FileNotFoundError(f"Remote file not found: {remote_path}") from e
-            raise RuntimeError(f"Failed to read file {remote_path}: {e}") from e
+                raise FileNotFoundError(f"Remote file not found: {file_path}") from e
+            raise RuntimeError(f"Failed to read file {file_path}: {e}") from e
         except Exception as e:
-            logger.error(f"Error reading file {remote_path}: {e}")
-            raise RuntimeError(f"Failed to read file {remote_path}: {e}") from e
+            logger.error(f"Error reading file {file_path}: {e}")
+            raise RuntimeError(f"Failed to read file {file_path}: {e}") from e
 
     def _resolve_remote_path(self, path: str) -> str:
         """Resolves a path (potentially containing ~) on the remote host."""
@@ -1258,6 +1265,7 @@ class SSHCommandBackend(BackendBase):
         try:
             if not self.client:
                 self._connect()
+            assert self.client is not None, "SSH client not connected"
 
             # nosec B601 - path is quoted with shlex.quote, lines is cast to int
             _stdin, stdout, _stderr = self.client.exec_command(cmd, timeout=None)  # nosec B601

@@ -7,8 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Promoted 8 ty type checker rules from `warn` to `error` after fixing all violations;
+  only ParamSpec-related rules remain as warnings pending upstream ty support
+- `BackendBase` now declares abstract `read_file()` and `execute_command()` methods
+- `BenchmarkCallback` helper methods moved from module-level monkey-patching to proper
+  class methods for better type safety and pickling
+- Dev releases now use timestamped versions (`X.Y.Z.devYYYYMMDDHHMM`) instead of
+  static `.dev0`, allowing multiple dev releases per day without version conflicts
+
 ### Fixed
 
+- Fixed ~90 type annotation issues across the codebase, improving type safety for
+  `Cluster`, `SlurmTask`, SSH backend, runner argument loading, and callback classes
+- Fixed lowercase `any` (builtin) used instead of `Any` (typing) in runner module
+- Fixed missing `TYPE_CHECKING` imports for `SSHCommandBackend` and `Cluster` in CLI modules
 - Fixed missing imports in parallel train-eval workflow tutorial
 - Added `JobContext` to API reference documentation
 - Updated import paths in tutorials and how-to guides to use public API

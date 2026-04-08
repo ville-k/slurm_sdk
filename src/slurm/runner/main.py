@@ -275,8 +275,8 @@ def run_task_with_callbacks(
         begin_ctx = RunBeginContext(
             module=args.module,
             function=args.function,
-            args_file=args.args_file,
-            kwargs_file=args.kwargs_file,
+            args_file=args.args_file or "",
+            kwargs_file=args.kwargs_file or "",
             output_file=args.output_file,
             job_id=job_id,
             job_dir=job_dir,
@@ -499,8 +499,8 @@ def _call_begin_callback(
         ctx = RunBeginContext(
             module=args.module,
             function=args.function,
-            args_file=args.args_file,
-            kwargs_file=args.kwargs_file,
+            args_file=args.args_file or "",
+            kwargs_file=args.kwargs_file or "",
             output_file=args.output_file,
             job_id=job_id,
             job_dir=job_dir,
@@ -523,7 +523,7 @@ def _emit_workflow_end_callback(
     job_dir: Optional[str],
     workflow_name: str,
     workflow_context: "WorkflowContext",
-    result: Optional[any],
+    result: Optional[Any],
     exception: Optional[Exception],
 ) -> None:
     """Emit workflow end callback event."""

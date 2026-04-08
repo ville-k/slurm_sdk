@@ -15,7 +15,7 @@ try:
 except ImportError:
     from typing_extensions import ParamSpec
 
-from .task import SlurmTask, normalize_sbatch_options
+from .task import SlurmTask, _NamedCallable, normalize_sbatch_options
 
 # Type variables for generic signatures
 P = ParamSpec("P")  # For parameter types
@@ -89,7 +89,7 @@ def workflow(
     """
 
     # Use the @task decorator with workflow-specific settings
-    def decorator(inner: Callable[..., Any]) -> SlurmTask:
+    def decorator(inner: _NamedCallable) -> SlurmTask:
         task_instance = task(inner, time=time, **sbatch_kwargs)
         # Mark this task as a workflow
         task_instance._is_workflow = True
@@ -264,7 +264,7 @@ def task(
     # Build packaging configuration dict from string + kwargs
     effective_packaging = parse_packaging_config(packaging, packaging_kwargs)
 
-    def decorator(inner: Callable[..., Any]) -> SlurmTask:
+    def decorator(inner: _NamedCallable) -> SlurmTask:
         effective_options = dict(normalized_kwargs)
         if not effective_options.get("job_name"):
             effective_options["job_name"] = inner.__name__

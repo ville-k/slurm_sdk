@@ -14,7 +14,7 @@ import os
 import pickle
 import sys
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 
 from slurm.callbacks.callbacks import BaseCallback
 
@@ -190,7 +190,9 @@ def restore_sys_path(encoded_sys_path: str) -> None:
     """
     from .._serialization import loads_pickled
 
-    original_sys_path = loads_pickled(base64.b64decode(encoded_sys_path.encode()))
+    original_sys_path = cast(
+        List[str], loads_pickled(base64.b64decode(encoded_sys_path.encode()))
+    )
     # Prepend original paths to ensure user modules are found first
     sys.path = original_sys_path + [p for p in sys.path if p not in original_sys_path]
     logger.debug("Updated sys.path: %s", sys.path)
@@ -227,8 +229,10 @@ def _load_regular_task_arguments(args: RunnerArgs) -> Tuple[tuple, dict]:
     """
     from .._serialization import read_pickled
 
-    task_args = read_pickled(args.args_file)
-    task_kwargs = read_pickled(args.kwargs_file)
+    assert args.args_file is not None
+    assert args.kwargs_file is not None
+    task_args = cast(tuple, read_pickled(args.args_file))
+    task_kwargs = cast(dict, read_pickled(args.kwargs_file))
     return task_args, task_kwargs
 
 
@@ -245,6 +249,9 @@ def _load_array_task_arguments(
         Tuple of (task_args, task_kwargs).
     """
     from slurm.array_items import load_array_item
+
+    assert args.array_items_file is not None
+    assert args.array_index is not None
 
     # Resolve array items file path
     # If it's a relative path, resolve it relative to job_dir
@@ -304,7 +311,7 @@ def load_callbacks(callbacks_file: str) -> List[BaseCallback]:
             if content:
                 from .._serialization import loads_pickled
 
-                callbacks = loads_pickled(content)
+                callbacks = cast(List[BaseCallback], loads_pickled(content))
                 logger.debug("Deserialized %d callbacks.", len(callbacks))
             else:
                 logger.debug("No callbacks provided (empty callbacks file).")

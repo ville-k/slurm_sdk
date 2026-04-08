@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Optional, cast
+
+if TYPE_CHECKING:
+    from ..api.ssh import SSHCommandBackend
 
 import cyclopts
 from rich.console import Console
@@ -185,10 +188,10 @@ def connect_cluster(
 
     console.print(f"[cyan]Connecting to {hostname}...[/cyan]")
 
-    _open_ssh_session(backend)
+    _open_ssh_session(cast("SSHCommandBackend", backend))
 
 
-def _open_ssh_session(backend: "SSHCommandBackend") -> None:  # noqa: F821
+def _open_ssh_session(backend: "SSHCommandBackend") -> None:
     """Open an interactive SSH session."""
     import select
     import termios
@@ -196,7 +199,10 @@ def _open_ssh_session(backend: "SSHCommandBackend") -> None:  # noqa: F821
 
     try:
         client = backend.client
-        channel = client.get_transport().open_session()
+        assert client is not None, "SSH client not connected"
+        transport = client.get_transport()
+        assert transport is not None, "SSH transport not available"
+        channel = transport.open_session()
         channel.get_pty(
             term=os.environ.get("TERM", "xterm-256color"),
             width=80,
