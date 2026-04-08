@@ -161,16 +161,6 @@ class ArrayJob(Generic[T]):
             self.cluster, self.task, packaging_config=None
         )
 
-        # Prepare packaging
-        try:
-            packaging_strategy.prepare(task=self.task, cluster=self.cluster)
-        except Exception as exc:
-            import logging
-
-            logger = logging.getLogger(__name__)
-            logger.error("Packaging preparation failed: %s", exc)
-            raise
-
         # Get task defaults and merge with dependency options
         task_defaults = dict(getattr(self.task, "sbatch_options", {}) or {})
         sbatch_overrides = {}
