@@ -70,6 +70,7 @@ class InheritPackagingStrategy(PackagingStrategy):
         Returns:
             Dict with status and parent metadata information
         """
+        assert self.parent_job_dir is not None
         metadata_path = Path(self.parent_job_dir) / METADATA_FILENAME
 
         logger.debug(f"Loading parent environment metadata from {metadata_path}")

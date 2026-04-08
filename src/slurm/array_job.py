@@ -177,9 +177,9 @@ class ArrayJob(Generic[T]):
 
         if self.dependencies:
             # Expand ArrayJob objects to avoid pickling them in dependency metadata
-            expanded_deps = []
+            expanded_deps: list[Any] = []
             for dep in self.dependencies:
-                if hasattr(dep, "_jobs"):
+                if isinstance(dep, ArrayJob):
                     expanded_deps.extend(dep._jobs)
                 else:
                     expanded_deps.append(dep)

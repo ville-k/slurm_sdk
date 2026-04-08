@@ -3,7 +3,17 @@ This module provides the Cluster class for submitting and managing jobs on SLURM
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Tuple, Union, TYPE_CHECKING
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Callable,
+    Tuple,
+    Union,
+    TYPE_CHECKING,
+    cast,
+)
 
 if TYPE_CHECKING:
     from .api.base import BackendBase
@@ -393,7 +403,7 @@ class Cluster:
             if callbacks_override is None:
                 callback_list: List[BaseCallback] = []
             elif isinstance(callbacks_override, list):
-                callback_list = list(callbacks_override)
+                callback_list = cast(List[BaseCallback], callbacks_override)
             else:
                 raise SlurmfileInvalidError(
                     "'callbacks' override must be a list of callbacks."
@@ -776,7 +786,7 @@ class Cluster:
         if after is not None:
             # Convert Job or List[Job] to dependency string
             if isinstance(after, list):
-                job_ids = [job.id for job in after]
+                job_ids = [j.id for j in cast(List[Job], after)]
             else:
                 job_ids = [after.id]
 
