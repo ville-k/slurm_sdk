@@ -9,3 +9,4 @@ How-to guides for specific tasks and patterns. Each guide ends with a runnable e
 - [GPU Hello Torch](hello_torch.md)
 - [SSH Security](ssh_security.md)
 - [Custom Task Decorators](custom-task-decorators.md)
+- [Streaming Live Job Output](log-streaming.md)
