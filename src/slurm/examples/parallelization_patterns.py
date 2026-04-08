@@ -499,7 +499,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     # Build cluster kwargs
-    cluster_kwargs = {
+    cluster_kwargs: dict[str, object] = {
         "callbacks": [RichLoggerCallback()],
     }
 

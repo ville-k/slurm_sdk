@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import functools
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, Union
+from typing import Any, Callable, Dict, List, Optional, Protocol, TYPE_CHECKING, Union
 
 # Add this block for type hinting Cluster without causing circular import at runtime
 if TYPE_CHECKING:
     from .job import Job
     from .array_job import ArrayJob
+
+
+class _NamedCallable(Protocol):
+    """Protocol for callables that have standard function attributes."""
+
+    __name__: str
+    __qualname__: str
+    __module__: str
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
 class JobResultPlaceholder:
@@ -164,7 +174,7 @@ class SlurmTask:
 
     def __init__(
         self,
-        func: Callable,
+        func: _NamedCallable,
         sbatch_options: Dict[str, Any] | None = None,
         packaging: Dict[str, Any] | None = None,
         **slurm_options,
@@ -187,13 +197,15 @@ class SlurmTask:
                 f"func must be callable, got {type(func).__name__}: {func!r}"
             )
 
-        self.func = func
+        self.func: _NamedCallable = func
         self.sbatch_options = normalize_sbatch_options(sbatch_options)
         self.packaging = packaging or {"type": "wheel", "build_tool": "uv"}
         # Copy function metadata
         functools.update_wrapper(self, func)
 
         self.slurm_options = slurm_options
+
+        self._is_workflow: bool = False
 
         # Track explicit dependencies set via .after() (before task is called)
         self._pending_dependencies: list = []

@@ -76,12 +76,12 @@ def write_pickled(path: str, obj: object) -> None:
         pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def read_pickled(path: str) -> object:
+def read_pickled(path: "str | os.PathLike[str]") -> object:
     """Read a pickled object from *path*, validating the version header if present."""
     with open(path, "rb") as f:
         first_line = f.readline()
         if first_line.startswith(_HEADER_PREFIX):
-            _validate_header(first_line, source=path)
+            _validate_header(first_line, source=str(path))
             return pickle.load(f)  # nosec B301 - pickle data created by SDK
         # Legacy file without header — rewind and load directly
         f.seek(0)

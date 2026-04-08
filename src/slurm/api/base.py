@@ -179,6 +179,37 @@ class BackendBase(abc.ABC):
         """
         pass
 
+    @abc.abstractmethod
+    def read_file(self, file_path: str) -> str:
+        """Read the contents of a file on the target system.
+
+        Args:
+            file_path: Absolute path to the file to read.
+
+        Returns:
+            str: The file contents as a string.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            RuntimeError: If the read fails.
+        """
+        pass
+
+    @abc.abstractmethod
+    def execute_command(self, command: str) -> str:
+        """Execute a shell command on the target system and return stdout.
+
+        Args:
+            command: The shell command to execute.
+
+        Returns:
+            str: The standard output from the command.
+
+        Raises:
+            RuntimeError: If the command fails.
+        """
+        pass
+
     def download_file(self, remote_path: str, local_path: str) -> None:
         """Download/copy a file from the target system to a local path.
 

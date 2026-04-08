@@ -313,7 +313,7 @@ def main():
     logger_callback = LoggerCallback()
 
     # Build cluster kwargs
-    cluster_kwargs = {
+    cluster_kwargs: dict[str, object] = {
         "callbacks": [logger_callback, graph_callback],
     }
 

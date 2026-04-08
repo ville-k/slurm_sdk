@@ -7,7 +7,17 @@ import os
 import threading
 from dataclasses import dataclass
 
-from typing import IO, Optional, Any, Callable, Dict, TYPE_CHECKING, TypeVar, Generic
+from typing import (
+    IO,
+    Optional,
+    Any,
+    Callable,
+    Dict,
+    TYPE_CHECKING,
+    TypeVar,
+    Generic,
+    cast,
+)
 
 # Use TYPE_CHECKING to avoid circular imports
 if TYPE_CHECKING:
@@ -566,7 +576,7 @@ class Job(Generic[T]):
 
                 from ._serialization import read_pickled
 
-                return read_pickled(local_temp_path)
+                return cast(T, read_pickled(local_temp_path))
             except FileNotFoundError as e:
                 logger.error(
                     "[%s] Remote result file not found: %s", self.id, result_file_path
@@ -639,7 +649,7 @@ class Job(Generic[T]):
                 logger.debug("[%s] Loading local result %s", self.id, local_result_path)
                 from ._serialization import read_pickled
 
-                return read_pickled(local_result_path)
+                return cast(T, read_pickled(local_result_path))
             except FileNotFoundError as e:
                 logger.error(
                     "[%s] Local result file not found: %s", self.id, local_result_path

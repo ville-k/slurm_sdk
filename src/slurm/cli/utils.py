@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from ..cluster import Cluster
 
 from ..config import (
     _extract_environment_table,
@@ -16,7 +19,7 @@ from ..config import (
 def get_cluster(
     env: Optional[str] = None,
     slurmfile: Optional[str] = None,
-) -> "Cluster":  # noqa: F821
+) -> "Cluster":
     """Create a Cluster from CLI args.
 
     Args:

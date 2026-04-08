@@ -1,6 +1,6 @@
 """Array job support for Slurm SDK."""
 
-from typing import TYPE_CHECKING, TypeVar, Generic, List, Optional, Any
+from typing import TYPE_CHECKING, Any, Callable, Generic, List, Optional, TypeVar, cast
 from pathlib import Path
 
 from ._submission import prepare_packaging_strategy
@@ -177,9 +177,9 @@ class ArrayJob(Generic[T]):
 
         if self.dependencies:
             # Expand ArrayJob objects to avoid pickling them in dependency metadata
-            expanded_deps = []
+            expanded_deps: list[Any] = []
             for dep in self.dependencies:
-                if hasattr(dep, "_jobs"):
+                if isinstance(dep, ArrayJob):
                     expanded_deps.extend(dep._jobs)
                 else:
                     expanded_deps.append(dep)
@@ -219,9 +219,10 @@ class ArrayJob(Generic[T]):
                 )
 
                 # Upload the array items file to the target directory
-                if hasattr(self.cluster.backend, "_upload_file"):
+                upload_fn = getattr(self.cluster.backend, "_upload_file", None)
+                if upload_fn is not None:
                     remote_items_path = f"{target_job_dir}/{array_items_filename}"
-                    self.cluster.backend._upload_file(
+                    cast(Callable[..., Any], upload_fn)(
                         str(local_items_file), remote_items_path
                     )
 

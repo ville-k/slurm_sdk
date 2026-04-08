@@ -3,7 +3,17 @@ This module provides the Cluster class for submitting and managing jobs on SLURM
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Tuple, Union, TYPE_CHECKING
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Callable,
+    Tuple,
+    Union,
+    TYPE_CHECKING,
+    cast,
+)
 
 if TYPE_CHECKING:
     from .api.base import BackendBase
@@ -171,6 +181,15 @@ class Cluster:
         self.default_packaging = default_packaging
         self.default_account = default_account
         self.default_partition = default_partition
+
+        # Attributes set by from_env() when loading from a Slurmfile
+        self.env_name: Optional[str] = None
+        self.slurmfile_path: Optional[str] = None
+        self.environment_config: Optional[Dict[str, Any]] = None
+        self.packaging_defaults: Optional[Dict[str, Any]] = None
+        self.submit_defaults: Optional[Dict[str, Any]] = None
+
+        self._prebuilt_dependency_images: Dict[str, str] = {}
 
         # Extract default_packaging_* kwargs and store them separately
         self.default_packaging_kwargs: Dict[str, Any] = {}
@@ -384,7 +403,7 @@ class Cluster:
             if callbacks_override is None:
                 callback_list: List[BaseCallback] = []
             elif isinstance(callbacks_override, list):
-                callback_list = list(callbacks_override)
+                callback_list = cast(List[BaseCallback], callbacks_override)
             else:
                 raise SlurmfileInvalidError(
                     "'callbacks' override must be a list of callbacks."
@@ -401,13 +420,13 @@ class Cluster:
             **backend_config,
         )
 
-        cluster_instance.env_name = environment.name  # type: ignore[attr-defined]
-        cluster_instance.slurmfile_path = str(environment.path)  # type: ignore[attr-defined]
-        cluster_instance.environment_config = environment.config  # type: ignore[attr-defined]
-        cluster_instance.packaging_defaults = environment.config.get(  # type: ignore[attr-defined]
+        cluster_instance.env_name = environment.name
+        cluster_instance.slurmfile_path = str(environment.path)
+        cluster_instance.environment_config = environment.config
+        cluster_instance.packaging_defaults = environment.config.get(
             "packaging",
         )
-        cluster_instance.submit_defaults = environment.config.get(  # type: ignore[attr-defined]
+        cluster_instance.submit_defaults = environment.config.get(
             "submit",
         )
 
@@ -766,9 +785,8 @@ class Cluster:
         # Process dependency parameter (after)
         if after is not None:
             # Convert Job or List[Job] to dependency string
-            job_ids = []
             if isinstance(after, list):
-                job_ids = [job.id for job in after]
+                job_ids = [j.id for j in cast(List[Job], after)]
             else:
                 job_ids = [after.id]
 

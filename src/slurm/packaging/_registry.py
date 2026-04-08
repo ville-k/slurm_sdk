@@ -170,7 +170,7 @@ def _head_manifest(
 ) -> Optional[str]:
     """Send a HEAD request for the manifest and return the digest."""
     url = f"https://{registry}/v2/{repository}/manifests/{tag}"
-    headers = {"Accept": _MANIFEST_ACCEPT}
+    headers: dict[str, str] = {"Accept": _MANIFEST_ACCEPT}
     if auth_header:
         headers["Authorization"] = auth_header
 

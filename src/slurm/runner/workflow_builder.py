@@ -11,7 +11,7 @@ import os
 import signal
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 logger = logging.getLogger("slurm.runner")
 
@@ -156,6 +156,7 @@ def _create_cluster_with_path(
         Tuple of (cluster, parent_packaging_type).
     """
 
+    assert config.slurmfile_path is not None
     slurmfile_path = config.slurmfile_path
     parent_packaging_type: Optional[str] = None
 
@@ -378,7 +379,7 @@ def create_workflow_context(
 
     logger.info("Creating WorkflowContext...")
     workflow_context = WorkflowContext(
-        cluster=cluster,
+        cluster=cast(Any, cluster),
         workflow_job_id=job_id or "unknown",
         workflow_job_dir=workflow_job_dir,
         shared_dir=shared_dir,

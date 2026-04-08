@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Optional, cast
+
+if TYPE_CHECKING:
+    from ..api.ssh import SSHCommandBackend
 
 import cyclopts
 from rich.console import Console
@@ -244,7 +247,7 @@ def connect_job(
     backend_type = type(backend).__name__
 
     if backend_type == "SSHCommandBackend":
-        _connect_via_ssh(backend, srun_command_str)
+        _connect_via_ssh(cast("SSHCommandBackend", backend), srun_command_str)
     else:
         _connect_local(srun_command_str)
 
@@ -369,7 +372,7 @@ def _get_terminal_size() -> tuple:
         return (80, 24)
 
 
-def _connect_via_ssh(backend: "SSHCommandBackend", command: str) -> None:  # noqa: F821
+def _connect_via_ssh(backend: "SSHCommandBackend", command: str) -> None:
     """Connect to job via SSH backend with PTY."""
     import select
     import termios
@@ -379,6 +382,7 @@ def _connect_via_ssh(backend: "SSHCommandBackend", command: str) -> None:  # noq
 
     try:
         client = backend.client
+        assert client is not None, "SSH client not connected"
         transport = client.get_transport()
 
         if not transport or not transport.is_active():
@@ -713,7 +717,9 @@ def debug_job(
 
     console.print("\n[dim]Press Ctrl+C to stop port forwarding[/dim]\n")
 
-    _start_port_forwarding(backend, first_node, remote_port, port)
+    _start_port_forwarding(
+        cast("SSHCommandBackend", backend), first_node, remote_port, port
+    )
 
 
 def _print_vscode_config(host: str, port: int) -> None:
@@ -739,7 +745,7 @@ def _print_vscode_config(host: str, port: int) -> None:
 
 
 def _start_port_forwarding(
-    backend: "SSHCommandBackend",  # noqa: F821
+    backend: "SSHCommandBackend",
     remote_host: str,
     remote_port: int,
     local_port: int,
@@ -749,7 +755,9 @@ def _start_port_forwarding(
     import threading
 
     client = backend.client
+    assert client is not None, "SSH client not connected"
     transport = client.get_transport()
+    assert transport is not None, "SSH transport not available"
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

@@ -42,7 +42,7 @@ def configure_logging(level: int = logging.INFO, use_rich: bool = True) -> None:
     handler: Optional[logging.Handler] = None
     if use_rich:
         try:
-            from rich.logging import RichHandler  # type: ignore
+            from rich.logging import RichHandler
 
             handler = RichHandler(
                 show_time=True,

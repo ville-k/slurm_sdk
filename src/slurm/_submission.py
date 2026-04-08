@@ -12,7 +12,7 @@ import time
 import traceback
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 from .callbacks import (
     PackagingBeginContext,
@@ -23,7 +23,7 @@ from .callbacks import (
 from .errors import PackagingError, SubmissionError
 from .job import Job
 from .packaging import get_packaging_strategy
-from .task import SlurmTask, normalize_sbatch_options
+from .task import SlurmTask, _NamedCallable, normalize_sbatch_options
 from .validation import validate_account, validate_partition
 
 if TYPE_CHECKING:
@@ -312,7 +312,7 @@ def merge_sbatch_options(
 def render_and_submit_to_backend(
     cluster: "Cluster",
     task_func: SlurmTask,
-    func_to_render: Callable,
+    func_to_render: "_NamedCallable",
     args: tuple,
     kwargs: dict,
     task_defaults: Dict[str, Any],

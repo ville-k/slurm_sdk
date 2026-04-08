@@ -2,7 +2,7 @@
 
 # nosec B403 - pickle required for serializing/deserializing array job items
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .job import Job
@@ -112,7 +112,7 @@ def load_array_item(
     """
     from ._serialization import read_pickled
 
-    array_data = read_pickled(array_items_file)
+    array_data = cast(Dict[str, Any], read_pickled(array_items_file))
 
     items = array_data["items"]
 
