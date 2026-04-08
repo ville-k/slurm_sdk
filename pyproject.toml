@@ -87,12 +87,9 @@ include = ["src"]
 allowed-unresolved-imports = ["debugpy", "tomli", "torch", "textual.**"]
 
 [tool.ty.rules]
-# Remaining warnings are all downstream of ty's incomplete ParamSpec support.
-# Promote to "error" once ty handles PEP 612 ParamSpec in Callable annotations.
-invalid-type-form = "warn"
-unresolved-attribute = "warn"
-invalid-argument-type = "warn"
-invalid-return-type = "warn"
+# All violations for these rules have been fixed.
+# Remaining warnings (suppressed below) are downstream of ty's incomplete
+# ParamSpec support (PEP 612). Remove the overrides once ty ships ParamSpec.
 
 # Relax rules for tests
 [[tool.ty.overrides]]
@@ -102,3 +99,20 @@ include = ["tests/**"]
 # Tests use dynamic patterns that trigger these rules
 unresolved-attribute = "ignore"
 invalid-type-form = "ignore"
+
+# ParamSpec: ty cannot resolve Callable[P, R] overloads in decorators.py,
+# which cascades Unknown types into examples that use @task/@workflow.
+[[tool.ty.overrides]]
+include = ["src/slurm/decorators.py"]
+
+[tool.ty.overrides.rules]
+invalid-type-form = "ignore"
+invalid-argument-type = "ignore"
+invalid-return-type = "ignore"
+
+[[tool.ty.overrides]]
+include = ["src/slurm/examples/**"]
+
+[tool.ty.overrides.rules]
+unresolved-attribute = "ignore"
+invalid-argument-type = "ignore"
