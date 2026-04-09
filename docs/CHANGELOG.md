@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Packaging resolution logic extracted into `_packaging_resolver` module as the
   single source of truth for config precedence across task submission, workflow
   Slurmfile generation, and dependency container prebuilds
+- Extracted shared Slurm command output parsers (`scontrol`, `sacct`, `squeue`,
+  `sinfo`) into `api/_parsing.py`, eliminating ~350 lines of duplication between
+  SSH and local backends
+- Decomposed `render_job_script()` (420 lines) into 8 focused helper functions
+  with `render_job_script()` as a thin orchestrator
+- Added `upload_file()` to `BackendBase` as a public abstract method; array job
+  submission now uses it instead of reaching into private `_upload_file`
+- Consolidated SSH reconnect-and-retry logic into `_with_reconnect_retry()` helper,
+  simplifying `execute_command()` and `download_file()` wrappers
 - Promoted 8 ty type checker rules from `warn` to `error` after fixing all violations;
   only ParamSpec-related rules remain as warnings pending upstream ty support
 - `BackendBase` now declares abstract `read_file()` and `execute_command()` methods

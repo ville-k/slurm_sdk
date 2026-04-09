@@ -231,6 +231,29 @@ class BackendBase(abc.ABC):
 
         shutil.copy2(remote_path, local_path)
 
+    def upload_file(self, local_path: str, remote_path: str) -> None:
+        """Upload/copy a local file to the target system.
+
+        For remote backends (SSH), this transfers the file over the network.
+        For local backends, this copies the file locally.
+
+        The default implementation performs a local file copy with parent
+        directory creation, suitable for backends with direct filesystem access.
+
+        Args:
+            local_path: Absolute path to the source file on the local system.
+            remote_path: Absolute path to the destination on the target system.
+
+        Raises:
+            FileNotFoundError: If the source file does not exist.
+            RuntimeError: If the copy/upload fails.
+        """
+        import os
+        import shutil
+
+        os.makedirs(os.path.dirname(remote_path), exist_ok=True)
+        shutil.copy2(local_path, remote_path)
+
     def write_file(self, file_path: str, content: str) -> None:
         """Write string content to a file on the target system.
 

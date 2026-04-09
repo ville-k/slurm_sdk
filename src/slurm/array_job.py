@@ -1,6 +1,6 @@
 """Array job support for Slurm SDK."""
 
-from typing import TYPE_CHECKING, Any, Callable, Generic, List, Optional, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, List, Optional, TypeVar
 from pathlib import Path
 
 from ._submission import prepare_packaging_strategy
@@ -209,12 +209,10 @@ class ArrayJob(Generic[T]):
                 )
 
                 # Upload the array items file to the target directory
-                upload_fn = getattr(self.cluster.backend, "_upload_file", None)
-                if upload_fn is not None:
-                    remote_items_path = f"{target_job_dir}/{array_items_filename}"
-                    cast(Callable[..., Any], upload_fn)(
-                        str(local_items_file), remote_items_path
-                    )
+                remote_items_path = f"{target_job_dir}/{array_items_filename}"
+                self.cluster.backend.upload_file(
+                    str(local_items_file), remote_items_path
+                )
 
                 # Submit the array job to the backend
                 submit_account = (
