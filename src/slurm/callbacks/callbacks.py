@@ -26,6 +26,8 @@ except Exception:  # pragma: no cover - fallback for minimal environments
     TextColumn = None  # type: ignore
     TimeElapsedColumn = None  # type: ignore
 
+from ..task import WorkflowTask
+
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from rich.progress import TaskID
 
@@ -1191,7 +1193,7 @@ class BenchmarkCallback(BaseCallback):
         if (
             ctx.emitted_by is ExecutionLocus.CLIENT
             and ctx.job is not None
-            and getattr(getattr(ctx.job, "task_func", None), "_is_workflow", False)
+            and isinstance(getattr(ctx.job, "task_func", None), WorkflowTask)
             and ctx.job_id
         ):
             job_dir = ctx.job_dir or getattr(ctx.job, "target_job_dir", None)

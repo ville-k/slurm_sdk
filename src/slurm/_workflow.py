@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from ._submission import prepare_packaging_strategy, resolve_packaging_config
 from .callbacks import WorkflowTaskSubmitContext
 from .job import Job
-from .task import SlurmTask
+from .task import SlurmTask, WorkflowTask
 
 if TYPE_CHECKING:
     from .cluster import Cluster
@@ -22,8 +22,25 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# SubmittableWorkflow
+# Submittable wrappers
 # ---------------------------------------------------------------------------
+
+
+class _SubmittableTask:
+    """Wrapper returned by ``cluster.submit()`` for regular (non-workflow) tasks.
+
+    Captures the cluster submission closure and provides a ``__call__``
+    interface identical to :class:`SubmittableWorkflow`.
+    """
+
+    def __init__(self, submitter: Callable[..., Job]) -> None:
+        self._submitter = submitter
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Job:
+        return self._submitter(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        return f"_SubmittableTask({self._submitter!r})"
 
 
 class SubmittableWorkflow:
@@ -251,13 +268,13 @@ def write_job_metadata(
     task_func: SlurmTask,
 ) -> None:
     """Write job metadata file and emit workflow callbacks."""
-    is_workflow = getattr(task_func, "_is_workflow", False)
+    is_workflow = isinstance(task_func, WorkflowTask)
     logger.debug(
         "[%s] is_workflow=%s (from task_func attribute)",
         pre_submission_id,
         is_workflow,
     )
-    metadata = {
+    metadata: Dict[str, Any] = {
         "job_id": job_id,
         "pre_submission_id": pre_submission_id,
         "task_name": sanitized_task_name,
@@ -311,14 +328,14 @@ def handle_workflow_slurmfile(
     target_job_dir: str,
 ) -> None:
     """Handle workflow Slurmfile upload for nested workflow execution."""
-    is_workflow = getattr(task_func, "_is_workflow", False)
+    is_workflow = isinstance(task_func, WorkflowTask)
     logger.debug(
         "[%s] Checking workflow Slurmfile upload: is_workflow=%s",
         pre_submission_id,
         is_workflow,
     )
     if is_workflow:
-        slurmfile_path = getattr(cluster, "slurmfile_path", None)
+        slurmfile_path = cluster.slurmfile_path
         logger.debug(
             "[%s] slurmfile_path=%s, exists=%s",
             pre_submission_id,
@@ -326,7 +343,7 @@ def handle_workflow_slurmfile(
             os.path.exists(slurmfile_path) if slurmfile_path else False,
         )
 
-        env_name = getattr(cluster, "env_name", None) or "default"
+        env_name = cluster.env_name or "default"
         try:
             if slurmfile_path and os.path.exists(slurmfile_path):
                 with open(slurmfile_path, "r", encoding="utf-8") as f:

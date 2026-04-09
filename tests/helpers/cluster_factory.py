@@ -34,10 +34,9 @@ def make_test_cluster(
         default_account=default_account,
         default_partition=default_partition,
         default_packaging_kwargs=default_packaging_kwargs,
+        packaging_defaults=packaging_defaults,
     )
 
-    if packaging_defaults is not None:
-        cluster.packaging_defaults = packaging_defaults
     if job_base_dir is not None:
         cluster.job_base_dir = job_base_dir
     if console is not None:

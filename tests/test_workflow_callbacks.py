@@ -267,9 +267,10 @@ def test_callback_requires_runner_transport_includes_workflow():
     assert callback.requires_runner_transport() is True
 
 
-def test_workflow_decorator_sets_is_workflow_flag():
-    """Test that @workflow decorator sets _is_workflow flag."""
+def test_workflow_decorator_creates_workflow_task():
+    """Test that @workflow decorator creates a WorkflowTask instance."""
     from slurm.decorators import task, workflow
+    from slurm.task import WorkflowTask
 
     @task(time="00:01:00")
     def my_task(x: int) -> int:
@@ -279,9 +280,5 @@ def test_workflow_decorator_sets_is_workflow_flag():
     def my_workflow(x: int):
         return my_task(x)
 
-    # Regular tasks should not have _is_workflow flag (or it should be falsy)
-    assert not getattr(my_task, "_is_workflow", False)
-
-    # Workflows should have _is_workflow=True
-    assert hasattr(my_workflow, "_is_workflow")
-    assert my_workflow._is_workflow is True
+    assert not isinstance(my_task, WorkflowTask)
+    assert isinstance(my_workflow, WorkflowTask)

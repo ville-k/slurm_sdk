@@ -14,7 +14,7 @@ except Exception:
 from .cluster import Cluster
 from .decorators import task, workflow, parse_packaging_config
 from .job import Job, JobSnapshot
-from .task import SlurmTask
+from .task import SlurmTask, WorkflowTask
 from .runtime import JobContext
 from .workflow import WorkflowContext
 from .array_job import ArrayJob
@@ -46,6 +46,7 @@ __all__ = [
     "ArrayJob",
     "Cluster",
     "SlurmTask",
+    "WorkflowTask",
     "JobContext",
     "WorkflowContext",
     # Configuration

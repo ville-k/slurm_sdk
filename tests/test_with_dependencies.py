@@ -7,6 +7,7 @@ from slurm._submission import prepare_packaging_strategy
 from slurm.decorators import workflow as workflow_decorator
 from slurm.cluster import Cluster, SubmittableWorkflow
 from slurm.job import Job
+from slurm.task import WorkflowTask
 from slurm.workflow import WorkflowContext
 
 
@@ -22,7 +23,7 @@ def another_task(y: int) -> int:
     return y + 1
 
 
-@task(is_workflow=True)
+@workflow_decorator
 def sample_workflow(ctx: WorkflowContext, value: int) -> int:
     """A sample workflow for testing."""
     return value
@@ -180,8 +181,7 @@ class TestClusterSubmitWithDependencies:
 
     def test_submit_returns_submittable_workflow_for_workflow(self):
         """Test that submit returns SubmittableWorkflow for workflow tasks."""
-        # Check how workflow is detected (is_workflow is in sbatch_options)
-        assert sample_workflow.sbatch_options.get("is_workflow", False) is True
+        assert isinstance(sample_workflow, WorkflowTask)
 
         with patch.object(Cluster, "__init__", lambda self: None):
             cluster = Cluster()

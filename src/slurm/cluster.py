@@ -29,7 +29,7 @@ from .callbacks import (
     BaseCallback,
     ExecutionLocus,
 )
-from .task import SlurmTask, normalize_sbatch_options
+from .task import SlurmTask, WorkflowTask, normalize_sbatch_options
 from .config import load_environment
 from .errors import SlurmfileInvalidError
 
@@ -50,6 +50,7 @@ from ._submission import (
     finalize_job_submission,
 )
 from ._workflow import (
+    _SubmittableTask,
     SubmittableWorkflow,
     write_job_metadata,
     handle_workflow_slurmfile,
@@ -220,6 +221,7 @@ class Cluster:
         default_account: Optional[str] = None,
         default_partition: Optional[str] = None,
         default_packaging_kwargs: Optional[Dict[str, Any]] = None,
+        packaging_defaults: Optional[Dict[str, Any]] = None,
     ) -> "Cluster":
         """Create a Cluster with a pre-constructed backend.
 
@@ -250,6 +252,15 @@ class Cluster:
         cluster._backend_kwargs = {}
         cluster._job_pollers = {}
         cluster._job_pollers_lock = threading.Lock()
+
+        # Attributes set by from_env(); default to None for direct construction
+        cluster.env_name = None
+        cluster.slurmfile_path = None
+        cluster.environment_config = None
+        cluster.packaging_defaults = packaging_defaults
+        cluster.submit_defaults = None
+        cluster._prebuilt_dependency_images = {}
+
         return cluster
 
     # -------------------------------------------------------------------
@@ -436,6 +447,9 @@ class Cluster:
     def from_file(cls, config_path: str, **extra_kwargs: Any) -> "Cluster":
         """Create a Cluster instance from a flat TOML configuration file.
 
+        .. deprecated::
+            Use :meth:`from_env` with a Slurmfile.toml instead.
+
         This method provides explicit, simple configuration loading without auto-discovery.
         The config file should use a flat structure with direct key-value pairs.
 
@@ -467,6 +481,14 @@ class Cluster:
             >>> cluster = Cluster.from_file("prod.toml", default_partition="gpu")
         """
         import tomllib
+        import warnings
+
+        warnings.warn(
+            "Cluster.from_file() is deprecated. Use Cluster.from_env() with a "
+            "Slurmfile.toml instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         config_file = Path(config_path)
         if not config_file.exists():
@@ -676,7 +698,7 @@ class Cluster:
         packaging_config: Optional[Dict[str, Any]] = None,
         after: Optional[Union[Job, List[Job]]] = None,
         **sbatch_options: Any,
-    ) -> Union[Callable[..., Job], "SubmittableWorkflow"]:
+    ) -> Union["_SubmittableTask", "SubmittableWorkflow"]:
         """Prepare a task for submission to the cluster.
 
         This method implements a two-phase submission pattern: it returns a callable
@@ -878,17 +900,7 @@ class Cluster:
                 effective_sbatch_options,
             )
 
-        # For workflows, return SubmittableWorkflow to enable with_dependencies()
-        is_workflow = (
-            getattr(task_func, "_is_workflow", False)
-            or getattr(task_func, "is_workflow", False)
-            or (
-                hasattr(task_func, "sbatch_options")
-                and task_func.sbatch_options.get("is_workflow", False)
-            )
-        )
-        if is_workflow:
-            # Get container dependencies from the task (set via .with_dependencies())
+        if isinstance(task_func, WorkflowTask):
             container_deps = getattr(task_func, "_container_dependencies", [])
             return SubmittableWorkflow(
                 cluster=self,
@@ -898,7 +910,7 @@ class Cluster:
                 container_dependencies=container_deps,
             )
 
-        return submitter
+        return _SubmittableTask(submitter)
 
     # -------------------------------------------------------------------
     # Callback dispatch and polling (delegates to _polling module)

@@ -177,7 +177,6 @@ class SlurmTask:
         func: _NamedCallable,
         sbatch_options: Dict[str, Any] | None = None,
         packaging: Dict[str, Any] | None = None,
-        **slurm_options,
     ):
         """Initialize a SlurmTask (typically done via @task decorator).
 
@@ -186,8 +185,6 @@ class SlurmTask:
             sbatch_options: SBATCH directive dictionary (will be normalized).
             packaging: Packaging configuration. Defaults to
                 `{"type": "wheel", "build_tool": "uv"}`.
-            **slurm_options: Additional options (currently unused, reserved for
-                future extensions).
 
         Raises:
             TypeError: If func is not callable.
@@ -200,12 +197,7 @@ class SlurmTask:
         self.func: _NamedCallable = func
         self.sbatch_options = normalize_sbatch_options(sbatch_options)
         self.packaging = packaging or {"type": "wheel", "build_tool": "uv"}
-        # Copy function metadata
         functools.update_wrapper(self, func)
-
-        self.slurm_options = slurm_options
-
-        self._is_workflow: bool = False
 
         # Track explicit dependencies set via .after() (before task is called)
         self._pending_dependencies: list = []
@@ -214,21 +206,8 @@ class SlurmTask:
         self._container_dependencies: list = []
 
     @property
-    def task(self) -> "SlurmTask":
-        """Return self for backward compatibility with SlurmTaskWithDependencies API.
-
-        Returns:
-            This SlurmTask instance.
-        """
-        return self
-
-    @property
-    def dependencies(self) -> list:
-        """Return pending dependencies for backward compatibility with SlurmTaskWithDependencies API.
-
-        Returns:
-            List of pending Job dependencies.
-        """
+    def pending_dependencies(self) -> list:
+        """Jobs that this task depends on, set via :meth:`after`."""
         return self._pending_dependencies
 
     def __call__(self, *args, **kwargs):
@@ -466,16 +445,12 @@ class SlurmTask:
                     f".after() expects Job or ArrayJob arguments, got {type(job).__name__}"
                 )
 
-        # Create a new SlurmTask with the same function and options
-        new_task = SlurmTask(
+        new_task = type(self)(
             func=self.func,
             sbatch_options=self.sbatch_options.copy(),
             packaging=self.packaging.copy() if self.packaging else None,
-            **self.slurm_options,
         )
-        new_task.slurm_options = self.slurm_options
 
-        # Preserve any existing pending dependencies and append new ones
         if self._pending_dependencies:
             new_task._pending_dependencies = (
                 list(self._pending_dependencies) + flattened_deps
@@ -483,13 +458,7 @@ class SlurmTask:
         else:
             new_task._pending_dependencies = flattened_deps
 
-        # Preserve container dependencies
         new_task._container_dependencies = self._container_dependencies.copy()
-
-        # Preserve workflow flag
-        if hasattr(self, "_is_workflow"):
-            new_task._is_workflow = self._is_workflow
-
         return new_task
 
     def with_options(self, **options: Any) -> "SlurmTask":
@@ -551,24 +520,13 @@ class SlurmTask:
         merged_packaging = self.packaging.copy() if self.packaging else {}
         merged_packaging.update(packaging_overrides)
 
-        # Create new SlurmTask with merged options
-        new_task = SlurmTask(
+        new_task = type(self)(
             func=self.func,
             sbatch_options=merged_sbatch,
             packaging=merged_packaging,
-            **self.slurm_options,
         )
-
-        # Preserve pending dependencies from .after()
         new_task._pending_dependencies = self._pending_dependencies.copy()
-
-        # Preserve container dependencies from .with_dependencies()
         new_task._container_dependencies = self._container_dependencies.copy()
-
-        # Preserve workflow flag
-        if hasattr(self, "_is_workflow"):
-            new_task._is_workflow = self._is_workflow
-
         return new_task
 
     def with_dependencies(self, tasks: List["SlurmTask"]) -> "SlurmTask":
@@ -598,36 +556,34 @@ class SlurmTask:
                 ...     # Pre-build gpu_task's container before submitting workflow
                 ...     job = cluster.submit(my_workflow.with_dependencies([gpu_task]))("input.csv")
         """
-        # Create a new SlurmTask with container dependencies
-        new_task = SlurmTask(
+        new_task = type(self)(
             func=self.func,
             sbatch_options=self.sbatch_options.copy(),
             packaging=self.packaging.copy() if self.packaging else None,
-            **self.slurm_options,
         )
-
-        # Preserve pending dependencies from .after()
         new_task._pending_dependencies = self._pending_dependencies.copy()
-
-        # Set container dependencies
         new_task._container_dependencies = list(tasks)
-
-        # Preserve workflow flag
-        if hasattr(self, "_is_workflow"):
-            new_task._is_workflow = self._is_workflow
-
         return new_task
 
     def __repr__(self) -> str:
+        cls_name = type(self).__name__
         name = self.sbatch_options.get("job_name", self.func.__name__)
         deps = len(self._pending_dependencies)
         if deps:
-            return f"SlurmTask(name={name!r}, dependencies={deps})"
-        return f"SlurmTask(name={name!r})"
+            return f"{cls_name}(name={name!r}, dependencies={deps})"
+        return f"{cls_name}(name={name!r})"
 
     def __str__(self) -> str:
         return self.sbatch_options.get("job_name", self.func.__name__)
 
 
-# Backward compatibility alias
-SlurmTaskWithDependencies = SlurmTask
+class WorkflowTask(SlurmTask):
+    """A task that orchestrates other tasks.
+
+    Created by the ``@workflow`` decorator. Behaves identically to
+    :class:`SlurmTask` but is distinguishable via ``isinstance`` so the
+    submission pipeline can apply workflow-specific handling (e.g. Slurmfile
+    upload, nested cluster reconstruction).
+    """
+
+    pass

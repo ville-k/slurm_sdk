@@ -15,30 +15,29 @@ try:
 except ImportError:
     from typing_extensions import ParamSpec
 
-from .task import SlurmTask, _NamedCallable, normalize_sbatch_options
+from .task import SlurmTask, WorkflowTask, _NamedCallable, normalize_sbatch_options
 
 # Type variables for generic signatures
 P = ParamSpec("P")  # For parameter types
 R = TypeVar("R")  # For return types
 
 if TYPE_CHECKING:
-    from .job import Job
+    pass
 
 
 # TYPE_CHECKING overloads for proper type hints
 if TYPE_CHECKING:
-    # Overload for @workflow without arguments
-    @overload
-    def workflow(func: Callable[P, R]) -> Callable[P, "Job[R]"]: ...
 
-    # Overload for @workflow(time=..., ...)
+    @overload
+    def workflow(func: Callable[P, R]) -> WorkflowTask: ...
+
     @overload
     def workflow(
         func: None = None,
         *,
         time: str = "01:00:00",
         **sbatch_kwargs: Any,
-    ) -> Callable[[Callable[P, R]], Callable[P, "Job[R]"]]: ...
+    ) -> Callable[[Callable[P, R]], WorkflowTask]: ...
 
 
 def workflow(
@@ -89,11 +88,10 @@ def workflow(
     """
 
     # Use the @task decorator with workflow-specific settings
-    def decorator(inner: _NamedCallable) -> SlurmTask:
-        task_instance = task(inner, time=time, **sbatch_kwargs)
-        # Mark this task as a workflow
-        task_instance._is_workflow = True
-        return task_instance
+    def decorator(inner: _NamedCallable) -> WorkflowTask:
+        effective_options = normalize_sbatch_options(sbatch_kwargs)
+        effective_options["time"] = time
+        return WorkflowTask(inner, effective_options)
 
     if callable(func):
         return decorator(func)
@@ -103,18 +101,17 @@ def workflow(
 
 # TYPE_CHECKING overloads for task decorator
 if TYPE_CHECKING:
-    # Overload for @task without arguments
-    @overload
-    def task(func: Callable[P, R]) -> Callable[P, "Job[R]"]: ...
 
-    # Overload for @task(time=..., ...)
+    @overload
+    def task(func: Callable[P, R]) -> SlurmTask: ...
+
     @overload
     def task(
         func: None = None,
         *,
         packaging: str = "auto",
         **sbatch_kwargs: Any,
-    ) -> Callable[[Callable[P, R]], Callable[P, "Job[R]"]]: ...
+    ) -> Callable[[Callable[P, R]], SlurmTask]: ...
 
 
 def task(

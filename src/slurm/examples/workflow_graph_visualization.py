@@ -33,6 +33,7 @@ from typing import Dict, List
 from slurm import Cluster, task
 from slurm.logging import configure_logging
 from slurm.decorators import workflow
+from slurm.task import WorkflowTask
 from slurm.workflow import WorkflowContext
 from slurm.callbacks import (
     BaseCallback,
@@ -77,7 +78,7 @@ class WorkflowGraphCallback(BaseCallback):
     def on_begin_submit_job_ctx(self, ctx: SubmitBeginContext):
         """Track when workflows/tasks are about to be submitted from the client."""
         # Check if this is a workflow submission
-        if hasattr(ctx.task, "_is_workflow") and ctx.task._is_workflow:
+        if isinstance(ctx.task, WorkflowTask):
             # We'll use the pre_submission_id temporarily and update with actual job_id later
             self.graph[ctx.pre_submission_id] = {
                 "name": ctx.task.func.__name__,
