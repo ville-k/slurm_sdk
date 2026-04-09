@@ -16,6 +16,13 @@ import time as time_mod
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from .base import BackendBase
+from ._parsing import (
+    parse_scontrol_status,
+    parse_sacct_accounting,
+    parse_sacct_account_jobs,
+    parse_squeue_output,
+    parse_sinfo_output,
+)
 from ..errors import BackendTimeout, BackendCommandError, BackendError
 
 logger = logging.getLogger(__name__)
@@ -298,14 +305,7 @@ class LocalBackend(BackendBase):
                     f"  systemctl status slurmd  # Check if SLURM daemon is running"
                 )
 
-            # Parse the output
-            status = {}
-            for line in stdout.strip().split("\n"):
-                for item in line.strip().split():
-                    if "=" in item:
-                        key, value = item.split("=", 1)
-                        status[key] = value
-
+            status = parse_scontrol_status(stdout)
             logger.debug("Job status: %s", status)
             return status
 
@@ -351,24 +351,10 @@ class LocalBackend(BackendBase):
                     f"Failed to get accounting info for job {job_id}: {result.stderr}"
                 )
 
-            lines = result.stdout.strip().split("\n")
-            if not lines or not lines[0]:
-                raise RuntimeError(f"No accounting data found for job {job_id}")
-
-            parts = lines[0].split("|")
-            if len(parts) < 6:
-                raise RuntimeError(
-                    f"Unexpected sacct output for job {job_id}: {result.stdout}"
-                )
-
-            return {
-                "JobID": parts[0],
-                "JobState": parts[1],
-                "ExitCode": parts[2],
-                "StartTime": parts[3],
-                "EndTime": parts[4],
-                "Elapsed": parts[5],
-            }
+            try:
+                return parse_sacct_accounting(result.stdout, job_id)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
         except Exception as e:
             raise RuntimeError(f"Failed to get job accounting for {job_id}: {e}") from e
 
@@ -415,46 +401,11 @@ class LocalBackend(BackendBase):
                     f"Failed to get jobs for account {account}: {result.stderr}"
                 )
 
-            lines = result.stdout.strip().split("\n")
-            if not lines or not lines[0]:
+            if not result.stdout.strip():
                 logger.info("No jobs found for account %s", account)
                 return []
 
-            jobs = []
-            for line in lines:
-                if not line.strip():
-                    continue
-
-                parts = line.split("|")
-                if len(parts) < 12:
-                    logger.warning("Unexpected sacct output format: %s", line)
-                    continue
-
-                job_id = parts[0]
-
-                # Skip job steps
-                if "." in job_id:
-                    continue
-
-                job = {
-                    "JobID": parts[0],
-                    "JobName": parts[1],
-                    "User": parts[2],
-                    "Account": parts[3],
-                    "State": parts[4],
-                    "ExitCode": parts[5],
-                    "AllocTRES": parts[6] if parts[6] else "",
-                    "AllocGRES": parts[6]
-                    if parts[6]
-                    else "",  # Keep for backwards compatibility
-                    "AllocNodes": parts[7],
-                    "Start": parts[8],
-                    "End": parts[9],
-                    "Elapsed": parts[10],
-                    "Partition": parts[11],
-                }
-                jobs.append(job)
-
+            jobs = parse_sacct_account_jobs(result.stdout)
             logger.debug("Found %d jobs for account %s", len(jobs), account)
             return jobs
 
@@ -509,43 +460,7 @@ class LocalBackend(BackendBase):
                 logger.warning("Failed to get queue: %s", stderr)
                 return []
 
-            # Parse the output
-            jobs = []
-            for line in stdout.strip().split("\n"):
-                if not line.strip():
-                    continue
-
-                parts = line.split("|")
-                if len(parts) >= 11:
-                    (
-                        job_id,
-                        job_name,
-                        state,
-                        user,
-                        start_time,
-                        time,
-                        time_limit,
-                        partition,
-                        account,
-                        num_nodes,
-                        reason,
-                    ) = parts[:11]
-                    jobs.append(
-                        {
-                            "JOBID": job_id,
-                            "NAME": job_name,
-                            "STATE": state,
-                            "USER": user,
-                            "START_TIME": start_time,
-                            "TIME": time,
-                            "TIME_LIMIT": time_limit,
-                            "PARTITION": partition,
-                            "ACCOUNT": account,
-                            "NODES": num_nodes,
-                            "REASON": reason,
-                        }
-                    )
-
+            jobs = parse_squeue_output(stdout)
             logger.debug("Found %d jobs in queue", len(jobs))
             return jobs
 
@@ -588,25 +503,7 @@ class LocalBackend(BackendBase):
                     "Note: This error won't affect job submission, but may limit partition information."
                 )
 
-            # Parse the output
-            partitions = []
-            for line in stdout.strip().split("\n"):
-                if not line.strip():
-                    continue
-
-                parts = line.split("|")
-                if len(parts) >= 5:
-                    partition, avail, time_limit, nodes, state = parts[:5]
-                    partitions.append(
-                        {
-                            "PARTITION": partition,
-                            "AVAIL": avail,
-                            "TIMELIMIT": time_limit,
-                            "NODES": nodes,
-                            "STATE": state,
-                        }
-                    )
-
+            partitions = parse_sinfo_output(stdout)
             logger.debug("Found %d partitions", len(partitions))
             return {"partitions": partitions}
 

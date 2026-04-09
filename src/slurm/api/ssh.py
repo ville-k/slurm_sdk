@@ -19,6 +19,13 @@ import logging
 import shlex
 
 from .base import BackendBase
+from ._parsing import (
+    parse_scontrol_status,
+    parse_sacct_accounting,
+    parse_sacct_account_jobs,
+    parse_squeue_output,
+    parse_sinfo_output,
+)
 from ..errors import BackendTimeout, BackendCommandError, BackendError
 
 logger = logging.getLogger(__name__)
@@ -550,16 +557,8 @@ class SSHCommandBackend(BackendBase):
                     f"  scontrol show job {job_id}  # Run this manually to see SLURM's response"
                 )
 
-            # Parse the output
-            status = {}
-            for line in stdout.strip().split("\n"):
-                for item in line.strip().split():
-                    if "=" in item:
-                        key, value = item.split("=", 1)
-                        status[key] = value
-
+            status = parse_scontrol_status(stdout)
             logger.debug("Job status: %s", status)
-
             return status
         except BackendTimeout:
             # Re-raise timeout errors as-is
@@ -616,37 +615,10 @@ class SSHCommandBackend(BackendBase):
                     f"Failed to get accounting info for job {job_id}: {error_msg}"
                 )
 
-            # Parse sacct output (parsable2 format uses | as delimiter)
-            lines = stdout.strip().split("\n")
-            if not lines or not lines[0]:
-                raise BackendCommandError(f"No accounting data found for job {job_id}")
-
-            # First line is the main job (not individual steps)
-            parts = lines[0].split("|")
-            if len(parts) < 6:
-                raise BackendCommandError(
-                    f"Unexpected sacct output format for job {job_id}: {stdout}"
-                )
-
-            job_id_out, state, exit_code, start_time, end_time, elapsed = (
-                parts[0],
-                parts[1],
-                parts[2],
-                parts[3],
-                parts[4],
-                parts[5],
-            )
-
-            # Map sacct state to scontrol-style state for consistency
-            status = {
-                "JobID": job_id_out,
-                "JobState": state,
-                "ExitCode": exit_code,
-                "StartTime": start_time,
-                "EndTime": end_time,
-                "Elapsed": elapsed,
-            }
-
+            try:
+                status = parse_sacct_accounting(stdout, job_id)
+            except ValueError as exc:
+                raise BackendCommandError(str(exc)) from exc
             logger.debug("Job accounting status: %s", status)
             return status
 
@@ -704,48 +676,7 @@ class SSHCommandBackend(BackendBase):
                     f"Failed to get jobs for account {account}: {error_msg}"
                 )
 
-            # Parse sacct output (parsable2 format uses | as delimiter)
-            lines = stdout.strip().split("\n")
-            if not lines or not lines[0]:
-                logger.info("No jobs found for account %s", account)
-                return []
-
-            jobs = []
-            for line in lines:
-                if not line.strip():
-                    continue
-
-                parts = line.split("|")
-                if len(parts) < 12:
-                    logger.warning("Unexpected sacct output format: %s", line)
-                    continue
-
-                job_id = parts[0]
-
-                # Skip job steps (e.g., "12345.batch", "12345.0")
-                # We only want main jobs (e.g., "12345")
-                if "." in job_id:
-                    continue
-
-                job = {
-                    "JobID": parts[0],
-                    "JobName": parts[1],
-                    "User": parts[2],
-                    "Account": parts[3],
-                    "State": parts[4],
-                    "ExitCode": parts[5],
-                    "AllocTRES": parts[6] if parts[6] else "",
-                    "AllocGRES": parts[6]
-                    if parts[6]
-                    else "",  # Keep for backwards compatibility
-                    "AllocNodes": parts[7],
-                    "Start": parts[8],
-                    "End": parts[9],
-                    "Elapsed": parts[10],
-                    "Partition": parts[11],
-                }
-                jobs.append(job)
-
+            jobs = parse_sacct_account_jobs(stdout)
             logger.debug("Found %d jobs for account %s", len(jobs), account)
             return jobs
 
@@ -801,44 +732,7 @@ class SSHCommandBackend(BackendBase):
             if return_code != 0:
                 raise RuntimeError(f"Failed to get queue: {stderr}")
 
-            # Parse the output
-            jobs = []
-            for line in stdout.strip().split("\n"):
-                if not line.strip():
-                    continue
-
-                parts = line.split("|")
-                if len(parts) >= 11:
-                    (
-                        job_id,
-                        job_name,
-                        state,
-                        user,
-                        start_time,
-                        time,
-                        time_limit,
-                        partition,
-                        account,
-                        num_nodes,
-                        reason,
-                    ) = parts[:11]
-                    jobs.append(
-                        {
-                            "JOBID": job_id,
-                            "NAME": job_name,
-                            "STATE": state,
-                            "USER": user,
-                            "START_TIME": start_time,
-                            "TIME": time,
-                            "TIME_LIMIT": time_limit,
-                            "PARTITION": partition,
-                            "ACCOUNT": account,
-                            "NODES": num_nodes,
-                            "REASON": reason,
-                        }
-                    )
-
-            return jobs
+            return parse_squeue_output(stdout)
         except TimeoutError as e:
             logger.warning("Warning: %s", e)
             return []  # Return empty list instead of failing
@@ -865,26 +759,7 @@ class SSHCommandBackend(BackendBase):
             if return_code != 0:
                 raise RuntimeError(f"Failed to get cluster info: {stderr}")
 
-            # Parse the output
-            partitions = []
-            for line in stdout.strip().split("\n"):
-                if not line.strip():
-                    continue
-
-                parts = line.split("|")
-                if len(parts) >= 5:
-                    partition, avail, time_limit, nodes, state = parts[:5]
-                    partitions.append(
-                        {
-                            "PARTITION": partition,
-                            "AVAIL": avail,
-                            "TIMELIMIT": time_limit,
-                            "NODES": nodes,
-                            "STATE": state,
-                        }
-                    )
-
-            return {"partitions": partitions}
+            return {"partitions": parse_sinfo_output(stdout)}
         except BackendTimeout:
             # Re-raise timeout errors as-is
             raise
@@ -913,6 +788,20 @@ class SSHCommandBackend(BackendBase):
         paramiko.AuthenticationException,
         paramiko.BadHostKeyException,
     )
+
+    def _with_reconnect_retry(self, fn, *args):
+        """Call *fn* and retry once after reconnecting on transport errors.
+
+        Non-retryable errors (authentication, host key) are raised immediately.
+        """
+        try:
+            return fn(*args)
+        except self._NON_RETRYABLE_ERRORS:
+            raise
+        except self._RETRYABLE_ERRORS as e:
+            logger.warning("SSH transport error, reconnecting: %s", e)
+            self.reconnect()
+            return fn(*args)
 
     def close(self) -> None:
         """Close SSH and SFTP connections and clean up remote resources."""
@@ -960,67 +849,9 @@ class SSHCommandBackend(BackendBase):
         """Clean up resources when the object is destroyed."""
         self.close()
 
-    def _upload_file(self, local_path: str, file_path: str) -> None:
-        """
-        Upload a file to the remote host using the paramiko SFTP client.
-
-        Args:
-            local_path: Path to the local file
-            file_path: Path to the remote file
-
-        Raises:
-            RuntimeError: If the upload fails
-        """
-        try:
-            # Expand ~ in remote path if present
-            if file_path.startswith("~"):
-                # Get the home directory
-                stdout, stderr, return_code = self._run_command("echo $HOME")
-                if return_code != 0:
-                    raise RuntimeError(f"Failed to get home directory: {stderr}")
-
-                home_dir = stdout.strip()
-                file_path = file_path.replace("~", home_dir, 1)
-
-            # Create the directory if it doesn't exist
-            remote_dir = os.path.dirname(file_path)
-            if remote_dir:
-                self._run_command(f"mkdir -p {shlex.quote(remote_dir)}")
-
-            # Ensure we have an SFTP connection
-            assert self.client is not None, "SSH client not connected"
-            if self.sftp is None:
-                self.sftp = self.client.open_sftp()
-
-            # Upload the file
-            logger.info("Uploading %s to %s", local_path, file_path)
-            self.sftp.put(local_path, file_path)
-            logger.info("Upload successful")
-
-        except Exception as e:
-            logger.error("Error uploading file: %s", e)
-            raise RuntimeError(f"Failed to upload file: {e}")
-
     def execute_command(self, command: str) -> str:
-        """
-        Execute a command on the remote host.
-
-        If the connection is stale, automatically reconnects and retries once.
-
-        Args:
-            command: The command to execute
-
-        Returns:
-            The command output
-        """
-        try:
-            return self._execute_command_inner(command)
-        except self._NON_RETRYABLE_ERRORS:
-            raise
-        except self._RETRYABLE_ERRORS as e:
-            logger.warning("SSH transport error, reconnecting: %s", e)
-            self.reconnect()
-            return self._execute_command_inner(command)
+        """Execute a command on the remote host, reconnecting once on transport errors."""
+        return self._with_reconnect_retry(self._execute_command_inner, command)
 
     def _execute_command_inner(self, command: str) -> str:
         """Execute a command without retry logic."""
@@ -1047,23 +878,8 @@ class SSHCommandBackend(BackendBase):
             raise
 
     def download_file(self, remote_path, local_path):
-        """
-        Download a file from the remote host.
-
-        If the connection is stale, automatically reconnects and retries once.
-
-        Args:
-            remote_path: The path to the remote file.
-            local_path: The path to the local file.
-        """
-        try:
-            self._download_file_inner(remote_path, local_path)
-        except self._NON_RETRYABLE_ERRORS:
-            raise
-        except self._RETRYABLE_ERRORS as e:
-            logger.warning("SSH transport error during download, reconnecting: %s", e)
-            self.reconnect()
-            self._download_file_inner(remote_path, local_path)
+        """Download a file from the remote host, reconnecting once on transport errors."""
+        self._with_reconnect_retry(self._download_file_inner, remote_path, local_path)
 
     def _download_file_inner(self, remote_path, local_path):
         """Download without retry logic."""
@@ -1107,14 +923,15 @@ class SSHCommandBackend(BackendBase):
             logger.error(f"Failed to open SFTP session: {e}")
             raise RuntimeError("Failed to open SFTP session") from e
 
-    def upload_file(self, local_path: str, file_path: str):
+    def upload_file(self, local_path: str, remote_path: str) -> None:
         """
         Uploads a local file to the remote host.
 
         Args:
             local_path: Path to the local file.
-            file_path: Path to the destination on the remote host.
+            remote_path: Path to the destination on the remote host.
         """
+        file_path = remote_path
         logger.debug(f"Uploading {local_path} to {self.hostname}:{file_path}")
         sftp = None
         try:
