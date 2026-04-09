@@ -2,6 +2,7 @@
 
 import pytest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from slurm.cluster import Cluster
 from slurm.decorators import task
@@ -509,5 +510,37 @@ def test_array_job_as_dependency(tmp_path):
         # We can't directly check dependencies on Job, but we can verify it was created
         assert final_job.id is not None
 
+    finally:
+        _reset_active_context(token)
+
+
+def test_array_submit_prepares_packaging_once(tmp_path):
+    """Packaging strategy.prepare() should be called exactly once during array submission.
+
+    prepare_packaging_strategy() calls prepare() internally. ArrayJob._submit()
+    must not call prepare() a second time.
+    """
+    _clear_active_context()
+
+    cluster = create_mock_cluster(tmp_path)
+    token = _set_active_context(cluster)
+
+    try:
+        items = ["a", "b", "c"]
+        array_job = process_item.map(items)
+
+        mock_strategy = MagicMock()
+        mock_strategy.prepare.return_value = {"status": "ready"}
+        mock_strategy.get_setup_commands.return_value = []
+        mock_strategy.get_execution_wrapper.side_effect = lambda cmd, **kw: cmd
+        mock_strategy.get_cleanup_commands.return_value = []
+
+        with patch(
+            "slurm.array_job.prepare_packaging_strategy", return_value=mock_strategy
+        ):
+            array_job._submit()
+
+        # prepare() is called inside prepare_packaging_strategy(), not by ArrayJob
+        mock_strategy.prepare.assert_not_called()
     finally:
         _reset_active_context(token)

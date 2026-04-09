@@ -7,8 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Job.get_status()` now falls back to `sacct` accounting data when the job has
+  left the Slurm scheduler queue, instead of raising `BackendError`
+- `ArrayJob` no longer calls `packaging_strategy.prepare()` twice during
+  submission; the duplicate call could cause redundant builds/uploads
+- Prebuilt dependency images are now cleared at the start of each workflow
+  submission, preventing stale images from leaking between sequential workflows
+  on the same `Cluster` instance
+
 ### Changed
 
+- Workflow Slurmfile generation uses `tomlkit` for typed TOML serialization
+  instead of manual string formatting; booleans, lists, and numeric values
+  now round-trip correctly
+- Packaging resolution logic extracted into `_packaging_resolver` module as the
+  single source of truth for config precedence across task submission, workflow
+  Slurmfile generation, and dependency container prebuilds
 - Promoted 8 ty type checker rules from `warn` to `error` after fixing all violations;
   only ParamSpec-related rules remain as warnings pending upstream ty support
 - `BackendBase` now declares abstract `read_file()` and `execute_command()` methods

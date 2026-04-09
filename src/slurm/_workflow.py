@@ -153,12 +153,15 @@ class SubmittableWorkflow:
 
     def __call__(self, *args, **kwargs) -> Job:
         """Submit the workflow, building dependency containers first if specified."""
+        # Reset per-submission state so images from a previous workflow
+        # submission on the same Cluster don't leak into this one.
+        if hasattr(self._cluster, "_prebuilt_dependency_images"):
+            self._cluster._prebuilt_dependency_images = {}
+
         if self._dependent_tasks:
             self._prebuilt_images = self._build_dependency_containers()
 
         if self._prebuilt_images:
-            if not hasattr(self._cluster, "_prebuilt_dependency_images"):
-                self._cluster._prebuilt_dependency_images = {}
             self._cluster._prebuilt_dependency_images.update(self._prebuilt_images)
 
         return self._submitter(*args, **kwargs)
@@ -175,68 +178,62 @@ def render_workflow_slurmfile(cluster: "Cluster", env_name: str) -> str:
     This is used as a fallback when the Cluster was created without a Slurmfile
     (e.g. via ``Cluster.from_args()``), but workflow jobs still need to recreate a
     Cluster instance on the runner side.
+
+    Uses tomlkit to serialize so that booleans, lists, and numeric types
+    round-trip correctly instead of being coerced to strings.
     """
+    import tomlkit
+
     env_name = env_name or "default"
     backend_config = dict(cluster._backend_kwargs)
     job_base_dir = backend_config.pop("job_base_dir", None)
     if job_base_dir is None:
         job_base_dir = getattr(cluster.backend, "job_base_dir", None) or "~/slurm_jobs"
 
-    lines: list[str] = []
-    lines.append(f"[{env_name}.cluster]")
-    lines.append(f'backend = "{cluster.backend_type}"')
-    lines.append(f'job_base_dir = "{job_base_dir}"')
-    lines.append("")
+    doc = tomlkit.document()
+    env_table = tomlkit.table(is_super_table=True)
 
+    # [env.cluster]
+    cluster_table = tomlkit.table()
+    cluster_table.add("backend", cluster.backend_type)
+    cluster_table.add("job_base_dir", str(job_base_dir))
+
+    # [env.cluster.backend_config]
     if cluster.backend_type == "ssh":
-        lines.append(f"[{env_name}.cluster.backend_config]")
+        cfg_table = tomlkit.table()
         for key in sorted(backend_config.keys()):
             value = backend_config[key]
-            if value is None:
-                continue
-            if isinstance(value, bool):
-                rendered = "true" if value else "false"
-            elif isinstance(value, (int, float)):
-                rendered = str(value)
-            else:
-                rendered = str(value).replace('"', '\\"')
-                rendered = f'"{rendered}"'
-            lines.append(f"{key} = {rendered}")
-        lines.append("")
+            if value is not None:
+                cfg_table.add(key, value)
+        cluster_table.add("backend_config", cfg_table)
 
-    from .decorators import _parse_packaging_config
+    env_table.add("cluster", cluster_table)
 
-    packaging_config = _parse_packaging_config(cluster.default_packaging or "auto", {})
-    packaging_config = packaging_config or {}
-    packaging_config.update(cluster.default_packaging_kwargs)
+    # [env.packaging]
+    from ._packaging_resolver import resolve_packaging_for_slurmfile
+
+    packaging_config = resolve_packaging_for_slurmfile(cluster)
     if packaging_config:
-        lines.append(f"[{env_name}.packaging]")
+        pkg_table = tomlkit.table()
         for key, value in sorted(packaging_config.items()):
-            if value is None:
-                continue
-            if isinstance(value, bool):
-                rendered = "true" if value else "false"
-            elif isinstance(value, (int, float)):
-                rendered = str(value)
-            else:
-                rendered = str(value).replace('"', '\\"')
-                rendered = f'"{rendered}"'
-            lines.append(f"{key} = {rendered}")
-        lines.append("")
+            if value is not None:
+                pkg_table.add(key, value)
+        env_table.add("packaging", pkg_table)
 
+    # [env.submit]
     submit_defaults: dict[str, Any] = {}
     if cluster.default_account:
         submit_defaults["account"] = cluster.default_account
     if cluster.default_partition:
         submit_defaults["partition"] = cluster.default_partition
     if submit_defaults:
-        lines.append(f"[{env_name}.submit]")
+        sub_table = tomlkit.table()
         for key, value in sorted(submit_defaults.items()):
-            rendered = str(value).replace('"', '\\"')
-            lines.append(f'{key} = "{rendered}"')
-        lines.append("")
+            sub_table.add(key, value)
+        env_table.add("submit", sub_table)
 
-    return "\n".join(lines).rstrip() + "\n"
+    doc.add(env_name, env_table)
+    return tomlkit.dumps(doc)
 
 
 # ---------------------------------------------------------------------------

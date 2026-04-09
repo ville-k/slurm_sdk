@@ -23,7 +23,7 @@ from typing import (
 if TYPE_CHECKING:
     from .cluster import Cluster
 
-from .errors import BackendError
+from .errors import BackendError, BackendCommandError
 
 from .rendering import RESULT_FILENAME
 
@@ -293,23 +293,9 @@ class Job(Generic[T]):
 
         try:
             status = self.backend.get_job_status(self.id)
-            timestamp = time.time()
-            self._update_status_cache(status, timestamp)
-
-            if (
-                status.get("JobState") in self.TERMINAL_STATES
-                and self._on_completed is not None
-            ):
-                try:
-                    self._on_completed(self, status, timestamp)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.debug(
-                        "Error emitting completed context for job %s: %s",
-                        self.id,
-                        exc,
-                    )
-
-            return status
+        except BackendCommandError:
+            # Job may have left the scheduler queue — fall back to accounting
+            status = self._get_status_from_accounting()
         except Exception as e:
             logger.error("Error getting job status for job %s: %s", self.id, e)
             raise BackendError(
@@ -327,6 +313,44 @@ class Job(Generic[T]):
                     job_id=self.id
                 )
             ) from e
+
+        timestamp = time.time()
+        self._update_status_cache(status, timestamp)
+
+        if (
+            status.get("JobState") in self.TERMINAL_STATES
+            and self._on_completed is not None
+        ):
+            try:
+                self._on_completed(self, status, timestamp)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug(
+                    "Error emitting completed context for job %s: %s",
+                    self.id,
+                    exc,
+                )
+
+        return status
+
+    def _get_status_from_accounting(self) -> Dict[str, Any]:
+        """Fall back to sacct accounting data when job leaves the scheduler queue."""
+        try:
+            acct = self.backend.get_job_accounting(self.id)
+        except Exception as acct_err:
+            raise BackendError(
+                f"Job {self.id} not found in scheduler queue or accounting.\n\n"
+                "The job may have completed and been purged from Slurm's records.\n\n"
+                "To diagnose:\n"
+                f"  1. Check accounting: sacct -j {self.id}\n"
+                f"  2. Check queue: squeue -j {self.id}"
+            ) from acct_err
+
+        logger.debug(
+            "[%s] Job not in scheduler queue, using accounting data: %s",
+            self.id,
+            acct.get("JobState"),
+        )
+        return acct
 
     def is_running(self) -> bool:
         """Check if the job is currently executing.
