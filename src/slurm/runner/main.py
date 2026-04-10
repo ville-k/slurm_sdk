@@ -14,7 +14,7 @@ import time
 import traceback
 from typing import Any, List, Optional
 
-from slurm.callbacks.callbacks import (
+from slurm.callbacks import (
     BaseCallback,
     CompletedContext,
     ExecutionLocus,
@@ -30,7 +30,7 @@ from slurm.runtime import (
 )
 from slurm.workflow import WorkflowContext
 
-from .argument_loader import (
+from .initialization import (
     RunnerArgs,
     configure_logging,
     load_callbacks,
@@ -235,85 +235,6 @@ def handle_workflow_context_injection(
         logger.warning(f"Callback on_workflow_begin_ctx failed: {e}")
 
     return task_args, task_kwargs, setup_result
-
-
-def run_task_with_callbacks(
-    func: Any,
-    task_args: tuple,
-    task_kwargs: dict,
-    args: RunnerArgs,
-    callbacks: List[BaseCallback],
-    job_id: Optional[str],
-    job_dir: Optional[str],
-    job_context: JobContext,
-    environment_snapshot: dict,
-) -> Any:
-    """Execute task with before/after callbacks.
-
-    Args:
-        func: The function to execute.
-        task_args: Positional arguments.
-        task_kwargs: Keyword arguments.
-        args: Parsed runner arguments.
-        callbacks: List of callbacks.
-        job_id: Job ID.
-        job_dir: Job directory.
-        job_context: JobContext instance.
-        environment_snapshot: Environment snapshot dict.
-
-    Returns:
-        The result of the task execution.
-    """
-    run_start_time = time.time()
-    hostname = socket.gethostname()
-    python_executable = sys.executable
-    python_version = sys.version
-    working_directory = os.getcwd()
-
-    # Call begin callbacks
-    try:
-        begin_ctx = RunBeginContext(
-            module=args.module,
-            function=args.function,
-            args_file=args.args_file or "",
-            kwargs_file=args.kwargs_file or "",
-            output_file=args.output_file,
-            job_id=job_id,
-            job_dir=job_dir,
-            hostname=hostname,
-            python_executable=python_executable,
-            python_version=python_version,
-            working_directory=working_directory,
-            environment_snapshot=environment_snapshot,
-            start_time=run_start_time,
-            job_context=job_context,
-        )
-        run_callbacks(callbacks, "on_begin_run_job_ctx", begin_ctx)
-    except Exception as e:
-        logger.warning(f"Callback on_begin_run_job_ctx failed: {e}")
-
-    # Execute task
-    result = execute_task(func, task_args, task_kwargs)
-
-    # Call end callbacks
-    run_end_time = time.time()
-    try:
-        end_ctx = RunEndContext(
-            status="success",
-            output_file=args.output_file,
-            job_id=job_id,
-            job_dir=job_dir,
-            hostname=hostname,
-            start_time=run_start_time,
-            end_time=run_end_time,
-            duration=run_end_time - run_start_time,
-            job_context=job_context,
-        )
-        run_callbacks(callbacks, "on_end_run_job_ctx", end_ctx)
-    except Exception as e:
-        logger.warning(f"Callback on_end_run_job_ctx failed: {e}")
-
-    return result
 
 
 def main():
@@ -709,5 +630,4 @@ __all__ = [
     "execute_task",
     "handle_job_context_injection",
     "handle_workflow_context_injection",
-    "run_task_with_callbacks",
 ]

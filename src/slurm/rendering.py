@@ -18,7 +18,7 @@ import pathlib
 import shlex
 import os
 import importlib
-from .callbacks.callbacks import BaseCallback
+from .callbacks import BaseCallback
 from .validation import validate_job_name
 
 if TYPE_CHECKING:

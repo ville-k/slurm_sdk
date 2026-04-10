@@ -2,7 +2,7 @@ import argparse
 import logging
 
 from slurm import Cluster, Job, task
-from slurm.callbacks.callbacks import RichLoggerCallback
+from slurm.callbacks import RichLoggerCallback
 
 
 @task(

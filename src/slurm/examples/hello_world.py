@@ -9,7 +9,7 @@ This example shows:
 import argparse
 import logging
 
-from slurm.callbacks.callbacks import LoggerCallback
+from slurm.callbacks import LoggerCallback
 from slurm.cluster import Cluster
 from slurm.decorators import task
 from slurm.job import Job

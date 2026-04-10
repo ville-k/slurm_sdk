@@ -28,7 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover - python <3.11 fallback
 
 TOMLDecodeError = getattr(tomllib, "TOMLDecodeError", ValueError)
 
-from .callbacks.callbacks import BaseCallback  # noqa: E402
+from .callbacks import BaseCallback  # noqa: E402
 from .errors import (  # noqa: E402
     SlurmfileEnvironmentNotFoundError,
     SlurmfileInvalidError,

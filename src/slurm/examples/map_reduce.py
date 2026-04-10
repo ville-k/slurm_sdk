@@ -14,7 +14,7 @@ import argparse
 import logging
 from typing import List
 
-from slurm.callbacks.callbacks import RichLoggerCallback
+from slurm.callbacks import RichLoggerCallback
 from slurm.cluster import Cluster
 from slurm.decorators import task
 from slurm.job import Job

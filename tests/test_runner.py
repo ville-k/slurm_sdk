@@ -15,14 +15,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from slurm.callbacks.callbacks import BaseCallback
+from slurm.callbacks import BaseCallback
 from slurm.runner.callbacks import run_callbacks
 from slurm.runner.context_manager import (
     bind_workflow_context,
     function_wants_workflow_context,
 )
 from slurm.runner.result_saver import write_environment_metadata
-from slurm.runner.argument_loader import (
+from slurm.runner.initialization import (
     RunnerArgs,
     create_argument_parser,
     load_callbacks,

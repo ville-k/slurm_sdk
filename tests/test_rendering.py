@@ -1,5 +1,5 @@
 from slurm.rendering import RenderContext, render_job_script
-from slurm.callbacks.callbacks import BaseCallback
+from slurm.callbacks import BaseCallback
 from slurm.packaging.base import PackagingStrategy
 
 

@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from rich.console import Console, ConsoleRenderable
-from rich.syntax import Syntax
-
 
 class PackagingError(Exception):
     """Raised when packaging (build/upload/install) fails.
@@ -99,13 +96,15 @@ class SubmissionError(Exception):
         self.message = message
         self.script = script
         self.metadata = metadata or {}
-        self._syntax: Optional[ConsoleRenderable] = self._build_syntax(script)
+        self._syntax: Optional[Any] = self._build_syntax(script)
 
     @staticmethod
-    def _build_syntax(script: Optional[str]) -> Optional[ConsoleRenderable]:
+    def _build_syntax(script: Optional[str]) -> Optional[Any]:
         if not script:
             return None
         try:
+            from rich.syntax import Syntax
+
             return Syntax(script, "bash", theme="monokai", line_numbers=True)
         except Exception:
             return None
@@ -124,7 +123,7 @@ class SubmissionError(Exception):
 
         return "\n\n".join(parts)
 
-    def __rich_console__(self, console: Console, options):  # pragma: no cover
+    def __rich_console__(self, console, options):  # pragma: no cover
         yield self.message
         if self.metadata:
             formatted = ", ".join(

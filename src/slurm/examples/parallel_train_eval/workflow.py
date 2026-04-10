@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any, List, Optional
 
-from slurm.callbacks.callbacks import LoggerCallback
+from slurm.callbacks import LoggerCallback
 from slurm.cluster import Cluster
 from slurm.decorators import workflow
 from slurm.logging import configure_logging
