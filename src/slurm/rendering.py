@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING
 
 from ._serialization import dumps_pickled
-from .task import _NamedCallable
+from .task import WorkflowTask, _NamedCallable
 import inspect
 import sys
 import traceback
@@ -189,9 +189,9 @@ def _emit_environment_exports(
     lines.append("export SLURM_JOBS_DIR=$(dirname $(dirname $JOB_DIR))")
 
     if cluster is not None:
-        slurmfile_path = getattr(cluster, "slurmfile_path", None)
-        env_name = getattr(cluster, "env_name", None)
-        is_workflow = getattr(task_func, "_is_workflow", False)
+        slurmfile_path = cluster.slurmfile_path
+        env_name = cluster.env_name
+        is_workflow = isinstance(task_func, WorkflowTask)
         if is_workflow or slurmfile_path:
             remote_slurmfile_path = f"{target_job_dir}/Slurmfile.toml"
             lines.append(
@@ -221,7 +221,7 @@ def _emit_environment_exports(
             lines.append(f"export SLURM_SDK_PACKAGING_CONFIG={shlex.quote(config_b64)}")
 
     if cluster is not None:
-        prebuilt_images = getattr(cluster, "_prebuilt_dependency_images", None)
+        prebuilt_images = cluster._prebuilt_dependency_images
         if prebuilt_images:
             images_json = json.dumps(prebuilt_images)
             images_b64 = base64.b64encode(images_json.encode()).decode()

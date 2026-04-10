@@ -25,6 +25,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Packaging resolution logic extracted into `_packaging_resolver` module as the
   single source of truth for config precedence across task submission, workflow
   Slurmfile generation, and dependency container prebuilds
+- Introduced `WorkflowTask(SlurmTask)` subclass; `@workflow` now returns a
+  `WorkflowTask` instance instead of setting a `_is_workflow` flag. Workflow
+  detection throughout the SDK uses `isinstance` instead of attribute checks.
+- `Cluster.submit()` now returns `_SubmittableTask` or `SubmittableWorkflow`
+  instead of a raw closure, providing a consistent callable interface
+- Decorator `TYPE_CHECKING` overloads now return `SlurmTask`/`WorkflowTask`
+  directly, giving type checkers accurate attribute access (`.map()`, `.after()`,
+  `.with_options()`)
+- `Cluster.from_backend()` now initializes all core attributes (`env_name`,
+  `slurmfile_path`, `packaging_defaults`, `_prebuilt_dependency_images`, etc.)
+  symmetrically with `__init__()`, eliminating manual patching in tests
+- Replaced `getattr(cluster, ...)` defensive access with direct attribute access
+  throughout internal modules
+- Standardized `Slurmfile.toml` as the preferred configuration filename; legacy
+  variants (`Slurmfile`, `slurmfile`, `slurmfile.toml`) emit `DeprecationWarning`
 - Extracted shared Slurm command output parsers (`scontrol`, `sacct`, `squeue`,
   `sinfo`) into `api/_parsing.py`, eliminating ~350 lines of duplication between
   SSH and local backends
@@ -36,6 +51,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   simplifying `execute_command()` and `download_file()` wrappers
 - Promoted 8 ty type checker rules from `warn` to `error` after fixing all violations;
   only ParamSpec-related rules remain as warnings pending upstream ty support
+
+### Deprecated
+
+- `Cluster.from_file()` — use `Cluster.from_env()` with a `Slurmfile.toml` instead
+- Slurmfile variants `Slurmfile`, `slurmfile`, `slurmfile.toml` — rename to
+  `Slurmfile.toml`
+
+### Removed
+
+- `SlurmTask.task` property (returned self)
+- `SlurmTask.dependencies` property (use `pending_dependencies`)
+- `SlurmTaskWithDependencies` alias (use `SlurmTask` directly)
+- `SlurmTask(**slurm_options)` parameter (was unused/reserved)
 - `BackendBase` now declares abstract `read_file()` and `execute_command()` methods
 - `BenchmarkCallback` helper methods moved from module-level monkey-patching to proper
   class methods for better type safety and pickling

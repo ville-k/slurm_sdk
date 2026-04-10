@@ -8,6 +8,7 @@ from slurm.callbacks.callbacks import (
     WorkflowTaskSubmitContext,
 )
 from slurm.decorators import task, workflow
+from slurm.task import WorkflowTask
 from slurm.workflow import WorkflowContext
 
 
@@ -60,12 +61,11 @@ def test_workflow_lifecycle_events_in_runner(tmp_path):
     assert hasattr(recorder, "on_workflow_end_ctx")
     assert hasattr(recorder, "on_workflow_task_submitted_ctx")
 
-    # Verify workflow has the _is_workflow flag
-    assert hasattr(simple_workflow, "_is_workflow")
-    assert simple_workflow._is_workflow is True
+    # Verify workflow is a WorkflowTask
+    assert isinstance(simple_workflow, WorkflowTask)
 
-    # Verify regular tasks don't have _is_workflow flag
-    assert not getattr(simple_task, "_is_workflow", False)
+    # Verify regular tasks are not WorkflowTask
+    assert not isinstance(simple_task, WorkflowTask)
 
 
 def test_workflow_task_submission_events(tmp_path):
@@ -88,12 +88,8 @@ def test_workflow_task_submission_events(tmp_path):
     # NOTE: Full integration test would require actual submission to backend.
     # This test verifies the infrastructure is in place.
 
-    # Verify workflow flag
-    assert hasattr(parent_workflow, "_is_workflow")
-    assert parent_workflow._is_workflow is True
-
-    # Verify child task doesn't have workflow flag
-    assert not getattr(child_task, "_is_workflow", False)
+    assert isinstance(parent_workflow, WorkflowTask)
+    assert not isinstance(child_task, WorkflowTask)
 
 
 def test_nested_workflow_events(tmp_path):
@@ -116,9 +112,9 @@ def test_nested_workflow_events(tmp_path):
         return inner_job.get_result()
 
     # Verify all workflow flags are correct
-    assert getattr(outer_workflow, "_is_workflow", False) is True
-    assert getattr(inner_workflow, "_is_workflow", False) is True
-    assert not getattr(leaf_task, "_is_workflow", False)
+    assert isinstance(outer_workflow, WorkflowTask)
+    assert isinstance(inner_workflow, WorkflowTask)
+    assert not isinstance(leaf_task, WorkflowTask)
 
     # NOTE: Full nested workflow execution would require backend support.
     # Event ordering should be:
@@ -265,10 +261,10 @@ def test_workflow_with_multiple_child_tasks():
         return eval_job.get_result()
 
     # Verify workflow structure
-    assert ml_pipeline._is_workflow is True
-    assert not getattr(preprocessing, "_is_workflow", False)
-    assert not getattr(training, "_is_workflow", False)
-    assert not getattr(evaluation, "_is_workflow", False)
+    assert isinstance(ml_pipeline, WorkflowTask)
+    assert not isinstance(preprocessing, WorkflowTask)
+    assert not isinstance(training, WorkflowTask)
+    assert not isinstance(evaluation, WorkflowTask)
 
     # When executed, should emit:
     # - 1 workflow_begin event

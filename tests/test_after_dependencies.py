@@ -42,15 +42,15 @@ def merge_task(output: str) -> str:
 
 
 def test_after_returns_new_task():
-    """Test that .after() returns a new SlurmTaskWithDependencies instance."""
+    """Test that .after() returns a new SlurmTask instance."""
     _clear_active_context()
 
-    # Call .after() should return a SlurmTaskWithDependencies
+    # Call .after() should return a SlurmTask
     bound_task = task_a.after()
 
-    from slurm.task import SlurmTaskWithDependencies
+    from slurm.task import SlurmTask
 
-    assert isinstance(bound_task, SlurmTaskWithDependencies)
+    assert isinstance(bound_task, SlurmTask)
     # Should be a different instance (stateless)
     assert bound_task is not task_a
 
@@ -215,10 +215,10 @@ def test_after_chaining():
     bound1 = task_a.after()
     bound2 = bound1.after()
 
-    from slurm.task import SlurmTaskWithDependencies
+    from slurm.task import SlurmTask
 
-    assert isinstance(bound1, SlurmTaskWithDependencies)
-    assert isinstance(bound2, SlurmTaskWithDependencies)
+    assert isinstance(bound1, SlurmTask)
+    assert isinstance(bound2, SlurmTask)
     assert bound2 is not bound1
     assert bound2 is not task_a
 
@@ -266,9 +266,9 @@ def test_after_empty_call():
     """Test that .after() with no arguments works (creates new task)."""
     bound_task = task_a.after()
 
-    from slurm.task import SlurmTaskWithDependencies
+    from slurm.task import SlurmTask
 
-    assert isinstance(bound_task, SlurmTaskWithDependencies)
+    assert isinstance(bound_task, SlurmTask)
     assert len(bound_task._pending_dependencies) == 0
 
 

@@ -39,7 +39,7 @@ def resolve_packaging_config(
     from .decorators import _parse_packaging_config
 
     # 1. Pre-built dependency images take highest priority
-    prebuilt_images = getattr(cluster, "_prebuilt_dependency_images", None)
+    prebuilt_images = cluster._prebuilt_dependency_images
     if prebuilt_images:
         func = task_func.func
         task_name = f"{func.__module__}.{func.__qualname__}"
@@ -83,7 +83,7 @@ def resolve_packaging_config(
         return _parse_packaging_config(cluster.default_packaging, merged_kwargs)
 
     # 5. Legacy Slurmfile packaging_defaults
-    packaging_defaults = getattr(cluster, "packaging_defaults", None)
+    packaging_defaults = cluster.packaging_defaults
     if packaging_defaults is not None:
         return packaging_defaults
 

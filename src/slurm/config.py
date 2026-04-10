@@ -39,10 +39,10 @@ from .errors import (  # noqa: E402
 SLURM_ENV_VAR = "SLURM_ENV"
 SLURMFILE_ENV_VAR = "SLURMFILE"
 DEFAULT_SLURMFILE_NAMES = (
-    "Slurmfile",
     "Slurmfile.toml",
-    "slurmfile",
+    "Slurmfile",
     "slurmfile.toml",
+    "slurmfile",
 )
 
 
@@ -113,10 +113,19 @@ def discover_slurmfile(start_dir: Optional[PathLike] = None) -> Path:
     except FileNotFoundError:
         start_candidate = start_candidate.absolute()
 
+    import warnings
+
     for directory in (start_candidate,) + tuple(start_candidate.parents):
         for name in DEFAULT_SLURMFILE_NAMES:
             candidate = directory / name
             if candidate.is_file():
+                if name != "Slurmfile.toml":
+                    warnings.warn(
+                        f"Found '{name}' at {candidate}. "
+                        "Please rename to 'Slurmfile.toml'.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
                 return candidate
 
     raise SlurmfileNotFoundError(
