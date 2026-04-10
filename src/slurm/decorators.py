@@ -87,11 +87,24 @@ def workflow(
             ...     return jobs.get_results()
     """
 
-    # Use the @task decorator with workflow-specific settings
+    # Extract packaging_* kwargs from sbatch_kwargs
+    packaging_kwargs = {}
+    sbatch_only = {}
+    for key, value in sbatch_kwargs.items():
+        if key.startswith("packaging_"):
+            packaging_kwargs[key[10:]] = value
+        else:
+            sbatch_only[key] = value
+
+    normalized_kwargs = normalize_sbatch_options(sbatch_only)
+    normalized_kwargs["time"] = time
+    effective_packaging = parse_packaging_config("auto", packaging_kwargs)
+
     def decorator(inner: _NamedCallable) -> WorkflowTask:
-        effective_options = normalize_sbatch_options(sbatch_kwargs)
-        effective_options["time"] = time
-        return WorkflowTask(inner, effective_options)
+        effective_options = dict(normalized_kwargs)
+        if not effective_options.get("job_name"):
+            effective_options["job_name"] = inner.__name__
+        return WorkflowTask(inner, effective_options, effective_packaging)
 
     if callable(func):
         return decorator(func)

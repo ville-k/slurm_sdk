@@ -98,11 +98,12 @@ include = ["tests/**"]
 unresolved-attribute = "ignore"
 invalid-type-form = "ignore"
 
-# ty misreads decorator overload return types as mismatches
+# ty does not support ParamSpec in overloads and misreads return types
 [[tool.ty.overrides]]
 include = ["src/slurm/decorators.py"]
 
 [tool.ty.overrides.rules]
+invalid-type-form = "ignore"
 invalid-argument-type = "ignore"
 invalid-return-type = "ignore"
 
