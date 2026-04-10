@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from slurm.callbacks.callbacks import (
+from slurm.callbacks import (
     BaseCallback,
     WorkflowCallbackContext,
     WorkflowTaskSubmitContext,

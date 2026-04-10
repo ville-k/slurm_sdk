@@ -12,7 +12,7 @@ import argparse
 import getpass
 import logging
 
-from slurm.callbacks.callbacks import (
+from slurm.callbacks import (
     RichLoggerCallback,
 )
 from slurm.cluster import Cluster

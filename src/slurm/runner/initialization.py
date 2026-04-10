@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, cast
 
-from slurm.callbacks.callbacks import BaseCallback
+from slurm.callbacks import BaseCallback
 
 logger = logging.getLogger("slurm.runner")
 

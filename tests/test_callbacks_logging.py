@@ -1,6 +1,6 @@
 import logging
 
-from slurm.callbacks.callbacks import (
+from slurm.callbacks import (
     LoggerCallback,
     RichLoggerCallback,
     RunBeginContext,
@@ -20,7 +20,7 @@ def _run_begin_ctx() -> RunBeginContext:
 def test_logger_callback_configures_runner_logging_once(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        "slurm.callbacks.callbacks.configure_sdk_logging",
+        "slurm.callbacks.logger.configure_sdk_logging",
         lambda level, use_rich: calls.append((level, use_rich)),
     )
 
@@ -36,7 +36,7 @@ def test_logger_callback_configures_runner_logging_once(monkeypatch):
 def test_logger_callback_respects_configure_logging_flag(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        "slurm.callbacks.callbacks.configure_sdk_logging",
+        "slurm.callbacks.logger.configure_sdk_logging",
         lambda level, use_rich: calls.append((level, use_rich)),
     )
 
@@ -51,7 +51,7 @@ def test_rich_logger_callback_configures_runner_logging(monkeypatch):
     printed = []
 
     monkeypatch.setattr(
-        "slurm.callbacks.callbacks.configure_sdk_logging",
+        "slurm.callbacks.rich_logger.configure_sdk_logging",
         lambda level, use_rich: calls.append((level, use_rich)),
     )
 
@@ -59,7 +59,7 @@ def test_rich_logger_callback_configures_runner_logging(monkeypatch):
         def print(self, *args, **kwargs):
             printed.append((args, kwargs))
 
-    monkeypatch.setattr("slurm.callbacks.callbacks.Console", DummyConsole)
+    monkeypatch.setattr("slurm.callbacks.rich_logger.Console", DummyConsole)
 
     callback = RichLoggerCallback(log_level=logging.WARNING)
     callback.on_begin_run_job_ctx(_run_begin_ctx())

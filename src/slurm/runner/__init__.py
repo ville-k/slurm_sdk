@@ -8,7 +8,7 @@ to run Python tasks.
 from slurm.runner.main import main
 
 # Also export from new modules (public API)
-from slurm.runner.argument_loader import (
+from slurm.runner.initialization import (
     RunnerArgs,
     configure_logging,
     create_argument_parser,
@@ -52,7 +52,6 @@ from slurm.runner.main import (
     handle_job_context_injection,
     handle_workflow_context_injection,
     load_function,
-    run_task_with_callbacks,
 )
 
 __all__ = [
@@ -95,5 +94,4 @@ __all__ = [
     "execute_task",
     "handle_job_context_injection",
     "handle_workflow_context_injection",
-    "run_task_with_callbacks",
 ]

@@ -29,7 +29,7 @@ def test_callbacks_invoked_local_backend(tmp_path):
     cb_code = dedent(
         """
         import os
-        from slurm.callbacks.callbacks import BaseCallback
+        from slurm.callbacks import BaseCallback
 
         class TestCallback(BaseCallback):
             def __init__(self, log_dir: str):

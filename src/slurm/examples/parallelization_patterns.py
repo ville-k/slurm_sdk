@@ -18,7 +18,7 @@ import argparse
 import logging
 from typing import List, Dict, Any
 
-from slurm.callbacks.callbacks import RichLoggerCallback
+from slurm.callbacks import RichLoggerCallback
 from slurm.cluster import Cluster
 from slurm.decorators import task
 

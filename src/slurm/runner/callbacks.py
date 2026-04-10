@@ -3,7 +3,7 @@
 import logging
 from typing import List
 
-from slurm.callbacks.callbacks import BaseCallback
+from slurm.callbacks import BaseCallback
 
 logger = logging.getLogger("slurm.runner")
 

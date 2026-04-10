@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 
 from slurm.callbacks import DebugCallback
-from slurm.callbacks.callbacks import ExecutionLocus, RunBeginContext
+from slurm.callbacks import ExecutionLocus, RunBeginContext
 
 
 class TestDebugCallbackInit:

@@ -49,6 +49,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   submission now uses it instead of reaching into private `_upload_file`
 - Consolidated SSH reconnect-and-retry logic into `_with_reconnect_retry()` helper,
   simplifying `execute_command()` and `download_file()` wrappers
+- Split `callbacks/callbacks.py` (1453 lines) into 6 focused modules:
+  `contexts.py`, `base.py`, `logger.py`, `rich_logger.py`, `benchmark.py`,
+  and `_metrics.py` (shared workflow metrics I/O deduplicated from
+  LoggerCallback and BenchmarkCallback)
+- Deleted dead `run_task_with_callbacks()` from runner (exported but never called)
+- Renamed `runner/argument_loader.py` to `runner/initialization.py` to reflect
+  its actual scope (logging config, sys.path restoration, callback loading)
+- Decoupled `SubmissionError` from Rich: moved `rich.console` and `rich.syntax`
+  imports from module level into the methods that use them
+- Standardized all callback imports to use `slurm.callbacks` package path
+  instead of `slurm.callbacks.callbacks` internal module
 - Promoted 8 ty type checker rules from `warn` to `error` after fixing all violations;
   only ParamSpec-related rules remain as warnings pending upstream ty support
 
