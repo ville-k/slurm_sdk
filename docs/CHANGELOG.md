@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-04-11
+
 ### Fixed
 
 - `Job.get_status()` now falls back to `sacct` accounting data when the job has
@@ -100,11 +102,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   query to avoid inconsistency when the status cache expires mid-call
 - `Job.snapshot()` uses `tail_file(follow=False)` for efficient log tails instead
   of downloading entire stdout/stderr files on remote backends
-
-### Changed
-
-- Dev releases now use timestamped versions (`X.Y.Z.devYYYYMMDDHHMM`) instead of
-  static `.dev0`, allowing multiple dev releases per day without version conflicts
 
 ### Added
 
