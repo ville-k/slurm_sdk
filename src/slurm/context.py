@@ -74,6 +74,11 @@ def _clear_active_context() -> None:
 def _resolve_cluster(caller_name: str) -> "Cluster":
     """Resolve the active Cluster from the current context.
 
+    Both :class:`Cluster` (where ``cluster`` is a self-reference property) and
+    :class:`WorkflowContext` (where ``cluster`` is the parent cluster) expose
+    a ``cluster`` attribute, so we can resolve structurally without importing
+    concrete types (which would reintroduce a circular import).
+
     Args:
         caller_name: Name of the calling function, used in error messages.
 
@@ -83,8 +88,6 @@ def _resolve_cluster(caller_name: str) -> "Cluster":
     Raises:
         RuntimeError: If no context is active or cluster cannot be resolved.
     """
-    from .cluster import Cluster
-
     ctx = _get_active_context()
     if ctx is None:
         raise RuntimeError(
@@ -92,8 +95,6 @@ def _resolve_cluster(caller_name: str) -> "Cluster":
             "called within a Cluster context or @workflow.\n"
             f"For local execution, use: {caller_name}.unwrapped(...)"
         )
-    if isinstance(ctx, Cluster):
-        return ctx
     cluster = getattr(ctx, "cluster", None)
     if cluster is None:
         raise RuntimeError(

@@ -99,10 +99,19 @@ def dumps_pickled(obj: object) -> bytes:
 
 
 def loads_pickled(data: bytes) -> object:
-    """Unpickle from bytes, validating the version header if present."""
+    """Unpickle from bytes, validating the version header if present.
+
+    Raises:
+        ValueError: If the data begins with the SDK pickle header prefix but
+            is truncated before the terminating newline (corrupted payload).
+    """
     if data.startswith(_HEADER_PREFIX):
-        # Find end of header line
-        newline_idx = data.index(b"\n", len(_HEADER_PREFIX))
+        newline_idx = data.find(b"\n", len(_HEADER_PREFIX))
+        if newline_idx == -1:
+            raise ValueError(
+                "Corrupted pickle payload: SDK header prefix found but no "
+                "terminating newline. The data is likely truncated."
+            )
         _validate_header(data[: newline_idx + 1], source="<bytes>")
         return pickle.loads(data[newline_idx + 1 :])  # nosec B301
     return pickle.loads(data)  # nosec B301 - legacy data without header

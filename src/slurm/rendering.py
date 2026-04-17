@@ -307,6 +307,8 @@ def _serialize_runner_inputs(
                 )
                 continue
             try:
+                # Picklability probe — the actual serialized bytes we ship
+                # are produced below via dumps_pickled() on the full list.
                 pickle.dumps(cb)
                 picklable_callbacks.append(cb)
             except Exception as _cb_err:
@@ -338,8 +340,12 @@ def _serialize_runner_inputs(
 
     lines: List[str] = []
     if not is_array_job:
-        assert args_file is not None
-        assert kwargs_file is not None
+        if args_file is None or kwargs_file is None:
+            raise RuntimeError(
+                "Internal error: non-array jobs must have args_file and "
+                "kwargs_file allocated earlier in serialize_task_arguments(). "
+                "This indicates a bug in the rendering pipeline."
+            )
         lines.append(f'base64 -d > "{args_file}" << "BASE64_ARGS"')
         lines.append(pickled_args)
         lines.append("BASE64_ARGS")

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `loads_pickled()` now raises a descriptive `ValueError` when the pickle
+  payload is truncated after the header prefix, instead of a bare `IndexError`
+- `rendering.serialize_task_arguments()` replaces `assert` guards with explicit
+  `RuntimeError`, ensuring correctness under `python -O`
+
+### Changed
+
+- `BackendBase.job_base_dir` is now a documented attribute of the base class;
+  internal call sites access it directly instead of probing with `getattr`
+- Eliminated the circular import between `slurm.context` and `slurm.cluster`;
+  `Cluster` now exposes a self-referential `cluster` property so context
+  resolution works structurally without runtime imports
+- Internal callers no longer probe backends with `hasattr`/`getattr` for
+  `is_remote`, `tail_file`, or `hostname` — these are part of the documented
+  `BackendBase` contract and are called directly
+- Documented Slurm exit-code format (`"exit:signal"`) on `JobSnapshot.exit_code`
+- Clarified `WorkflowTask` docstring to note it is the return type of
+  `@workflow` and should not be instantiated directly
+
 ## [0.4.6] - 2026-04-11
 
 ### Fixed

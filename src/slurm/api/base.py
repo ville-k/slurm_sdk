@@ -21,6 +21,12 @@ class BackendBase(abc.ABC):
     hostname: str = "localhost"
     """Hostname of the target system. SSH backends override via instance attribute."""
 
+    job_base_dir: str = ""
+    """Absolute path to the base directory where job artifacts are stored on
+    the target system. Concrete backends must set this during ``__init__``
+    (SSH backends resolve it post-connect). Callers should access this
+    attribute directly rather than probing with ``getattr``."""
+
     @abc.abstractmethod
     def submit_job(
         self,

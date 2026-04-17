@@ -159,7 +159,7 @@ class WheelPackagingStrategy(PackagingStrategy):
                     "  2. Check disk space on cluster: ssh {hostname} df -h\n"
                     "  3. Verify permissions: ssh {hostname} ls -la {remote_base}\n"
                     "  4. Try uploading manually: scp {wheel_path} {hostname}:{remote_upload_path}".format(
-                        hostname=getattr(cluster.backend, "hostname", "cluster"),
+                        hostname=cluster.backend.hostname,
                         remote_base=remote_base,
                         wheel_path=wheel_path,
                         remote_upload_path=remote_upload_path,

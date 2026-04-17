@@ -22,6 +22,9 @@ class FakeBackend:
     def is_remote(self):
         return False
 
+    def tail_file(self, *args, **kwargs):
+        raise NotImplementedError
+
 
 def _make_job(
     status=None,

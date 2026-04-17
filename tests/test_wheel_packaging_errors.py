@@ -67,6 +67,8 @@ def test_prepare_upload_failure_raises_packaging_error(tmp_path, monkeypatch):
 
     # Patch SSHCommandBackend reference inside wheel module to our dummy
     class DummySSH:
+        hostname = "test-cluster"
+
         def get_remote_upload_base_path(self):
             return str(tmp_path / "remote")
 

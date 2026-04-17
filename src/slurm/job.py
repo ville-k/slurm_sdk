@@ -56,7 +56,13 @@ class JobSnapshot:
     state: str
     """Current Slurm state (e.g. PENDING, RUNNING, COMPLETED, FAILED)."""
     exit_code: Optional[str]
-    """Slurm exit code string (e.g. ``"0:0"``) or None if not yet available."""
+    """Slurm exit code string or None if not yet available.
+
+    Format is ``"<exit>:<signal>"`` as reported by sacct/scontrol. ``"0:0"``
+    means the job exited normally with status 0. A non-zero exit code
+    (``"1:0"``) indicates the task raised or returned non-zero. A non-zero
+    signal (``"0:9"``) indicates the job was killed by that signal (e.g. 9
+    for SIGKILL from OOM or timeout)."""
     reason: Optional[str]
     """Slurm state reason or error description."""
     stdout_tail: str
@@ -199,7 +205,9 @@ class Job(Generic[T]):
             raise ValueError("Either 'backend' or 'cluster' must be provided.")
 
         self._on_completed = on_completed
-        self.cluster = cluster  # backward compat
+        # Optional Cluster reference. Present when the Job was created via
+        # cluster.submit(); None when constructed directly from a backend.
+        self.cluster = cluster
         self.task_func = task_func
         self.args = args
         self.kwargs = kwargs or {}
@@ -654,7 +662,7 @@ class Job(Generic[T]):
                     "  3. Check file size: ssh {hostname} du -h {result_file}\n"
                     "  4. Check Python versions match between local and cluster\n"
                     "  5. Review job output logs for errors: {job_dir}/*.out".format(
-                        hostname=getattr(self.backend, "hostname", "cluster"),
+                        hostname=self.backend.hostname,
                         result_file=result_file_path,
                         job_dir=self.target_job_dir
                         if self.target_job_dir
@@ -1062,22 +1070,22 @@ class Job(Generic[T]):
         if not path:
             return ""
 
-        # Prefer tail_file (efficient: only transfers last N lines)
-        tail_fn = getattr(self.backend, "tail_file", None)
-        if tail_fn is not None:
-            try:
-                collected: list[str] = []
-                tail_fn(
-                    path,
-                    follow=False,
-                    lines=tail_lines,
-                    on_line=collected.append,
-                )
-                return "\n".join(collected)
-            except NotImplementedError:
-                pass  # fall through to full-read path
-            except (FileNotFoundError, RuntimeError, OSError):
-                return ""
+        # Prefer tail_file (efficient: only transfers last N lines).
+        # BackendBase.tail_file() raises NotImplementedError by default;
+        # backends that support tailing override it.
+        try:
+            collected: list[str] = []
+            self.backend.tail_file(
+                path,
+                follow=False,
+                lines=tail_lines,
+                on_line=collected.append,
+            )
+            return "\n".join(collected)
+        except NotImplementedError:
+            pass  # fall through to full-read path
+        except (FileNotFoundError, RuntimeError, OSError):
+            return ""
 
         # Fallback: download full file and slice locally
         try:
