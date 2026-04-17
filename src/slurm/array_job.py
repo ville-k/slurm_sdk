@@ -144,18 +144,12 @@ class ArrayJob(Generic[T]):
         pre_submission_id = f"{timestamp}_{unique_id}"
 
         task_name = getattr(self.task, "__name__", "array_job")
-        job_base_dir = getattr(
-            self.cluster.backend,
-            "job_base_dir",
-            "/tmp/slurm_jobs",  # nosec B108
+        array_dir = (
+            Path(self.cluster.backend.job_base_dir) / task_name / pre_submission_id
         )
-        array_dir = Path(job_base_dir) / task_name / pre_submission_id
         target_job_dir = str(array_dir)
 
-        is_remote = (
-            hasattr(self.cluster.backend, "is_remote")
-            and self.cluster.backend.is_remote()
-        )
+        is_remote = self.cluster.backend.is_remote()
 
         packaging_strategy = prepare_packaging_strategy(
             self.cluster, self.task, packaging_config=None

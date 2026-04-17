@@ -26,6 +26,8 @@ class FakeSSHBackend:
 class FailingSSHBackend:
     """Backend that raises on download_file to test cleanup."""
 
+    hostname = "test-cluster"
+
     def get_job_status(self, job_id: str):
         return {"JobState": "COMPLETED", "ExitCode": "0:0"}
 

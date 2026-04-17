@@ -580,10 +580,14 @@ class SlurmTask:
 class WorkflowTask(SlurmTask):
     """A task that orchestrates other tasks.
 
-    Created by the ``@workflow`` decorator. Behaves identically to
-    :class:`SlurmTask` but is distinguishable via ``isinstance`` so the
-    submission pipeline can apply workflow-specific handling (e.g. Slurmfile
-    upload, nested cluster reconstruction).
+    Users should not instantiate this class directly — decorate a function
+    with ``@workflow`` instead. ``WorkflowTask`` is exported so that callers
+    can type-check with ``isinstance(task, WorkflowTask)`` when they need to
+    distinguish orchestrators from regular tasks (e.g. in custom callbacks).
+
+    Behaves identically to :class:`SlurmTask` but is distinguishable via
+    ``isinstance`` so the submission pipeline can apply workflow-specific
+    handling (e.g. Slurmfile upload, nested cluster reconstruction).
     """
 
     pass

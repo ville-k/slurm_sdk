@@ -119,7 +119,7 @@ class SSHCommandBackend(BackendBase):
 
         # Store and resolve job_base_dir
         self._raw_job_base_dir = job_base_dir or "~/slurm_jobs"  # Store the raw path
-        self.job_base_dir = None  # Will be resolved after connection
+        self.job_base_dir = ""  # Resolved after connection (see below)
 
         # Connect to the remote host
         self._connect()

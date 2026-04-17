@@ -205,7 +205,7 @@ def render_workflow_slurmfile(cluster: "Cluster", env_name: str) -> str:
     backend_config = dict(cluster._backend_kwargs)
     job_base_dir = backend_config.pop("job_base_dir", None)
     if job_base_dir is None:
-        job_base_dir = getattr(cluster.backend, "job_base_dir", None) or "~/slurm_jobs"
+        job_base_dir = cluster.backend.job_base_dir or "~/slurm_jobs"
 
     doc = tomlkit.document()
     env_table = tomlkit.table(is_super_table=True)

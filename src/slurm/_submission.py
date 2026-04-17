@@ -150,15 +150,7 @@ def setup_job_directory(
     task_name = task_defaults.get("job_name", task_func.func.__name__)
     sanitized_name = _sanitize_task_name(task_name)
 
-    resolved_job_base_dir = getattr(cluster.backend, "job_base_dir", None)
-    if resolved_job_base_dir is None:
-        import tempfile
-
-        resolved_job_base_dir = os.path.join(tempfile.gettempdir(), "slurm_jobs")
-        try:
-            os.makedirs(resolved_job_base_dir, exist_ok=True)
-        except (OSError, IOError) as e:
-            logger.debug(f"Failed to create job base directory: {e}")
+    resolved_job_base_dir = cluster.backend.job_base_dir
 
     from .context import _get_active_context
     from .workflow import WorkflowContext

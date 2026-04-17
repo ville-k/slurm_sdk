@@ -12,6 +12,8 @@ def echo(x):
 
 
 class FailingBackend:
+    job_base_dir = "/tmp/slurm_jobs"  # nosec B108
+
     def submit_job(self, *args, **kwargs):
         raise RuntimeError("sbatch failed")
 

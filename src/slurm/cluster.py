@@ -104,6 +104,17 @@ class Cluster:
         callbacks: List of callback objects for lifecycle event hooks.
     """
 
+    @property
+    def cluster(self) -> "Cluster":
+        """Self-reference for uniform context resolution.
+
+        :class:`WorkflowContext` also exposes a ``cluster`` attribute pointing
+        to its parent :class:`Cluster`. Having both types expose ``cluster``
+        lets :func:`slurm.context._resolve_cluster` resolve the active cluster
+        without importing concrete types (which would be a circular import).
+        """
+        return self
+
     def __init__(
         self,
         backend_type: str = "ssh",
@@ -1180,12 +1191,11 @@ class Cluster:
 
         # Gather backend configuration
         try:
-            if hasattr(self.backend, "hostname"):
-                diag["backend_config"]["hostname"] = self.backend.hostname
+            diag["backend_config"]["hostname"] = self.backend.hostname
+            diag["backend_config"]["job_base_dir"] = self.backend.job_base_dir
+            # username is SSH-specific, not part of the base contract
             if hasattr(self.backend, "username"):
                 diag["backend_config"]["username"] = self.backend.username
-            if hasattr(self.backend, "job_base_dir"):
-                diag["backend_config"]["job_base_dir"] = self.backend.job_base_dir
 
             diag["backend_config"]["default_packaging"] = self.default_packaging
             diag["backend_config"]["default_account"] = self.default_account
