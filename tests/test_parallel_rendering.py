@@ -1,17 +1,24 @@
 """Structural tests for the parallel-job renderer.
 
 These check that the rendered script contains the expected shape — one
-sbatch header, per-peer srun invocations tagged with ``--step peer:<name>``,
-shared packaging setup, and the temporary shell supervisor — without pinning
-every character (which would make every whitespace tweak a test change).
+sbatch header, shared packaging setup, a base64-encoded supervisor plan,
+and the bootstrap+supervisor invocation — without pinning every character
+(which would make every whitespace tweak a test change).
+
+The per-peer ``srun`` commands live inside the plan.json heredoc, so tests
+that need to inspect them decode the heredoc and load it as a :class:`Plan`.
 """
 
 from __future__ import annotations
+
+import base64
+import re
 
 from slurm import task
 from slurm.callbacks import BaseCallback
 from slurm.packaging.base import PackagingStrategy
 from slurm.parallel import _build_spec
+from slurm.parallel.plan import Plan
 from slurm.parallel.rendering import render_parallel_script
 from slurm.parallel.validation import validate_spec
 
@@ -78,6 +85,20 @@ def _render(spec, tmp_path):
     )
 
 
+_PLAN_HEREDOC_RE = re.compile(
+    r'base64 -d > "plan\.json" << "BASE64_PARALLEL_PLAN"\n(.*?)\nBASE64_PARALLEL_PLAN',
+    re.DOTALL,
+)
+
+
+def _extract_plan(script: str) -> Plan:
+    match = _PLAN_HEREDOC_RE.search(script)
+    assert match is not None, "plan.json heredoc not found in rendered script"
+    encoded = match.group(1).strip()
+    decoded = base64.b64decode(encoded).decode("utf-8")
+    return Plan.from_json(decoded)
+
+
 def test_two_peers_render_distinct_srun_commands(tmp_path):
     from slurm import Peer
 
@@ -91,34 +112,43 @@ def test_two_peers_render_distinct_srun_commands(tmp_path):
     assert script.count("#!/bin/bash") == 1
     assert "#SBATCH --job-name=" in script
 
-    # One srun per peer, each tagged with the peer-step selector.
-    assert "--step peer:_train" in script
-    assert "--step peer:_metrics" in script
-
-    # Distinct per-peer args/kwargs pickle targets.
+    # Distinct per-peer args/kwargs pickle targets (still emitted as heredocs
+    # so the supervisor's srun invocations find them).
     assert 'base64 -d > "peer__train_args.pkl"' in script
     assert 'base64 -d > "peer__train_kwargs.pkl"' in script
     assert 'base64 -d > "peer__metrics_args.pkl"' in script
     assert 'base64 -d > "peer__metrics_kwargs.pkl"' in script
 
-    # Peer result files mirror Job._result_filename convention so get_result()
-    # finds them without overriding the derived filename.
-    assert "slurm_job_abc123_peer__train_result.pkl" in script
-    assert "slurm_job_abc123_peer__metrics_result.pkl" in script
-
-    # Each srun carries the peer-identity env vars the runner reads.
-    assert "SLURM_SDK_PEER_NAME=_train" in script
-    assert "SLURM_SDK_PEER_POOL=default" in script
-
     # Shared packaging setup emitted once.
     assert script.count("echo setup") == 1
 
-    # Temporary shell supervisor: trap + scancel + leader wait.
-    assert "trap 'scancel --signal=TERM" in script
-    assert "LEADER_EXIT=$?" in script
+    # Bootstrap + supervisor replace the old inline shell supervisor.
+    assert "slurm.parallel.topology_bootstrap" in script
+    assert "slurm.parallel.topology_supervisor" in script
+    assert 'exec "$PY_EXEC_RESOLVED" -m slurm.parallel.topology_supervisor' in script
+
+    # Decode the plan and inspect peer entries.
+    plan = _extract_plan(script)
+    names = sorted(p.name for p in plan.peers)
+    assert names == ["_metrics", "_train"]
+    train = plan.peer_by_name("_train")
+    metrics = plan.peer_by_name("_metrics")
+    assert train.leader is True
+    assert train.on_failure == "kill"
+    assert metrics.leader is False
+    assert metrics.on_failure == "continue"
+    assert "--step peer:_train" in train.srun_command_line
+    assert "--step peer:_metrics" in metrics.srun_command_line
+    # Peer result files follow Job._result_filename convention so get_result()
+    # finds them without overriding the derived filename.
+    assert "slurm_job_abc123_peer__train_result.pkl" in train.srun_command_line
+    assert "slurm_job_abc123_peer__metrics_result.pkl" in metrics.srun_command_line
+    # Each srun carries the peer-identity env vars the runner reads.
+    assert "SLURM_SDK_PEER_NAME=_train" in train.srun_command_line
+    assert "SLURM_SDK_PEER_POOL=default" in train.srun_command_line
 
 
-def test_all_peers_symmetric_emit_wait_n_loop(tmp_path):
+def test_all_peers_symmetric_record_kill_policy(tmp_path):
     from slurm import Peer
 
     spec = _make_spec(
@@ -127,17 +157,19 @@ def test_all_peers_symmetric_emit_wait_n_loop(tmp_path):
     )
     script = _render(spec, tmp_path)
 
-    # No leader → fail-fast wait -n loop.
-    assert "LEADER_EXIT=" not in script
-    assert "wait -n" in script
-    assert "FINAL_EXIT" in script
+    # No inline wait -n supervisor any more — the Python supervisor owns it.
+    assert "wait -n" not in script
+    assert "LEADER_EXIT" not in script
 
-    # Both peers still have their own srun commands.
-    assert "--step peer:_ocean" in script
-    assert "--step peer:_atmo" in script
+    plan = _extract_plan(script)
+    for peer in plan.peers:
+        assert peer.leader is False
+        assert peer.on_failure == "kill"
+    names = sorted(p.name for p in plan.peers)
+    assert names == ["_atmo", "_ocean"]
 
 
-def test_on_failure_continue_policy_recorded_for_shell_supervisor(tmp_path):
+def test_on_failure_continue_policy_recorded_in_plan(tmp_path):
     from slurm import Peer
 
     spec = _make_spec(
@@ -146,10 +178,9 @@ def test_on_failure_continue_policy_recorded_for_shell_supervisor(tmp_path):
     )
     script = _render(spec, tmp_path)
 
-    # The shell supervisor records each peer's failure policy so it can
-    # distinguish kill vs continue on exit.
-    assert '"continue"' in script
-    assert '"kill"' in script
+    plan = _extract_plan(script)
+    assert plan.peer_by_name("_ocean").on_failure == "kill"
+    assert plan.peer_by_name("_metrics").on_failure == "continue"
 
 
 def test_single_peer_renders_minimal_script(tmp_path):
@@ -158,9 +189,10 @@ def test_single_peer_renders_minimal_script(tmp_path):
     spec = _make_spec(Peer(_train.partial(cfg={"lr": 0.01}), leader=True))
     script = _render(spec, tmp_path)
 
-    assert "--step peer:_train" in script
-    # Leader + no siblings → LEADER_EXIT path still fires.
-    assert "LEADER_EXIT=$?" in script
+    plan = _extract_plan(script)
+    assert len(plan.peers) == 1
+    assert plan.peers[0].leader is True
+    assert "--step peer:_train" in plan.peers[0].srun_command_line
 
 
 def test_peer_env_vars_exported_on_srun(tmp_path):
@@ -172,10 +204,11 @@ def test_peer_env_vars_exported_on_srun(tmp_path):
     )
     script = _render(spec, tmp_path)
 
+    plan = _extract_plan(script)
     # --export=ALL preserves the batch env (JOB_DIR, PYTHONPATH, etc.) while
     # still adding the peer-identity vars.
-    for peer_name in ("_train", "_metrics"):
-        assert f"--export=ALL,SLURM_SDK_PEER_NAME={peer_name}" in script
+    for peer in plan.peers:
+        assert f"--export=ALL,SLURM_SDK_PEER_NAME={peer.name}" in peer.srun_command_line
 
 
 def test_script_includes_runner_module_and_function(tmp_path):
@@ -187,7 +220,25 @@ def test_script_includes_runner_module_and_function(tmp_path):
     )
     script = _render(spec, tmp_path)
 
-    assert "-m slurm.runner" in script
-    assert "--module " in script
-    assert '--function "_train"' in script
-    assert '--function "_metrics"' in script
+    plan = _extract_plan(script)
+    for peer in plan.peers:
+        assert "-m slurm.runner" in peer.srun_command_line
+        assert "--module " in peer.srun_command_line
+    assert '--function "_train"' in plan.peer_by_name("_train").srun_command_line
+    assert '--function "_metrics"' in plan.peer_by_name("_metrics").srun_command_line
+
+
+def test_plan_metadata_round_trips(tmp_path):
+    from slurm import Peer
+
+    spec = _make_spec(
+        Peer(_train.partial(cfg={}), leader=True),
+        Peer(_metrics, on_failure="continue"),
+        grace_period_seconds=7,
+    )
+    script = _render(spec, tmp_path)
+
+    plan = _extract_plan(script)
+    assert plan.grace_period_seconds == 7
+    assert plan.pool_names == ["default"]
+    assert plan.pre_submission_id == "abc123"
