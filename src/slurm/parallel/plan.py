@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -65,6 +65,21 @@ class PlanPeer:
     # Drives ``srun --het-group=<N>`` at render time and the bootstrap's
     # ``SLURM_JOB_NODELIST_HET_GROUP_<N>`` lookup.
     component_index: int = 0
+    # Resolved hostname pin(s) for this peer, written by the bootstrap after
+    # :func:`slurm.parallel.placement.resolve_placement` walks ``on_node`` /
+    # ``on_nodes`` / ``colocate_with`` chains. ``None`` means "unpinned"
+    # (Slurm places freely); non-None instructs the supervisor to emit
+    # ``--nodelist=<host1>,<host2>,...`` onto the peer's ``srun`` so the
+    # step runs on exactly those nodes.
+    nodelist: Optional[Tuple[str, ...]] = None
+    # Placement intent carried from the spec so the bootstrap can run the
+    # placement resolver without needing the original ``_ParallelSpec``.
+    # ``on_node`` is a str label, int ordinal, or None. ``on_nodes`` is a
+    # per-replica tuple of the same refs (only meaningful for replica sets).
+    # ``colocate_with`` is another peer name or None.
+    on_node: Optional["str | int"] = None
+    on_nodes: Optional[Tuple["str | int", ...]] = None
+    colocate_with: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -77,10 +92,26 @@ class PlanPeer:
             "callback": self.callback,
             "replica_count": self.replica_count,
             "component_index": self.component_index,
+            "nodelist": list(self.nodelist) if self.nodelist is not None else None,
+            "on_node": self.on_node,
+            "on_nodes": list(self.on_nodes) if self.on_nodes is not None else None,
+            "colocate_with": self.colocate_with,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "PlanPeer":
+        raw_nodelist = data.get("nodelist")
+        nodelist: Optional[Tuple[str, ...]]
+        if raw_nodelist is None:
+            nodelist = None
+        else:
+            nodelist = tuple(str(h) for h in raw_nodelist)
+        raw_on_nodes = data.get("on_nodes")
+        on_nodes: Optional[Tuple["str | int", ...]]
+        if raw_on_nodes is None:
+            on_nodes = None
+        else:
+            on_nodes = tuple(raw_on_nodes)
         return cls(
             name=data["name"],
             pool=data["pool"],
@@ -91,6 +122,10 @@ class PlanPeer:
             callback=data.get("callback"),
             replica_count=int(data.get("replica_count", 1)),
             component_index=int(data.get("component_index", 0)),
+            nodelist=nodelist,
+            on_node=data.get("on_node"),
+            on_nodes=on_nodes,
+            colocate_with=data.get("colocate_with"),
         )
 
 
@@ -109,16 +144,35 @@ class PlanComponent:
     index: int
     pool: str
     nodes: int
+    # Pool's declared ``node_labels`` (or ``None`` when the pool has none).
+    # Carried through the plan so the bootstrap can stamp each node registry
+    # entry with its label and resolve ``on_node="<label>"`` pins at
+    # placement time.
+    node_labels: Optional[Tuple[str, ...]] = None
 
     def to_dict(self) -> dict:
-        return {"index": self.index, "pool": self.pool, "nodes": self.nodes}
+        return {
+            "index": self.index,
+            "pool": self.pool,
+            "nodes": self.nodes,
+            "node_labels": (
+                list(self.node_labels) if self.node_labels is not None else None
+            ),
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "PlanComponent":
+        raw_labels = data.get("node_labels")
+        labels: Optional[Tuple[str, ...]]
+        if raw_labels is None:
+            labels = None
+        else:
+            labels = tuple(str(x) for x in raw_labels)
         return cls(
             index=int(data["index"]),
             pool=str(data["pool"]),
             nodes=int(data.get("nodes", 1)),
+            node_labels=labels,
         )
 
 

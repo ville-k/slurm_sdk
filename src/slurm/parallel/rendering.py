@@ -499,17 +499,27 @@ def build_plan(
                 callback=_serialize_callback(peer.callback),
                 replica_count=peer.count,
                 component_index=pool_component_index[peer_pool],
+                on_node=peer.on_node,
+                on_nodes=tuple(peer.on_nodes) if peer.on_nodes is not None else None,
+                colocate_with=peer.colocate_with,
             )
         )
 
-    components = [
-        PlanComponent(
-            index=pool_component_index[name],
-            pool=name,
-            nodes=spec.topology.pools[name].nodes if name in spec.topology.pools else 1,
+    components = []
+    for name in pool_names_ordered:
+        pool = spec.topology.pools.get(name) if name in spec.topology.pools else None
+        components.append(
+            PlanComponent(
+                index=pool_component_index[name],
+                pool=name,
+                nodes=pool.nodes if pool is not None else 1,
+                node_labels=(
+                    tuple(pool.node_labels)
+                    if pool is not None and pool.node_labels is not None
+                    else None
+                ),
+            )
         )
-        for name in pool_names_ordered
-    ]
 
     return Plan(
         peers=plan_peers,

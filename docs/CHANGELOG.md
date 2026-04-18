@@ -20,6 +20,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@task(nodelist=…)` pinning and `@task(nodes=2)` allocation spans
   against the two-node cluster, exercising only the existing
   single-task API
+- Named-node placement for parallel allocations — peers can now pin to
+  specific hosts within their pool via `Peer(on_node="<label>")` or
+  `Peer(on_node=<ordinal>)`, and replica sets can pin per-replica via
+  `Peer.replicas(on_nodes=[...])`. Pools accept a `node_labels` tuple that
+  maps logical names (e.g. `"head"`, `"ops"`) to the pool's nodes in Slurm
+  allocation order. `Peer(colocate_with="<other>")` inherits the target
+  peer's pin (auto-pinning the target to the first unused node if it has no
+  explicit pin) so co-located services land on the same host from a single
+  declarative flag
+- `ctx.nodes` and `ctx.node` runtime discovery — user code can iterate every
+  node in the allocation (`ctx.nodes.in_pool("gpu")`, `ctx.nodes["head"]`,
+  `ctx.nodes.by_hostname(...)`) and introspect the host it is running on
+  (`ctx.node`) through the new `NodeGroup` / `NodeInfo` types, matching the
+  `ctx.peers` / `PeerInfo` discovery surface from Phase 7
+- Bootstrap now resolves placement intent to concrete hostnames before the
+  supervisor launches any step. Pinned peers receive `--nodelist=<host>`
+  automatically; unpinned peers remain free for Slurm to place. The plan
+  records each peer's resolved nodelist so restart and cascade paths honour
+  the same pinning
 - Peer service-discovery runtime API — peer functions can now inspect every
   other peer in the allocation via `ctx.peers["<name>"]`, a read-only mapping
   of `PeerGroup` views. Each `PeerGroup` exposes replicas, their hostnames,
