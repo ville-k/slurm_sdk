@@ -21,14 +21,21 @@ Design choices driving the checks here:
 
 from __future__ import annotations
 
+import logging
+import os
+import re
+import shutil
+import subprocess  # nosec B404 - used to probe optional tooling (nvidia-smi)
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Dict, Optional
 
 from ..errors import TopologyError
 from .registry import _RESERVED_ANNOUNCE_KEYS
 from .types import Peer, Pool, _ParallelSpec
 
-__all__ = ["validate_spec", "_RESERVED_ANNOUNCE_KEYS"]
+__all__ = ["validate_spec", "validate_local_capacity", "_RESERVED_ANNOUNCE_KEYS"]
+
+logger = logging.getLogger(__name__)
 
 
 def validate_spec(spec: _ParallelSpec) -> None:
@@ -417,6 +424,212 @@ def _check_packaging_inheritance(spec: _ParallelSpec, problems: list[str]) -> No
                 "leader=True, move this peer later in the call, or set an "
                 "explicit packaging= on it."
             )
+
+
+# ---------------------------------------------------------------------------
+# Local-backend capacity validation (Phase 12)
+# ---------------------------------------------------------------------------
+
+
+def _detect_local_memory_mib() -> Optional[int]:
+    """Return the host's total RAM in MiB, or ``None`` when unknown.
+
+    Prefers ``/proc/meminfo`` on Linux (no dependency), falls back to
+    :mod:`psutil` when available, then to ``sysctl -n hw.memsize`` on macOS.
+    """
+    try:
+        with open("/proc/meminfo", "r") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    return int(int(parts[1]) / 1024)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        return None
+
+    try:
+        import importlib
+
+        psutil = importlib.import_module("psutil")
+        return int(psutil.virtual_memory().total / (1024 * 1024))
+    except ImportError:
+        pass
+    except Exception:
+        return None
+
+    # macOS fallback via sysctl
+    if shutil.which("sysctl"):
+        try:
+            result = subprocess.run(  # nosec B603,B607 - trusted sysctl
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return int(int(result.stdout.strip()) / (1024 * 1024))
+        except (subprocess.TimeoutExpired, ValueError, OSError):
+            return None
+
+    return None
+
+
+def _detect_local_gpus() -> Optional[int]:
+    """Return the host's visible GPU count, or ``None`` when unknown.
+
+    Checks ``CUDA_VISIBLE_DEVICES`` first (honours user masking), then
+    ``nvidia-smi -L`` for the full count. Returns ``None`` — not ``0`` —
+    when neither is informative so the capacity check can be skipped with
+    a warning rather than falsely rejecting submissions on GPU-less boxes.
+    """
+    cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_vis is not None and cuda_vis.strip():
+        items = [x for x in cuda_vis.split(",") if x.strip()]
+        return len(items)
+
+    if shutil.which("nvidia-smi"):
+        try:
+            result = subprocess.run(  # nosec B603,B607 - trusted nvidia-smi
+                ["nvidia-smi", "-L"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+                return len(lines)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    return None
+
+
+_MEM_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGTP]i?B?)?\s*$", re.IGNORECASE)
+
+
+def _parse_mem_to_mib(value: Any) -> Optional[int]:
+    """Parse a Slurm-style memory string (``"8G"``, ``"4096M"``) to MiB.
+
+    Returns ``None`` when the value shape is unrecognised — callers should
+    treat ``None`` as "unknown demand" and skip the check for that peer.
+    """
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        return None
+    match = _MEM_RE.match(value)
+    if match is None:
+        return None
+    num = float(match.group(1))
+    unit = (match.group(2) or "M").upper().rstrip("IB")
+    multipliers = {"K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 * 1024, "P": 1024**3}
+    factor = multipliers.get(unit, 1)
+    return int(num * factor)
+
+
+def _aggregate_local_demand(spec: _ParallelSpec) -> Dict[str, Optional[int]]:
+    """Sum per-task claims across every peer for local capacity checking.
+
+    Local mode launches every peer on one host, so the total host-wide
+    demand is ``sum(peer.cpus_per_task × peer.replicas)`` (and analogous
+    for GPUs / memory). Unknown claims map to ``0`` — ``None`` return
+    signals "nothing claimed; skip this axis entirely" for clean output.
+    """
+    total_cpus = 0
+    total_gpus = 0
+    total_mem_mib = 0
+    any_cpu = False
+    any_gpu = False
+    any_mem = False
+
+    for peer in spec.peers:
+        sbatch = _task_sbatch_options(peer)
+        count = max(1, peer.count)
+        cpt = sbatch.get("cpus_per_task")
+        if cpt is not None:
+            total_cpus += int(cpt) * count
+            any_cpu = True
+        gpt = sbatch.get("gpus_per_task")
+        if gpt is not None:
+            total_gpus += int(gpt) * count
+            any_gpu = True
+        mem = sbatch.get("mem")
+        mem_mib = _parse_mem_to_mib(mem)
+        if mem_mib is not None:
+            total_mem_mib += mem_mib * count
+            any_mem = True
+
+    return {
+        "cpus": total_cpus if any_cpu else None,
+        "gpus": total_gpus if any_gpu else None,
+        "mem_mib": total_mem_mib if any_mem else None,
+    }
+
+
+def validate_local_capacity(spec: _ParallelSpec) -> None:
+    """Raise :class:`TopologyError` when the local host cannot host the job.
+
+    Only invoked when the submitting cluster's backend is ``local`` and
+    Slurm is not available — a Slurm-backed parallel submission still
+    targets real compute nodes and this check would be misleading.
+
+    The check compares aggregate peer demand against::
+
+        CPUs: os.cpu_count()
+        RAM:  /proc/meminfo (Linux) / psutil / sysctl (macOS)
+        GPUs: CUDA_VISIBLE_DEVICES or nvidia-smi -L
+
+    Axes whose capacity can't be detected are skipped with a debug log —
+    under-specified environments get a warning, not a hard failure.
+    """
+    demand = _aggregate_local_demand(spec)
+
+    problems: list[str] = []
+
+    cpus_available = os.cpu_count()
+    if demand["cpus"] is not None and cpus_available:
+        if demand["cpus"] > cpus_available:
+            problems.append(
+                f"local host has {cpus_available} CPU(s), parallel() "
+                f"requires {demand['cpus']} — scale down or use a real cluster."
+            )
+
+    mem_available = _detect_local_memory_mib()
+    if demand["mem_mib"] is not None and mem_available is not None:
+        if demand["mem_mib"] > mem_available:
+            problems.append(
+                f"local host has {mem_available} MiB of RAM, parallel() "
+                f"requires {demand['mem_mib']} MiB — scale down or use a real cluster."
+            )
+    elif demand["mem_mib"] is not None and mem_available is None:
+        logger.debug(
+            "Local-mode memory capacity unknown; skipping memory check "
+            "(demand was %d MiB).",
+            demand["mem_mib"],
+        )
+
+    gpus_available = _detect_local_gpus()
+    if demand["gpus"] is not None and gpus_available is not None:
+        if demand["gpus"] > gpus_available:
+            problems.append(
+                f"local host has {gpus_available} GPU(s), parallel() "
+                f"requires {demand['gpus']} — scale down or use a real cluster."
+            )
+    elif demand["gpus"] is not None and gpus_available is None:
+        logger.debug(
+            "Local-mode GPU capacity unknown (no nvidia-smi / CUDA_VISIBLE_DEVICES); "
+            "skipping GPU check (demand was %d).",
+            demand["gpus"],
+        )
+
+    if problems:
+        lines = [f"  • {p}" for p in problems]
+        raise TopologyError(
+            f"{len(problems)} local-mode capacity problem(s):\n" + "\n".join(lines),
+            problems=list(problems),
+        )
 
 
 def _check_callback_resolvability(spec: _ParallelSpec, problems: list[str]) -> None:

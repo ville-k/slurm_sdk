@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Local-mode parity for `parallel(...)` — run multi-peer allocations on a
+  developer workstation without Slurm installed. `LocalBackend.submit_job`
+  detects parallel-rendered scripts via a supervisor sentinel and, when
+  `sbatch` is absent (or `SLURM_SDK_FORCE_LOCAL_PARALLEL=1`), invokes the
+  Python supervisor directly via `subprocess.Popen`. Peers launch without
+  `srun`; per-peer `SLURM_PROCID` / `SLURM_NTASKS` / `SLURM_JOB_ID` are
+  synthesized so `JobContext` stays coherent. Shutdown uses process-group
+  `SIGTERM` / `SIGKILL` with the same grace window semantics as Slurm mode
+- Local-host capacity validation — when the backend is `local` and Slurm
+  is not present, `parallel(...)` checks aggregate per-peer CPU, memory
+  (`/proc/meminfo`, `psutil`, `sysctl` on macOS) and GPU
+  (`CUDA_VISIBLE_DEVICES` / `nvidia-smi -L`) demand against the host
+  before rendering and reports "local host has N CPUs, parallel() requires
+  M — scale down or use a real cluster." via `TopologyError`
+- `slurm.examples.parallel_simple` — smoke example demonstrating a
+  leader + sidecar `parallel(...)` running entirely locally
 - `ParallelJob.snapshot()` returns a `dict[str, JobSnapshot | list[JobSnapshot]]`
   — one `JobSnapshot` per singleton peer, one list of snapshots per replica
   peer (ordered by replica index). Forwards `tail_lines=` to every per-peer
