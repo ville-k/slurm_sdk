@@ -56,6 +56,10 @@ class PlanPeer:
     max_restarts: int
     srun_command_line: str
     callback: "str | None" = None
+    # Replica count — ``1`` for singleton peers, ``> 1`` for replica sets
+    # produced by :meth:`Peer.replicas`. The bootstrap uses this to size
+    # the registry skeleton (``count`` entries per replica peer).
+    replica_count: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +70,7 @@ class PlanPeer:
             "max_restarts": self.max_restarts,
             "srun_command_line": self.srun_command_line,
             "callback": self.callback,
+            "replica_count": self.replica_count,
         }
 
     @classmethod
@@ -78,6 +83,7 @@ class PlanPeer:
             max_restarts=int(data.get("max_restarts", 0)),
             srun_command_line=data["srun_command_line"],
             callback=data.get("callback"),
+            replica_count=int(data.get("replica_count", 1)),
         )
 
 

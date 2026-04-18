@@ -122,6 +122,24 @@ def load_array_item(
     return items[array_index]
 
 
+def unpack_item_to_args_kwargs(item: Any) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+    """Unpack a per-item value into ``(args, kwargs)`` for task invocation.
+
+    Shared between :func:`load_array_item` callers and the parallel replica
+    dispatch in :mod:`slurm.runner.initialization`. The unpacking rules
+    match :meth:`SlurmTask.map`:
+
+    - ``dict`` → keyword arguments.
+    - ``tuple`` → positional arguments.
+    - anything else → a single positional argument.
+    """
+    if isinstance(item, dict):
+        return (), dict(item)
+    if isinstance(item, tuple):
+        return tuple(item), {}
+    return (item,), {}
+
+
 def generate_array_spec(
     num_items: int,
     max_concurrent: Optional[int] = None,

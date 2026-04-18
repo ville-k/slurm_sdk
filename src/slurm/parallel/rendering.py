@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 PEER_ARGS_BASENAME = "peer_{name}_args.pkl"
 PEER_KWARGS_BASENAME = "peer_{name}_kwargs.pkl"
 PEER_RESULT_BASENAME = "peer_{name}_result.pkl"
+# Replica sets (count > 1) write one pickle per replica index. Unlike the
+# singleton files above, these hold a single value (dict/tuple/scalar) that
+# the runner unpacks with ``unpack_item_to_args_kwargs`` — matching the
+# :meth:`SlurmTask.map` item shape.
+PEER_REPLICA_ARGS_BASENAME = "peer_{name}_{index}_args.pkl"
 
 
 def peer_pre_submission_id(base_id: str, peer_name: str) -> str:
@@ -148,9 +153,17 @@ def _srun_flags_for_peer(peer: "Peer") -> List[str]:
     decorator — Phase 2 only needs resources that the single-pool shell
     supervisor honours: ``--ntasks``, ``--cpus-per-task``, ``--mem``, and
     optional ``--gpus``. Advanced placement flags live in Phase 6 / 8.
+
+    For replica peers (``count > 1``) the step runs ``--ntasks=<count>`` and
+    each Slurm task inside the step selects its per-replica args by
+    ``SLURM_PROCID``. ``--ntasks-per-node`` is emitted when the peer
+    declares ``tasks_per_node``.
     """
     opts = _peer_sbatch_options(peer)
-    flags: List[str] = ["--exact", "--overlap", "--ntasks=1"]
+    ntasks = peer.count if peer.is_replica_set else 1
+    flags: List[str] = ["--exact", "--overlap", f"--ntasks={ntasks}"]
+    if peer.is_replica_set and peer.tasks_per_node is not None:
+        flags.append(f"--ntasks-per-node={peer.tasks_per_node}")
 
     cpt = opts.get("cpus_per_task")
     if cpt is not None:
@@ -185,13 +198,18 @@ def _export_clause(peer: "Peer", pool_name: str) -> str:
     ``SLURM_SDK_PEER_NAME`` / ``SLURM_SDK_PEER_POOL`` are read by
     :func:`slurm.runtime.build_job_context` to populate
     :attr:`JobContext.peer_name` / :attr:`JobContext.peer_pool` inside the
-    step. Using ``ALL`` preserves the batch script's environment
-    (``JOB_DIR``, ``PYTHONPATH``, packaging variables).
+    step. Replica peers also seed ``SLURM_SDK_REPLICA_COUNT`` so the runtime
+    can distinguish replica from non-replica contexts (and pair it with
+    ``SLURM_PROCID`` for :attr:`JobContext.replica_index`). Using ``ALL``
+    preserves the batch script's environment (``JOB_DIR``, ``PYTHONPATH``,
+    packaging variables).
     """
     extras = [
         f"SLURM_SDK_PEER_NAME={peer.resolved_name}",
         f"SLURM_SDK_PEER_POOL={pool_name}",
     ]
+    if peer.is_replica_set:
+        extras.append(f"SLURM_SDK_REPLICA_COUNT={peer.count}")
     return "--export=ALL," + ",".join(extras)
 
 
@@ -205,6 +223,13 @@ def _emit_peer_arg_heredocs(
     ``$JOB_DIR``. ``pre_submission_id`` is passed through for logging only —
     the filenames deliberately do *not* include it so the rendered directory
     stays legible to humans.
+
+    Singleton peers (``count == 1``) get one pair of args/kwargs pickles
+    built from the :class:`BoundTask` binding. Replica peers (``count > 1``)
+    are handled by :func:`_emit_replica_arg_heredocs` — the bare args/kwargs
+    files are still emitted for the :attr:`BoundTask` base binding so the
+    replica loader can fall back to the shared binding when a replica's
+    per-index args are empty.
 
     Returns:
         (lines, args_basename, kwargs_basename)
@@ -245,6 +270,49 @@ def _emit_peer_arg_heredocs(
         f"BASE64_PEER_KWARGS_{peer.resolved_name.upper()}",
     ]
     return lines, args_basename, kwargs_basename
+
+
+def _emit_replica_arg_heredocs(
+    peer: "Peer",
+    replica_items: List[Any],
+) -> List[str]:
+    """Emit one base64 heredoc per replica for a replica peer.
+
+    Called with the pre-computed per-index payload list (dict / tuple / scalar)
+    prepared at submission time by ``_parallel_submission.resolve_replica_args``.
+    Each heredoc materialises ``peer_<name>_<index>_args.pkl`` in ``$JOB_DIR``
+    — the runner loads exactly one of these per ``SLURM_PROCID`` via
+    :func:`_load_peer_replica_arguments`.
+    """
+    if len(replica_items) != peer.count:
+        raise RuntimeError(
+            f"Replica peer {peer.resolved_name!r}: expected {peer.count} "
+            f"item(s), got {len(replica_items)}. Internal error — validation "
+            "should have rejected this at spec-build time."
+        )
+
+    lines: List[str] = [f"# --- replica peer {peer.resolved_name}: per-index args ---"]
+    for idx, item in enumerate(replica_items):
+        try:
+            pickled = base64.b64encode(dumps_pickled(item)).decode()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to pickle replica {idx} args for peer "
+                f"{peer.resolved_name!r}: {exc}"
+            ) from exc
+        filename = PEER_REPLICA_ARGS_BASENAME.format(name=peer.resolved_name, index=idx)
+        # Heredoc labels must be unique across the whole script — include the
+        # replica index in the label so two replicas of the same peer cannot
+        # collide.
+        label = f"BASE64_PEER_REPLICA_{peer.resolved_name.upper()}_{idx}"
+        lines.extend(
+            [
+                f'base64 -d > "{filename}" << "{label}"',
+                pickled,
+                label,
+            ]
+        )
+    return lines
 
 
 def _emit_peer_srun_command(
@@ -295,20 +363,39 @@ def _emit_peer_srun_command(
     module_name = _get_importable_module_name(task_func)
     func_name = task_func.__name__
 
-    runner_parts = [
-        '"$PY_EXEC_RESOLVED"',
-        "-m slurm.runner",
-        f'--module "{_escape_quotes(module_name)}"',
-        f'--function "{_escape_quotes(func_name)}"',
-        f"--step peer:{peer.resolved_name}",
-        f'--args-file "{args_basename}"',
-        f'--kwargs-file "{kwargs_basename}"',
-        f'--output-file "{result_filename}"',
-        f'--callbacks-file "{_escape_quotes(callbacks_file)}"',
-        f'--sys-path "{_escape_quotes(pickled_sys_path)}"',
-        '--job-dir "$JOB_DIR"',
-        f'--pre-submission-id "{_escape_quotes(peer_pre_id)}"',
-    ]
+    if peer.is_replica_set:
+        # Replica dispatch: the runner looks up ``peer_<name>_<procid>_args.pkl``
+        # based on ``SLURM_PROCID`` at runtime — no single --args-file applies.
+        step_selector = f"peer:{peer.resolved_name}:by-taskid"
+        runner_parts = [
+            '"$PY_EXEC_RESOLVED"',
+            "-m slurm.runner",
+            f'--module "{_escape_quotes(module_name)}"',
+            f'--function "{_escape_quotes(func_name)}"',
+            f"--step {step_selector}",
+            f'--output-file "{result_filename}"',
+            f'--callbacks-file "{_escape_quotes(callbacks_file)}"',
+            f'--sys-path "{_escape_quotes(pickled_sys_path)}"',
+            '--job-dir "$JOB_DIR"',
+            f'--pre-submission-id "{_escape_quotes(peer_pre_id)}"',
+        ]
+        # Intentionally omit args/kwargs file; dispatch happens by PROCID.
+        del args_basename, kwargs_basename
+    else:
+        runner_parts = [
+            '"$PY_EXEC_RESOLVED"',
+            "-m slurm.runner",
+            f'--module "{_escape_quotes(module_name)}"',
+            f'--function "{_escape_quotes(func_name)}"',
+            f"--step peer:{peer.resolved_name}",
+            f'--args-file "{args_basename}"',
+            f'--kwargs-file "{kwargs_basename}"',
+            f'--output-file "{result_filename}"',
+            f'--callbacks-file "{_escape_quotes(callbacks_file)}"',
+            f'--sys-path "{_escape_quotes(pickled_sys_path)}"',
+            '--job-dir "$JOB_DIR"',
+            f'--pre-submission-id "{_escape_quotes(peer_pre_id)}"',
+        ]
     runner_command = " ".join(runner_parts)
 
     wrapped = packaging_strategy.wrap_execution_command(
@@ -364,6 +451,7 @@ def build_plan(
             max_restarts=peer.max_restarts,
             srun_command_line=cmd,
             callback=_serialize_callback(peer.callback),
+            replica_count=peer.count,
         )
         for peer, cmd in peer_commands
     ]
@@ -423,6 +511,7 @@ def render_parallel_script(
     task_defaults: Dict[str, Any],
     sbatch_overrides: Dict[str, Any],
     callbacks: Optional[List[Any]] = None,
+    replica_items: Optional[Dict[str, List[Any]]] = None,
 ) -> str:
     """Render the batch script for a single-pool ``parallel(...)`` submission.
 
@@ -442,6 +531,11 @@ def render_parallel_script(
             and pool shape.
         callbacks: Callback instances shipped to every peer. Picklable
             callbacks are base64-encoded into the shared ``callbacks.pkl``.
+        replica_items: Optional ``{peer_name: [item_0, item_1, ...]}`` for
+            replica peers. Each item is the per-index payload (dict / tuple /
+            scalar) already resolved by the submission pipeline — the
+            renderer emits one heredoc per replica index. Required for every
+            replica peer in ``spec``; raises otherwise.
 
     Returns:
         The rendered bash script as a single string.
@@ -519,7 +613,9 @@ def render_parallel_script(
     script_lines.extend(callbacks_lines)
     script_lines.append("")
 
-    # Per-peer arg serialisation — one heredoc pair per peer.
+    # Per-peer arg serialisation — one heredoc pair per peer, plus one
+    # per-replica heredoc for replica peers.
+    replica_items = replica_items or {}
     peer_arg_basenames: Dict[str, Tuple[str, str]] = {}
     for peer in spec.peers:
         lines, args_basename, kwargs_basename = _emit_peer_arg_heredocs(
@@ -528,6 +624,17 @@ def render_parallel_script(
         script_lines.extend(lines)
         script_lines.append("")
         peer_arg_basenames[peer.resolved_name] = (args_basename, kwargs_basename)
+        if peer.is_replica_set:
+            items = replica_items.get(peer.resolved_name)
+            if items is None:
+                raise RuntimeError(
+                    f"Replica peer {peer.resolved_name!r} is missing "
+                    "pre-resolved replica items. The submission pipeline "
+                    "must pass replica_items={name: [...]} for every "
+                    "replica peer."
+                )
+            script_lines.extend(_emit_replica_arg_heredocs(peer, items))
+            script_lines.append("")
 
     script_lines.extend(_emit_python_path_setup())
     script_lines.append("")
@@ -616,4 +723,5 @@ __all__ = [
     "PEER_ARGS_BASENAME",
     "PEER_KWARGS_BASENAME",
     "PEER_RESULT_BASENAME",
+    "PEER_REPLICA_ARGS_BASENAME",
 ]

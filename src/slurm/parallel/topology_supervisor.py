@@ -254,7 +254,7 @@ def _invoke_callback(
 
 def _record_outcome(
     registry_path: Optional[Path],
-    peer_name: str,
+    peer: "PlanPeer",
     outcome: str,
     *,
     exit_code: Optional[int] = None,
@@ -262,7 +262,14 @@ def _record_outcome(
     restart_count: Optional[int] = None,
     message: Optional[str] = None,
 ) -> None:
-    """Persist a peer's terminal outcome to the registry atomically."""
+    """Persist a peer's terminal outcome to the registry atomically.
+
+    For replica peers (``peer.replica_count > 1``) the same outcome is
+    written to every replica entry — Phase 5's supervisor treats the srun
+    step as one atomic unit, so every replica inherits the step's exit code.
+    Phase 7 will add per-replica granular outcomes (via runner-written state
+    files) at which point this helper should narrow its write surface.
+    """
     if registry_path is None:
         return
     changes: Dict[str, Any] = {"outcome": outcome}
@@ -274,28 +281,42 @@ def _record_outcome(
         changes["restart_count"] = restart_count
     if message is not None:
         changes["message"] = message
-    try:
-        update_peer_entry(registry_path, peer_name, 0, **changes)
-    except (FileNotFoundError, KeyError, OSError) as exc:
-        logger.debug("Could not record outcome for %s: %s", peer_name, exc)
+    count = max(1, peer.replica_count)
+    for replica_index in range(count):
+        try:
+            update_peer_entry(registry_path, peer.name, replica_index, **changes)
+        except (FileNotFoundError, KeyError, OSError, IndexError) as exc:
+            logger.debug(
+                "Could not record outcome for %s[%d]: %s",
+                peer.name,
+                replica_index,
+                exc,
+            )
 
 
 def _increment_restart_count(
-    registry_path: Optional[Path], peer_name: str, new_value: int
+    registry_path: Optional[Path], peer: "PlanPeer", new_value: int
 ) -> None:
     """Bump ``restart_count`` atomically before re-launching a peer."""
     if registry_path is None:
         return
-    try:
-        update_peer_entry(
-            registry_path,
-            peer_name,
-            0,
-            restart_count=new_value,
-            state=STATE_RUNNING,
-        )
-    except (FileNotFoundError, KeyError, OSError) as exc:
-        logger.debug("Could not bump restart_count for %s: %s", peer_name, exc)
+    count = max(1, peer.replica_count)
+    for replica_index in range(count):
+        try:
+            update_peer_entry(
+                registry_path,
+                peer.name,
+                replica_index,
+                restart_count=new_value,
+                state=STATE_RUNNING,
+            )
+        except (FileNotFoundError, KeyError, OSError, IndexError) as exc:
+            logger.debug(
+                "Could not bump restart_count for %s[%d]: %s",
+                peer.name,
+                replica_index,
+                exc,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +449,7 @@ def run_supervisor(
                 outcome = OUTCOME_RESTARTED if count > 0 else OUTCOME_SUCCESS
                 _record_outcome(
                     registry_path,
-                    peer.name,
+                    peer,
                     outcome,
                     exit_code=0,
                     state=STATE_SUCCESS,
@@ -454,7 +475,7 @@ def run_supervisor(
                 if peer.name not in recorded:
                     _record_outcome(
                         registry_path,
-                        peer.name,
+                        peer,
                         OUTCOME_SHUTDOWN_BY_LEADER,
                         exit_code=exit_code,
                         state=STATE_SHUTDOWN_BY_LEADER,
@@ -474,7 +495,7 @@ def run_supervisor(
             if action == "restart":
                 new_count = restart_count.get(peer.name, 0) + 1
                 restart_count[peer.name] = new_count
-                _increment_restart_count(registry_path, peer.name, new_count)
+                _increment_restart_count(registry_path, peer, new_count)
                 logger.info(
                     "Restarting peer %s (attempt %d/%d)",
                     peer.name,
@@ -489,7 +510,7 @@ def run_supervisor(
             if action == "continue":
                 _record_outcome(
                     registry_path,
-                    peer.name,
+                    peer,
                     OUTCOME_CONTINUE_ON_FAILURE,
                     exit_code=exit_code,
                     state=STATE_FAILED,
@@ -504,7 +525,7 @@ def run_supervisor(
             # action == "kill" — fatal for the group.
             _record_outcome(
                 registry_path,
-                peer.name,
+                peer,
                 OUTCOME_FATAL,
                 exit_code=exit_code,
                 state=STATE_FAILED,
@@ -552,14 +573,13 @@ def run_supervisor(
         if name not in recorded:
             _record_outcome(
                 registry_path,
-                name,
+                peer,
                 OUTCOME_NOT_STARTED,
                 exit_code=None,
                 state=STATE_FAILED,
                 restart_count=restart_count.get(name, 0),
                 message="peer never entered Popen",
             )
-            del peer  # silence unused local
 
     return final_exit
 

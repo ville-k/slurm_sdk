@@ -71,10 +71,10 @@ def test_multi_pool_raises_not_implemented():
         _check_phase2_scope(spec)
 
 
-def test_replica_set_raises_not_implemented():
+def test_replica_set_passes_scope_check():
+    # Phase 5 enables replica sets — the scope gate must accept them.
     spec = _spec(Peer.replicas(_a.partial(cfg={}), count=4))
-    with pytest.raises(NotImplementedError, match="Phase 5"):
-        _check_phase2_scope(spec)
+    _check_phase2_scope(spec)
 
 
 def test_restart_policy_passes_scope_check():
