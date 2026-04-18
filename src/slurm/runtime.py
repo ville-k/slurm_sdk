@@ -26,6 +26,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from .parallel.node_info import NodeGroup, NodeInfo
     from .parallel.peer_info import PeerGroup
 
 _DEFAULT_MASTER_PORT = 29500
@@ -122,6 +123,46 @@ class JobContext:
         from .parallel.registry import load_peer_groups
 
         return load_peer_groups(self._registry_path)
+
+    @property
+    def nodes(self) -> "NodeGroup":
+        """Read-only view of every node in the allocation.
+
+        Returns a :class:`~slurm.parallel.node_info.NodeGroup` — see its
+        docstring for the indexing semantics. Integer subscripting
+        (``ctx.nodes[0]``) resolves within the current peer's pool
+        (:attr:`peer_pool`); string subscripting (``ctx.nodes["head"]``)
+        searches every pool for a matching label.
+
+        Outside a parallel allocation (no registry path) the group is
+        empty; callers can still iterate / call :meth:`by_hostname` /
+        :meth:`in_pool` without branching.
+        """
+        if self._registry_path is None:
+            from .parallel.node_info import NodeGroup
+
+            return NodeGroup(_nodes=(), _path=None, current_pool=self.peer_pool)
+        from .parallel.registry import load_node_group
+
+        return load_node_group(self._registry_path, current_pool=self.peer_pool)
+
+    @property
+    def node(self) -> "Optional[NodeInfo]":
+        """The :class:`~slurm.parallel.node_info.NodeInfo` for this process's host.
+
+        Looks up the peer's hostname (either the ``HOSTNAME`` env var or
+        :func:`socket.gethostname`) against :attr:`nodes`. Returns ``None``
+        when the current process isn't running under a parallel allocation
+        or the hostname isn't in the registry (e.g. tests that don't mock
+        the full topology).
+        """
+        group = self.nodes
+        if len(group) == 0:
+            return None
+        import socket
+
+        hostname = os.environ.get("HOSTNAME") or socket.gethostname()
+        return group.by_hostname(hostname)
 
     def announce(self, *, ready: bool = False, **fields: Any) -> None:
         """Publish runtime metadata to the peer registry.

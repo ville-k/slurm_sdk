@@ -23,6 +23,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 if TYPE_CHECKING:
+    from .node_info import NodeGroup
     from .peer_info import PeerGroup
 
 logger = logging.getLogger("slurm.parallel.registry")
@@ -259,6 +260,30 @@ def load_peer_groups(
     return MappingProxyType(groups)
 
 
+def load_node_group(
+    registry_path: "str | Path",
+    *,
+    current_pool: Optional[str] = None,
+) -> "NodeGroup":
+    """Load the node section of ``registry.json`` into a :class:`NodeGroup`.
+
+    Returns an empty :class:`NodeGroup` if the file is missing or unreadable
+    — node discovery must be robust against racing the bootstrap during the
+    first few hundred milliseconds of a peer's life.
+
+    Args:
+        registry_path: Path to ``registry.json``.
+        current_pool: Pool name of the current peer. Passed through so the
+            returned group's ordinal lookup resolves against the right pool.
+
+    Returns:
+        :class:`NodeGroup` populated from the registry's ``nodes`` section.
+    """
+    from .node_info import _load_nodes_from_path
+
+    return _load_nodes_from_path(Path(registry_path), current_pool)
+
+
 def announce_peer_metadata(
     path: "str | Path",
     peer_name: str,
@@ -379,6 +404,7 @@ __all__ = [
     "update_peer_entry",
     "announce_peer_metadata",
     "load_peer_groups",
+    "load_node_group",
     "_RESERVED_ANNOUNCE_KEYS",
     "STATE_PENDING",
     "STATE_READY",

@@ -182,16 +182,46 @@ def _launch_peer(
     at the live registry. We pass the env through ``env=`` (copying the
     supervisor's own environment) rather than relying on shell ``export``
     so the variable propagates through ``srun`` to the remote step.
+
+    When :attr:`PlanPeer.nodelist` is populated, the supervisor injects a
+    ``--nodelist=<host1>,<host2>,...`` flag onto the ``srun`` command so
+    Slurm pins the step to those nodes. Injection happens here (vs at
+    render time) because the bootstrap resolves placement at allocation
+    time when the concrete hostnames are known.
     """
     logger.info("Launching peer %s", peer.name)
-    logger.debug("Peer %s command: %s", peer.name, peer.srun_command_line)
+    cmd = _inject_nodelist(peer.srun_command_line, peer.nodelist)
+    logger.debug("Peer %s command: %s", peer.name, cmd)
     env = os.environ.copy()
     if registry_path is not None:
         env["SLURM_SDK_REGISTRY_PATH"] = str(registry_path)
     return subprocess.Popen(  # nosec B603 - command comes from plan.json written by the SDK
-        ["/bin/bash", "-c", peer.srun_command_line],
+        ["/bin/bash", "-c", cmd],
         env=env,
     )
+
+
+def _inject_nodelist(
+    srun_command_line: str, nodelist: Optional[Tuple[str, ...]]
+) -> str:
+    """Append ``--nodelist=<host1>,<host2>...`` to an ``srun`` invocation.
+
+    Inserts the flag immediately after the leading ``srun`` token so the
+    rest of the command (including ``-- command``) stays untouched. When
+    ``nodelist`` is empty / None, the command is returned verbatim — that
+    path is the common case (unpinned peers).
+    """
+    if not nodelist:
+        return srun_command_line
+    flag = f"--nodelist={','.join(nodelist)}"
+    # Insert right after the first token ("srun"). Using str.split(maxsplit=1)
+    # keeps the rest of the line intact including whitespace-sensitive pieces.
+    head, sep, tail = srun_command_line.partition(" ")
+    if not sep:
+        # Defensive — a bare "srun" with no args; append the flag so the
+        # command still parses even though it's invalid Slurm.
+        return f"{srun_command_line} {flag}"
+    return f"{head} {flag} {tail}"
 
 
 def _exit_code_of(proc: subprocess.Popen) -> int:
