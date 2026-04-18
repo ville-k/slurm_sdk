@@ -20,6 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@task(nodelist=…)` pinning and `@task(nodes=2)` allocation spans
   against the two-node cluster, exercising only the existing
   single-task API
+- Heterogeneous per-peer packaging for `parallel(...)` allocations — each
+  peer can carry its own `@task(packaging=...)` declaration, so a single
+  allocation can mix container images, wheels, and bare-node (`"none"`)
+  steps without restriction. Peers with equivalent packaging configs share
+  one `prepare()` call (dedup keyed on the resolved config, ignoring
+  volatile auto-tags) so a container image is pulled / probed exactly once
+  per unique reference. Each peer's `srun` is wrapped with its own
+  strategy's container directives — a `"none"` peer emits a bare srun even
+  when its neighbours are containerised. `packaging="inherit"` on a peer
+  now clones the leader's packaging (or the first peer's, when there is no
+  leader) at submission time, so an inheriting peer is indistinguishable
+  from a same-image peer after resolution. `packaging="inherit"` on the
+  first peer of a leader-less topology is rejected at validation time
+  (nothing to inherit from)
 - Port reservation at the `@task` decorator — tasks can now declare
   `@task(ports={"rpc": "auto", "metrics": 50051})`. Fixed integer ports pass
   through verbatim; `"auto"` entries trigger an ephemeral-socket

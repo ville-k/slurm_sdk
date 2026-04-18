@@ -56,6 +56,7 @@ def validate_spec(spec: _ParallelSpec) -> None:
     _check_capacity(spec, problems)
     _check_outer_options(spec, problems)
     _check_callback_resolvability(spec, problems)
+    _check_packaging_inheritance(spec, problems)
 
     if problems:
         lines = [f"  • {p}" for p in problems]
@@ -386,6 +387,36 @@ def _check_outer_options(spec: _ParallelSpec, problems: list[str]) -> None:
         problems.append(
             f"grace_period_seconds must be >= 0, got {spec.grace_period_seconds!r}."
         )
+
+
+def _check_packaging_inheritance(spec: _ParallelSpec, problems: list[str]) -> None:
+    """Reject ``packaging="inherit"`` when there is nothing to inherit from.
+
+    The Phase 10 inheritance rule: a peer using ``packaging="inherit"``
+    clones the leader's packaging; when no peer is ``leader=True`` the
+    first-declared peer's packaging becomes the base. An ``"inherit"`` peer
+    that *is* the first peer (and there is no leader) has no source, so the
+    config is unresolvable at submission time.
+    """
+    from ..task import BoundTask
+
+    has_leader = any(peer.leader for peer in spec.peers)
+    first_peer_name = spec.peers[0].resolved_name if spec.peers else None
+
+    for peer in spec.peers:
+        if not isinstance(peer.task, BoundTask):
+            continue
+        pkg = peer.task.task.packaging or {}
+        if pkg.get("type") != "inherit":
+            continue
+        if not has_leader and peer.resolved_name == first_peer_name:
+            problems.append(
+                f'Peer {peer.resolved_name!r} uses packaging="inherit" but '
+                "is the first peer and no peer is marked leader=True — there "
+                "is no source to inherit from. Mark a different peer as "
+                "leader=True, move this peer later in the call, or set an "
+                "explicit packaging= on it."
+            )
 
 
 def _check_callback_resolvability(spec: _ParallelSpec, problems: list[str]) -> None:
