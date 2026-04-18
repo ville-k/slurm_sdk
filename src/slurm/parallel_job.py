@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from .errors import CompositeJobError, PeerFailureError
+from .job import JobSnapshot
 from .parallel.registry import (
     OUTCOME_CONTINUE_ON_FAILURE,
     OUTCOME_NOT_STARTED,
@@ -32,6 +33,7 @@ from .parallel.registry import (
 )
 
 if TYPE_CHECKING:
+    from .array_job import ArrayJob
     from .cluster import Cluster
     from .job import Job
     from .parallel.types import _ParallelSpec
@@ -542,6 +544,183 @@ class ParallelJob:
             if peer.on_failure == "continue":
                 return None
             raise
+
+    def snapshot(
+        self, tail_lines: int = 80
+    ) -> Dict[str, Union[JobSnapshot, List[JobSnapshot]]]:
+        """Capture a per-peer :class:`JobSnapshot` for this allocation.
+
+        The returned dict carries one entry per peer:
+
+        * Singleton peer → ``JobSnapshot`` (the peer's one Job).
+        * Replica peer → ``list[JobSnapshot]`` (one entry per replica, in
+          index order).
+
+        Every snapshot is a point-in-time read of the underlying per-peer
+        :class:`Job`. Because every peer shares the same Slurm job id, the
+        ``state`` / ``exit_code`` / ``is_terminal`` fields will largely
+        agree across peers — the per-peer layer is meaningful for
+        ``stdout_tail`` / ``stderr_tail`` since each peer writes its own
+        step output, and for ``result_path`` accounting.
+
+        Args:
+            tail_lines: Forwarded to each underlying :meth:`Job.snapshot`
+                — the number of trailing stdout/stderr lines each snapshot
+                captures. Defaults to 80.
+
+        Returns:
+            Dict keyed by peer name. Replica peers map to a list of
+            snapshots indexed by replica position.
+        """
+        out: Dict[str, Union[JobSnapshot, List[JobSnapshot]]] = {}
+        for peer in self._spec.peers:
+            name = peer.resolved_name
+            if peer.is_replica_set:
+                replica_jobs = self._peer_replica_jobs.get(name, [])
+                out[name] = [
+                    job.snapshot(tail_lines=tail_lines) for job in replica_jobs
+                ]
+            else:
+                job = self._peer_jobs[name]
+                out[name] = job.snapshot(tail_lines=tail_lines)
+        return out
+
+    @property
+    def leader_result(self) -> Any:
+        """Return the single ``leader=True`` peer's result.
+
+        Shorthand for the common "leader + helpers" pattern — the user
+        only cares about the leader's return value and treats helpers as
+        supporting services whose results are ``None``. Only legal when
+        the allocation has exactly one ``leader=True`` peer.
+
+        Returns:
+            The leader peer's deserialised return value.
+
+        Raises:
+            RuntimeError: If the allocation has zero or more than one
+                ``leader=True`` peer. The error message spells out the
+                actionable fix ("declare one leader" / "use
+                ``get_results()``").
+        """
+        leaders = [peer for peer in self._spec.peers if peer.leader]
+        if not leaders:
+            raise RuntimeError(
+                "ParallelJob.leader_result requires exactly one leader peer, "
+                "but none of the peers declared leader=True. Mark one peer "
+                "with Peer(..., leader=True) or call get_results() to collect "
+                "every peer's return value explicitly."
+            )
+        if len(leaders) > 1:
+            names = ", ".join(p.resolved_name for p in leaders)
+            raise RuntimeError(
+                "ParallelJob.leader_result is ambiguous: multiple leader "
+                f"peers declared (leader=True on {names}). A parallel "
+                "allocation should have at most one leader. Use "
+                "get_results() to collect every peer explicitly."
+            )
+        leader = leaders[0]
+        if leader.is_replica_set:
+            # A replica peer can't be a leader — the spec validator should
+            # have caught this, but belt-and-braces.
+            raise RuntimeError(
+                f"Leader peer {leader.resolved_name!r} is declared as a "
+                "replica set. A leader should be a singleton peer."
+            )
+        return self._peer_jobs[leader.resolved_name].get_result()
+
+    def after(self, *deps: "Job | ArrayJob | ParallelJob") -> "ParallelJob":
+        """Return a new :class:`ParallelJob` that waits for *deps* first.
+
+        Propagates ``#SBATCH --dependency=afterok:<id>[:<id>...]`` onto
+        every hetjob component of the re-submitted allocation so Slurm
+        only schedules the parallel allocation after every upstream job
+        has completed successfully.
+
+        Because :func:`parallel` submits eagerly, ``.after()`` cancels the
+        currently-queued allocation and submits a fresh one with the
+        dependency string wired in. Call ``.after()`` promptly after
+        ``parallel(...)`` — before any peer has started running — so the
+        cancel is a no-op in practice.
+
+        Args:
+            *deps: One or more upstream handles. Accepts :class:`Job`,
+                :class:`ArrayJob`, or :class:`ParallelJob`. ArrayJob is
+                flattened to its per-item Jobs; ParallelJob contributes
+                its base job id (every peer shares it, so one id per
+                allocation suffices).
+
+        Returns:
+            A new :class:`ParallelJob` whose Slurm job id is distinct
+            from the original. The original handle is cancelled.
+
+        Raises:
+            TypeError: If any element of ``deps`` is not a Job /
+                ArrayJob / ParallelJob.
+            RuntimeError: If the cluster is unavailable (shouldn't happen
+                in practice — the original submission required one).
+        """
+        from .array_job import ArrayJob
+        from .job import Job
+
+        if not deps:
+            # ``.after()`` with no args is ambiguous (do you want to
+            # re-submit with no deps? keep the original?). Fail loudly
+            # rather than silently no-op.
+            raise TypeError(
+                "ParallelJob.after() requires at least one upstream Job, "
+                "ArrayJob, or ParallelJob to depend on."
+            )
+
+        dep_ids: List[str] = []
+        for dep in deps:
+            if isinstance(dep, ParallelJob):
+                dep_ids.append(dep.job_id)
+            elif isinstance(dep, ArrayJob):
+                if not dep._submitted:
+                    dep._submit()
+                dep_ids.extend(j.id for j in dep._jobs)
+            elif isinstance(dep, Job):
+                dep_ids.append(dep.id)
+            else:
+                raise TypeError(
+                    "ParallelJob.after() expects Job, ArrayJob, or "
+                    f"ParallelJob arguments, got {type(dep).__name__}"
+                )
+
+        # Cancel the original allocation so we don't leak a second
+        # sbatch. Slurm's scancel on a still-pending job is free; if it
+        # has already started (unlikely for a fresh parallel() call),
+        # the original side-effects are the user's responsibility.
+        try:
+            self.cancel()
+        except Exception:
+            # Cancellation is best-effort — an unreachable scheduler
+            # will surface on the re-submit anyway.
+            pass
+
+        if self.cluster is None:
+            raise RuntimeError(
+                "ParallelJob.after() cannot re-submit because the "
+                "original handle has no cluster reference. This should "
+                "not happen for jobs created via parallel(...)."
+            )
+
+        from ._parallel_submission import submit_parallel_spec
+
+        return submit_parallel_spec(self.cluster, self._spec, dependency_ids=dep_ids)
+
+    def cancel(self) -> bool:
+        """Cancel the allocation via ``scancel``.
+
+        Every peer shares the same Slurm job id, so one scancel tears the
+        whole allocation down. Returns ``True`` on a successful
+        cancellation command, ``False`` if the backend reported a
+        failure.
+        """
+        # All peers share one job id; just call cancel on the first Job.
+        first_job = next(iter(self._peer_jobs.values()))
+        return first_job.cancel()
 
     def __repr__(self) -> str:
         peers = ", ".join(sorted(self._peer_jobs.keys()))
