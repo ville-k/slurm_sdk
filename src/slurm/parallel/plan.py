@@ -32,9 +32,15 @@ class PlanPeer:
         pool: Pool the peer targets — one of :attr:`Plan.pool_names`.
         leader: Whether this peer is a leader. Leader exit (any outcome)
             triggers cascading shutdown of siblings.
-        on_failure: ``"kill"`` or ``"continue"`` in Phase 3. Later phases
-            extend this with ``"restart"`` / ``"callback"``.
-        max_restarts: Reserved for Phase 4. Always 0 in Phase 3.
+        on_failure: ``"kill"`` / ``"continue"`` / ``"restart"`` / ``"callback"``.
+        max_restarts: Maximum restart count for ``on_failure="restart"``.
+            Ignored for other policies.
+        callback: Fully-qualified name of the user's failure callback in
+            ``"module:qualname"`` form, or ``None`` when ``on_failure`` is
+            not ``"callback"``. The supervisor imports and resolves the
+            callable at startup. We use a string because live callables
+            cannot be pickled reliably across the process boundary between
+            the submission host and the batch allocation.
         srun_command_line: The shell command that, when executed under
             ``bash -c``, launches this peer's ``srun`` step. Using a
             pre-rendered string (rather than an argv list) lets the shell
@@ -49,6 +55,7 @@ class PlanPeer:
     on_failure: str
     max_restarts: int
     srun_command_line: str
+    callback: "str | None" = None
 
     def to_dict(self) -> dict:
         return {
@@ -58,6 +65,7 @@ class PlanPeer:
             "on_failure": self.on_failure,
             "max_restarts": self.max_restarts,
             "srun_command_line": self.srun_command_line,
+            "callback": self.callback,
         }
 
     @classmethod
@@ -69,6 +77,7 @@ class PlanPeer:
             on_failure=data["on_failure"],
             max_restarts=int(data.get("max_restarts", 0)),
             srun_command_line=data["srun_command_line"],
+            callback=data.get("callback"),
         )
 
 

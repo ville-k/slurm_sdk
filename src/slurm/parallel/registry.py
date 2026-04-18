@@ -29,6 +29,16 @@ STATE_SHUTTING_DOWN = "shutting_down"
 STATE_SHUTDOWN_BY_LEADER = "shutdown_by_leader"
 STATE_SUCCESS = "success"
 
+# Outcome values recorded by the supervisor once a peer has reached a terminal
+# state. These feed ``ParallelJob.peer_outcomes()`` — see
+# :class:`slurm.parallel_job.PeerOutcome` for user-facing semantics.
+OUTCOME_SUCCESS = "success"
+OUTCOME_CONTINUE_ON_FAILURE = "continue_on_failure"
+OUTCOME_RESTARTED = "restarted"
+OUTCOME_FATAL = "fatal"
+OUTCOME_SHUTDOWN_BY_LEADER = "shutdown_by_leader"
+OUTCOME_NOT_STARTED = "not_started"
+
 
 @dataclass
 class PeerRegistryEntry:
@@ -51,6 +61,9 @@ class PeerRegistryEntry:
     metadata: Dict[str, Any] = field(default_factory=dict)
     state: str = STATE_PENDING
     restart_count: int = 0
+    outcome: Optional[str] = None
+    final_exit_code: Optional[int] = None
+    message: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -66,10 +79,14 @@ class PeerRegistryEntry:
             "metadata": dict(self.metadata),
             "state": self.state,
             "restart_count": self.restart_count,
+            "outcome": self.outcome,
+            "final_exit_code": self.final_exit_code,
+            "message": self.message,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "PeerRegistryEntry":
+        exit_code_raw = data.get("final_exit_code")
         return cls(
             name=data["name"],
             pool=data["pool"],
@@ -83,6 +100,9 @@ class PeerRegistryEntry:
             metadata=dict(data.get("metadata", {})),
             state=data.get("state", STATE_PENDING),
             restart_count=int(data.get("restart_count", 0)),
+            outcome=data.get("outcome"),
+            final_exit_code=int(exit_code_raw) if exit_code_raw is not None else None,
+            message=data.get("message"),
         )
 
 
@@ -158,6 +178,50 @@ def nodes_from_registry(registry: dict) -> Dict[str, NodeRegistryEntry]:
     }
 
 
+def update_peer_entry(
+    path: "str | Path",
+    peer_name: str,
+    replica_index: int = 0,
+    **changes: Any,
+) -> dict:
+    """Atomically read ``registry.json``, update one peer entry, rewrite.
+
+    The registry is the system-of-record for restart counts, outcomes, and
+    final exit codes. When the supervisor changes any of these it must go
+    through this helper so concurrent readers never see a torn write.
+
+    Args:
+        path: Path to ``registry.json``.
+        peer_name: Top-level ``peers[peer_name]`` key.
+        replica_index: Index of the replica entry to update. Defaults to 0
+            (the only entry for single-peer declarations).
+        **changes: Fields to merge into the matching entry's dict. Unknown
+            keys pass through — callers are responsible for using names that
+            match :class:`PeerRegistryEntry`.
+
+    Returns:
+        The full registry dict after the update, for callers that want to
+        avoid a second read.
+    """
+    registry = read_registry(path)
+    peers = registry.setdefault("peers", {})
+    entries = peers.get(peer_name)
+    if not entries:
+        raise KeyError(
+            f"Peer {peer_name!r} not found in registry (known: {sorted(peers.keys())})"
+        )
+    if replica_index < 0 or replica_index >= len(entries):
+        raise IndexError(
+            f"replica_index {replica_index} out of range for peer "
+            f"{peer_name!r} (have {len(entries)} entries)"
+        )
+    entry = dict(entries[replica_index])
+    entry.update(changes)
+    entries[replica_index] = entry
+    write_registry(path, registry)
+    return registry
+
+
 __all__ = [
     "PeerRegistryEntry",
     "NodeRegistryEntry",
@@ -165,6 +229,7 @@ __all__ = [
     "read_registry",
     "peers_from_registry",
     "nodes_from_registry",
+    "update_peer_entry",
     "STATE_PENDING",
     "STATE_READY",
     "STATE_RUNNING",
@@ -172,4 +237,10 @@ __all__ = [
     "STATE_SHUTTING_DOWN",
     "STATE_SHUTDOWN_BY_LEADER",
     "STATE_SUCCESS",
+    "OUTCOME_SUCCESS",
+    "OUTCOME_CONTINUE_ON_FAILURE",
+    "OUTCOME_RESTARTED",
+    "OUTCOME_FATAL",
+    "OUTCOME_SHUTDOWN_BY_LEADER",
+    "OUTCOME_NOT_STARTED",
 ]
