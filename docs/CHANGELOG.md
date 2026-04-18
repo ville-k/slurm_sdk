@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@task(nodelist=…)` pinning and `@task(nodes=2)` allocation spans
   against the two-node cluster, exercising only the existing
   single-task API
+- `parallel(...)` entry point now submits single-pool allocations end-to-end.
+  Each peer runs as its own `srun` step inside one `sbatch` job, with
+  per-peer result files accessible via `job["<peer_name>"].get_result()`
+  and aggregate access via `job.get_results()`
+- `ParallelJob` result type with `__getitem__`, `wait()`, and `get_results()`
+  for retrieving per-peer outputs from `parallel(...)` submissions
+- `JobContext.peer_name` / `JobContext.peer_pool` fields are populated inside
+  peer steps so user code can identify which peer it is running as
+- Runner `--step peer:<name>` dispatch flag for tasks launched inside a
+  `parallel(...)` allocation
 
 ### Fixed
 

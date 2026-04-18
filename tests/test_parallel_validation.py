@@ -52,15 +52,16 @@ def _inference(worker_id: int) -> None:
 def _run_parallel(*peers, **kwargs):
     """Call parallel() and return the TopologyError raised (if any).
 
-    Phase 1's ``parallel()`` raises NotImplementedError only *after* validation
-    passes. So a TopologyError means validation caught something; a
-    NotImplementedError means validation was clean.
+    ``parallel()`` runs validation first, then resolves the active Cluster,
+    then submits. A ``TopologyError`` means validation caught something;
+    anything later (``RuntimeError`` for missing cluster context,
+    ``NotImplementedError`` for scope boundaries) means validation was clean.
     """
     try:
         parallel(*peers, **kwargs)
     except TopologyError as e:
         return e
-    except NotImplementedError:
+    except (NotImplementedError, RuntimeError):
         return None
     raise AssertionError("parallel() returned instead of raising")
 

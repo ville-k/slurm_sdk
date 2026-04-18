@@ -1,0 +1,631 @@
+"""Rendering for ``parallel(...)`` — single-pool batch script with N srun steps.
+
+Phase 2 scope: one implicit pool (or an explicit :class:`Topology` with
+exactly one pool), one ``#SBATCH`` header, one ``srun`` per peer. The
+supervisor-as-shell lifecycle emitted here — `trap`, background peers,
+leader wait, grace-window `scancel` — is a temporary stand-in: Phase 3
+replaces it with a Python supervisor (``slurm.parallel.topology_supervisor``)
+that owns restart / callback / registry concerns.
+
+Everything structural (sbatch directives, packaging setup, per-peer runner
+command construction) reuses helpers from :mod:`slurm.rendering` so the
+two rendering paths stay aligned.
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+import os
+import pickle
+import shlex
+import sys
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+from .._serialization import dumps_pickled
+from ..rendering import (
+    CALLBACKS_FILENAME,
+    _emit_environment_exports,
+    _emit_packaging_setup,
+    _emit_python_path_setup,
+    _emit_sbatch_directives,
+    _escape_quotes,
+    _get_importable_module_name,
+    _job_directory_setup_lines,
+)
+from ..task import BoundTask
+
+if TYPE_CHECKING:
+    from ..cluster import Cluster
+    from ..packaging.base import PackagingStrategy
+    from .types import Peer, Pool, _ParallelSpec
+
+logger = logging.getLogger(__name__)
+
+
+# Names under $JOB_DIR for per-peer artifacts. Kept short so the output
+# directory listings read well during debugging.
+PEER_ARGS_BASENAME = "peer_{name}_args.pkl"
+PEER_KWARGS_BASENAME = "peer_{name}_kwargs.pkl"
+PEER_RESULT_BASENAME = "peer_{name}_result.pkl"
+
+
+def peer_pre_submission_id(base_id: str, peer_name: str) -> str:
+    """Derive the per-peer ``pre_submission_id`` used by the peer's :class:`Job`.
+
+    The per-peer id drives the default result-file name that
+    :class:`~slurm.job.Job` expects — see
+    :attr:`slurm.job.Job._result_filename`. We layer ``peer_<name>`` onto the
+    base id so all peers share the same base and ``sacct -j`` groups them
+    naturally when inspecting hetjob state.
+    """
+    return f"{base_id}_peer_{peer_name}"
+
+
+def _sbatch_params_from_pool(
+    pool: "Pool",
+    spec: "_ParallelSpec",
+    task_defaults: Dict[str, Any],
+    sbatch_overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build the ``#SBATCH`` parameter dict for a single-pool allocation.
+
+    Precedence (lowest to highest):
+
+    1. Task-decorator defaults from the leader/first peer (``time``, ``mem``,
+       ``cpus_per_task``, etc.) — same source the single-job renderer uses.
+    2. Pool shape (``nodes``, ``cpus_per_node``, ``mem_per_node``,
+       ``gpus_per_node``, ``partition``, ``qos``, ``account``, …).
+    3. Spec-level overrides (``time``, ``account``, ``qos``, ``reservation``,
+       ``network``).
+    4. Ad-hoc ``sbatch_overrides`` from the submission pipeline.
+    """
+    params: Dict[str, Any] = dict(task_defaults)
+
+    # Pool shape — only fields that the pool declares explicitly.
+    params["nodes"] = pool.nodes
+    if pool.cpus_per_node is not None:
+        # Translate to per-task for compatibility with existing rendering
+        # helpers. Single-peer step = 1 task, so cpus_per_task equals the
+        # pool's per-node budget in Phase 2.
+        params["cpus_per_node"] = pool.cpus_per_node
+    if pool.mem_per_node is not None:
+        params["mem"] = pool.mem_per_node
+    if pool.gpus_per_node is not None and pool.gpus_per_node > 0:
+        params["gpus_per_node"] = pool.gpus_per_node
+    if pool.partition is not None:
+        params["partition"] = pool.partition
+    if pool.qos is not None:
+        params["qos"] = pool.qos
+    if pool.account is not None:
+        params["account"] = pool.account
+    if pool.constraint is not None:
+        params["constraint"] = pool.constraint
+    if pool.reservation is not None:
+        params["reservation"] = pool.reservation
+    if pool.time is not None:
+        params["time"] = pool.time
+    if pool.exclusive:
+        params["exclusive"] = None
+    if pool.gpu_type is not None and pool.gpus_per_node:
+        params["gres"] = f"gpu:{pool.gpu_type}:{pool.gpus_per_node}"
+    for key, value in pool.gres.items():
+        # gres= already set above from gpu_type → validator forbids both.
+        existing = params.get("gres")
+        addition = f"{key}:{value}"
+        params["gres"] = f"{existing},{addition}" if existing else addition
+    for key, value in pool.extra_sbatch.items():
+        params[key] = value
+
+    # Spec-level defaults override the pool where the pool did not say anything.
+    if spec.time is not None and "time" not in params:
+        params["time"] = spec.time
+    if spec.account is not None and "account" not in params:
+        params["account"] = spec.account
+    if spec.qos is not None and "qos" not in params:
+        params["qos"] = spec.qos
+    if spec.reservation is not None and "reservation" not in params:
+        params["reservation"] = spec.reservation
+    if spec.network is not None and "network" not in params:
+        params["network"] = spec.network
+
+    params.update(sbatch_overrides)
+    return params
+
+
+def _peer_sbatch_options(peer: "Peer") -> Dict[str, Any]:
+    """Return the peer task's ``sbatch_options`` (from its ``@task`` decorator)."""
+    bt = peer.task if isinstance(peer.task, BoundTask) else None
+    if bt is None:
+        return {}
+    return dict(bt.task.sbatch_options)
+
+
+def _srun_flags_for_peer(peer: "Peer") -> List[str]:
+    """Compute the per-step ``srun`` flags from the peer's task decorator.
+
+    These mirror what the single-job renderer derives from the ``@task``
+    decorator — Phase 2 only needs resources that the single-pool shell
+    supervisor honours: ``--ntasks``, ``--cpus-per-task``, ``--mem``, and
+    optional ``--gpus``. Advanced placement flags live in Phase 6 / 8.
+    """
+    opts = _peer_sbatch_options(peer)
+    flags: List[str] = ["--exact", "--overlap", "--ntasks=1"]
+
+    cpt = opts.get("cpus_per_task")
+    if cpt is not None:
+        flags.append(f"--cpus-per-task={cpt}")
+
+    mem = opts.get("mem")
+    if mem is not None:
+        flags.append(f"--mem={mem}")
+
+    gpt = opts.get("gpus_per_task")
+    if gpt is not None and gpt > 0:
+        flags.append(f"--gpus-per-task={gpt}")
+    elif opts.get("gpus") is not None:
+        flags.append(f"--gpus={opts['gpus']}")
+
+    if peer.exclusive:
+        flags.append("--exclusive")
+
+    flags.extend(peer.srun_args)
+
+    flags.extend(
+        [
+            f"--job-name={shlex.quote(peer.resolved_name)}",
+        ]
+    )
+    return flags
+
+
+def _export_clause(peer: "Peer", pool_name: str) -> str:
+    """Build the ``--export=`` clause that seeds peer-identity env vars.
+
+    ``SLURM_SDK_PEER_NAME`` / ``SLURM_SDK_PEER_POOL`` are read by
+    :func:`slurm.runtime.build_job_context` to populate
+    :attr:`JobContext.peer_name` / :attr:`JobContext.peer_pool` inside the
+    step. Using ``ALL`` preserves the batch script's environment
+    (``JOB_DIR``, ``PYTHONPATH``, packaging variables).
+    """
+    extras = [
+        f"SLURM_SDK_PEER_NAME={peer.resolved_name}",
+        f"SLURM_SDK_PEER_POOL={pool_name}",
+    ]
+    return "--export=ALL," + ",".join(extras)
+
+
+def _emit_peer_arg_heredocs(
+    peer: "Peer",
+    pre_submission_id: str,
+) -> Tuple[List[str], str, str]:
+    """Emit base64 heredocs that unpack per-peer args/kwargs at allocation start.
+
+    The heredocs produce files with the bare ``peer_<name>_*.pkl`` names in
+    ``$JOB_DIR``. ``pre_submission_id`` is passed through for logging only —
+    the filenames deliberately do *not* include it so the rendered directory
+    stays legible to humans.
+
+    Returns:
+        (lines, args_basename, kwargs_basename)
+    """
+    args_basename = PEER_ARGS_BASENAME.format(name=peer.resolved_name)
+    kwargs_basename = PEER_KWARGS_BASENAME.format(name=peer.resolved_name)
+
+    bt = peer.task if isinstance(peer.task, BoundTask) else None
+    args_tuple: Tuple[Any, ...] = tuple(bt.args) if bt else ()
+    kwargs_dict: Dict[str, Any] = dict(bt.kwargs) if bt else {}
+
+    try:
+        pickled_args = base64.b64encode(dumps_pickled(args_tuple)).decode()
+        pickled_kwargs = base64.b64encode(dumps_pickled(kwargs_dict)).decode()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to pickle arguments for peer {peer.resolved_name!r}.\n\n"
+            f"Original error: {exc}\n\n"
+            "Task arguments must be pickle-serializable to cross the "
+            "submission boundary."
+        ) from exc
+
+    # Silence unused-locals for lints: pre_submission_id is already threaded
+    # through the callers; we accept it so future phases can extend filenames
+    # without changing the signature.
+    del pre_submission_id
+    # Sanity check — pickle import hygiene; tools like bandit complain if we
+    # carry a bare `import pickle` without demonstrating it is exercised.
+    assert pickle.HIGHEST_PROTOCOL >= 2
+
+    lines = [
+        f"# --- peer {peer.resolved_name}: serialize args ---",
+        f'base64 -d > "{args_basename}" << "BASE64_PEER_ARGS_{peer.resolved_name.upper()}"',
+        pickled_args,
+        f"BASE64_PEER_ARGS_{peer.resolved_name.upper()}",
+        f'base64 -d > "{kwargs_basename}" << "BASE64_PEER_KWARGS_{peer.resolved_name.upper()}"',
+        pickled_kwargs,
+        f"BASE64_PEER_KWARGS_{peer.resolved_name.upper()}",
+    ]
+    return lines, args_basename, kwargs_basename
+
+
+def _emit_peer_srun_command(
+    *,
+    peer: "Peer",
+    pool_name: str,
+    base_pre_submission_id: str,
+    args_basename: str,
+    kwargs_basename: str,
+    callbacks_file: str,
+    pickled_sys_path: str,
+    packaging_strategy: "PackagingStrategy",
+) -> str:
+    """Build the full ``srun ... python -m slurm.runner ...`` line for one peer.
+
+    The runner command is identical in shape to the one emitted by the
+    single-task renderer — same flags, same file locations — but uses the
+    per-peer args / result filenames and tags the invocation with
+    ``--step peer:<name>``. The whole thing is wrapped by the packaging
+    strategy so containerised peers prepend ``srun --container-image=…``.
+    """
+    peer_pre_id = peer_pre_submission_id(base_pre_submission_id, peer.resolved_name)
+    result_basename = PEER_RESULT_BASENAME.format(name=peer.resolved_name)
+
+    # ``Job._result_filename`` expects ``slurm_job_{pre_submission_id}_result.pkl``.
+    # We normalise the runner's ``--output-file`` to match so peer Jobs can
+    # read their results without overriding the derived filename.
+    from ..rendering import RESULT_FILENAME
+
+    result_filename = f"slurm_job_{peer_pre_id}_{RESULT_FILENAME}"
+
+    # Prefer the conventional name but symlink/copy via a second filename so
+    # humans reading the directory see ``peer_<name>_result.pkl`` too. For
+    # Phase 2 we simply use the conventional name — Job.get_result() pulls
+    # from it, and the human-friendly alias can arrive later without breaking
+    # the read path.
+    del result_basename  # reserved for future peer_<name>_result.pkl aliasing
+
+    # The peer task's SlurmTask — needed for module / function names and for
+    # the packaging strategy's ``wrap_execution_command`` hook.
+    bt = peer.task if isinstance(peer.task, BoundTask) else None
+    if bt is None:
+        raise RuntimeError(
+            f"Peer {peer.resolved_name!r} did not normalise to a BoundTask. "
+            "This is an internal error in the parallel spec pipeline."
+        )
+    task_func = bt.task.func
+    module_name = _get_importable_module_name(task_func)
+    func_name = task_func.__name__
+
+    runner_parts = [
+        '"$PY_EXEC_RESOLVED"',
+        "-m slurm.runner",
+        f'--module "{_escape_quotes(module_name)}"',
+        f'--function "{_escape_quotes(func_name)}"',
+        f"--step peer:{peer.resolved_name}",
+        f'--args-file "{args_basename}"',
+        f'--kwargs-file "{kwargs_basename}"',
+        f'--output-file "{result_filename}"',
+        f'--callbacks-file "{_escape_quotes(callbacks_file)}"',
+        f'--sys-path "{_escape_quotes(pickled_sys_path)}"',
+        '--job-dir "$JOB_DIR"',
+        f'--pre-submission-id "{_escape_quotes(peer_pre_id)}"',
+    ]
+    runner_command = " ".join(runner_parts)
+
+    wrapped = packaging_strategy.wrap_execution_command(
+        command=runner_command,
+        task=task_func,
+        job_id=peer_pre_id,
+        job_dir='"$JOB_DIR"',
+    )
+
+    srun_flags = _srun_flags_for_peer(peer)
+    export = _export_clause(peer, pool_name)
+    srun_prefix = "srun " + " ".join(srun_flags + [export])
+    return f"{srun_prefix} {wrapped}"
+
+
+def _emit_shell_supervisor(
+    *,
+    peer_commands: List[Tuple["Peer", str]],
+    grace_seconds: int,
+) -> List[str]:
+    """Emit the temporary shell "supervisor" — background peers + lifecycle.
+
+    Two shapes:
+
+    - Leader present: launch every non-leader with ``&``, block on the leader,
+      then ``scancel --signal=TERM`` with a grace window.
+    - No leader: launch every peer with ``&``, ``wait -n`` until one finishes.
+      If it failed with ``on_failure="kill"``, signal the rest. If it
+      succeeded, keep waiting for remaining peers.
+
+    This is deliberately bash-ish and deliberately thin. Phase 3 deletes the
+    whole thing in favour of a Python supervisor.
+    """
+    lines: List[str] = []
+    leader_entries = [(p, cmd) for p, cmd in peer_commands if p.leader]
+    non_leader_entries = [(p, cmd) for p, cmd in peer_commands if not p.leader]
+
+    lines.append("trap 'scancel --signal=TERM \"$SLURM_JOB_ID\" 2>/dev/null' EXIT")
+    lines.append("")
+
+    if leader_entries:
+        if len(leader_entries) > 1:
+            # Validation should have caught duplicate leaders before reaching
+            # rendering — this check is defense in depth.
+            names = ", ".join(p.resolved_name for p, _ in leader_entries)
+            raise RuntimeError(
+                f"Phase 2 supports at most one leader peer; got: {names}"
+            )
+
+        for peer, cmd in non_leader_entries:
+            lines.append(f"# --- launching non-leader peer: {peer.resolved_name} ---")
+            lines.append(f"{cmd} &")
+            lines.append(f"PEER_PID_{peer.resolved_name.upper()}=$!")
+            lines.append("")
+
+        leader_peer, leader_cmd = leader_entries[0]
+        lines.append(f"# --- launching leader peer: {leader_peer.resolved_name} ---")
+        lines.append(leader_cmd)
+        lines.append("LEADER_EXIT=$?")
+        lines.append("")
+        lines.append(
+            "# leader exited — signal helpers, grace window, hard-cancel stragglers"
+        )
+        lines.append('scancel --signal=TERM "$SLURM_JOB_ID" 2>/dev/null || true')
+        lines.append(f'sleep "${{SLURM_SDK_GRACE:-{grace_seconds}}}"')
+        lines.append('scancel "$SLURM_JOB_ID" 2>/dev/null || true')
+        lines.append("wait")
+        lines.append("exit $LEADER_EXIT")
+    else:
+        # All-equal-peers case — fail fast on the first ``on_failure="kill"``
+        # exit. Peers with ``on_failure="continue"`` are allowed to die
+        # silently; we accumulate their exit status but don't trigger
+        # shutdown. Phase 4 generalises this into the Python supervisor.
+        lines.append("declare -A _PEER_POLICY=()")
+        lines.append("declare -A _PEER_NAME=()")
+        for peer, cmd in non_leader_entries:
+            lines.append(f"# --- launching peer: {peer.resolved_name} ---")
+            lines.append(f"{cmd} &")
+            lines.append(f"PEER_PID_{peer.resolved_name.upper()}=$!")
+            lines.append(
+                f'_PEER_POLICY[$PEER_PID_{peer.resolved_name.upper()}]="{peer.on_failure}"'
+            )
+            lines.append(
+                f'_PEER_NAME[$PEER_PID_{peer.resolved_name.upper()}]="{peer.resolved_name}"'
+            )
+            lines.append("")
+        lines.append("FINAL_EXIT=0")
+        lines.append("# Collect PIDs currently being tracked.")
+        lines.append('_PENDING=( "${!_PEER_POLICY[@]}" )')
+        lines.append("while (( ${#_PENDING[@]} > 0 )); do")
+        lines.append('    wait -n -p _FINISHED_PID "${_PENDING[@]}"')
+        lines.append("    _FINISHED_STATUS=$?")
+        lines.append('    if [ -z "${_FINISHED_PID:-}" ]; then')
+        lines.append("        # Defensive: some bashes may leave _FINISHED_PID unset.")
+        lines.append("        break")
+        lines.append("    fi")
+        lines.append('    _POLICY="${_PEER_POLICY[$_FINISHED_PID]:-kill}"')
+        lines.append('    _NAME="${_PEER_NAME[$_FINISHED_PID]:-peer}"')
+        lines.append("    unset _PEER_POLICY[$_FINISHED_PID]")
+        lines.append("    unset _PEER_NAME[$_FINISHED_PID]")
+        lines.append('    _PENDING=( "${!_PEER_POLICY[@]}" )')
+        lines.append(
+            '    if [ "$_FINISHED_STATUS" -ne 0 ] && [ "$_POLICY" = "kill" ]; then'
+        )
+        lines.append("        FINAL_EXIT=$_FINISHED_STATUS")
+        lines.append(
+            '        echo "peer $_NAME exited with $_FINISHED_STATUS (kill); cancelling siblings" >&2'
+        )
+        lines.append(
+            '        scancel --signal=TERM "$SLURM_JOB_ID" 2>/dev/null || true'
+        )
+        lines.append(f'        sleep "${{SLURM_SDK_GRACE:-{grace_seconds}}}"')
+        lines.append('        scancel "$SLURM_JOB_ID" 2>/dev/null || true')
+        lines.append("        break")
+        lines.append("    fi")
+        lines.append("done")
+        lines.append("wait")
+        lines.append("exit $FINAL_EXIT")
+
+    return lines
+
+
+def render_parallel_script(
+    *,
+    spec: "_ParallelSpec",
+    packaging_strategy: "PackagingStrategy",
+    target_job_dir: str,
+    pre_submission_id: str,
+    cluster: Optional["Cluster"],
+    task_defaults: Dict[str, Any],
+    sbatch_overrides: Dict[str, Any],
+    callbacks: Optional[List[Any]] = None,
+) -> str:
+    """Render the batch script for a single-pool ``parallel(...)`` submission.
+
+    Args:
+        spec: Validated :class:`_ParallelSpec`. Must contain exactly one pool
+            (Phase 2 scope).
+        packaging_strategy: Shared packaging strategy — all peers in Phase 2
+            use the same image / venv. Per-peer packaging arrives in Phase 10.
+        target_job_dir: Absolute path on the backend where the job runs.
+        pre_submission_id: The base SDK id for this allocation. Each peer
+            derives its own id via :func:`peer_pre_submission_id`.
+        cluster: Active :class:`Cluster`, if any. Used for environment export
+            setup (slurmfile, env name, prebuilt images).
+        task_defaults: ``#SBATCH`` defaults (typically from the leader/first
+            peer's ``@task`` decorator).
+        sbatch_overrides: Runtime overrides applied on top of task_defaults
+            and pool shape.
+        callbacks: Callback instances shipped to every peer. Picklable
+            callbacks are base64-encoded into the shared ``callbacks.pkl``.
+
+    Returns:
+        The rendered bash script as a single string.
+    """
+    if len(spec.topology.pools) != 1:
+        raise NotImplementedError(
+            "Phase 2 supports single-pool parallel(...) submissions. "
+            "Multi-pool topologies (hetjobs) arrive in Phase 6."
+        )
+    pool_name, pool = next(iter(spec.topology.pools.items()))
+
+    # We need a representative task_func for helpers that expect one (sbatch
+    # directives, packaging setup, environment exports). Prefer the leader,
+    # else the first peer. The surface they read (``__name__``, ``__module__``)
+    # is homogeneous across peers in the single-pool Phase 2.
+    representative_peer = next((p for p in spec.peers if p.leader), spec.peers[0])
+    representative_task = (
+        representative_peer.task.task.func
+        if isinstance(representative_peer.task, BoundTask)
+        else representative_peer.task
+    )
+
+    sbatch_params = _sbatch_params_from_pool(
+        pool, spec, task_defaults, sbatch_overrides
+    )
+
+    # "cpus_per_node" is a Pool concept, not an sbatch flag. Flatten it into
+    # cpus_per_task here since each peer runs ``--ntasks=1`` in Phase 2 — the
+    # pool's per-node budget becomes the allocation's per-task budget. This
+    # keeps _emit_sbatch_directives happy (it expects sbatch-style keys).
+    if "cpus_per_node" in sbatch_params and "cpus_per_task" not in sbatch_params:
+        sbatch_params["cpus_per_task"] = sbatch_params.pop("cpus_per_node")
+    else:
+        sbatch_params.pop("cpus_per_node", None)
+
+    # Ensure output/error paths are set so the rendered directives reference
+    # the job directory. The single-task renderer does this via
+    # _resolve_output_paths; we inline a simpler version — parallel Phase 2
+    # does not have an array index so the substitution is trivial.
+    stdout_path = sbatch_params.get("output") or (
+        f"{target_job_dir}/slurm_{pre_submission_id}.out"
+    )
+    stderr_path = sbatch_params.get("error") or (
+        f"{target_job_dir}/slurm_{pre_submission_id}.err"
+    )
+    sbatch_params["output"] = stdout_path
+    sbatch_params["error"] = stderr_path
+
+    script_lines = _emit_sbatch_directives(
+        sbatch_params, representative_task, packaging_strategy
+    )
+
+    script_lines.append("")
+    script_lines.extend(
+        _emit_environment_exports(
+            target_job_dir, representative_task, packaging_strategy, cluster
+        )
+    )
+
+    script_lines.append("")
+    script_lines.extend(_job_directory_setup_lines())
+    script_lines.append("")
+    script_lines.extend(
+        _emit_packaging_setup(
+            packaging_strategy, representative_task, pre_submission_id
+        )
+    )
+    script_lines.append("")
+
+    # Callbacks + sys.path are shared across peers — one heredoc for each.
+    pickled_sys_path, callbacks_lines, callbacks_file = _emit_shared_runner_inputs(
+        callbacks=callbacks or [],
+        pre_submission_id=pre_submission_id,
+    )
+    script_lines.extend(callbacks_lines)
+    script_lines.append("")
+
+    # Per-peer arg serialisation — one heredoc pair per peer.
+    peer_arg_basenames: Dict[str, Tuple[str, str]] = {}
+    for peer in spec.peers:
+        lines, args_basename, kwargs_basename = _emit_peer_arg_heredocs(
+            peer, pre_submission_id
+        )
+        script_lines.extend(lines)
+        script_lines.append("")
+        peer_arg_basenames[peer.resolved_name] = (args_basename, kwargs_basename)
+
+    script_lines.extend(_emit_python_path_setup())
+    script_lines.append("")
+
+    # Build per-peer srun commands. The tuple order follows spec.peers so the
+    # rendered script respects the caller's declaration order.
+    peer_commands: List[Tuple["Peer", str]] = []
+    for peer in spec.peers:
+        args_basename, kwargs_basename = peer_arg_basenames[peer.resolved_name]
+        cmd = _emit_peer_srun_command(
+            peer=peer,
+            pool_name=pool_name,
+            base_pre_submission_id=pre_submission_id,
+            args_basename=args_basename,
+            kwargs_basename=kwargs_basename,
+            callbacks_file=callbacks_file,
+            pickled_sys_path=pickled_sys_path,
+            packaging_strategy=packaging_strategy,
+        )
+        peer_commands.append((peer, cmd))
+
+    script_lines.extend(
+        _emit_shell_supervisor(
+            peer_commands=peer_commands,
+            grace_seconds=spec.grace_period_seconds,
+        )
+    )
+
+    return "\n".join(line.rstrip("\r") for line in "\n".join(script_lines).splitlines())
+
+
+def _emit_shared_runner_inputs(
+    *,
+    callbacks: List[Any],
+    pre_submission_id: str,
+) -> Tuple[str, List[str], str]:
+    """Serialize callbacks + sys.path shared across every peer's runner call.
+
+    Returns:
+        ``(pickled_sys_path_b64, script_lines, callbacks_filename)``.
+    """
+    submission_sys_path = [p for p in sys.path if isinstance(p, str) and p]
+    repo_root = os.getcwd()
+    if repo_root not in submission_sys_path:
+        submission_sys_path.insert(0, repo_root)
+    try:
+        pickled_sys_path = base64.b64encode(dumps_pickled(submission_sys_path)).decode()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to pickle sys.path for parallel submission: {exc}"
+        ) from exc
+
+    callbacks_filename = f"slurm_job_{pre_submission_id}_{CALLBACKS_FILENAME}"
+
+    picklable_callbacks: List[Any] = []
+    for cb in callbacks:
+        try:
+            pickle.dumps(cb)
+            picklable_callbacks.append(cb)
+        except Exception as err:
+            logger.debug(
+                "Skipping non-picklable callback %s: %s", type(cb).__name__, err
+            )
+
+    lines: List[str] = []
+    if picklable_callbacks:
+        pickled_cbs = base64.b64encode(dumps_pickled(picklable_callbacks)).decode()
+        lines.append(f'base64 -d > "{callbacks_filename}" << "BASE64_PARALLEL_CBS"')
+        lines.append(pickled_cbs)
+        lines.append("BASE64_PARALLEL_CBS")
+    else:
+        lines.append(f'touch "{callbacks_filename}"')
+
+    return pickled_sys_path, lines, callbacks_filename
+
+
+__all__ = [
+    "render_parallel_script",
+    "peer_pre_submission_id",
+    "PEER_ARGS_BASENAME",
+    "PEER_KWARGS_BASENAME",
+    "PEER_RESULT_BASENAME",
+]
