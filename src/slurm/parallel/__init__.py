@@ -259,9 +259,10 @@ def parallel(
     Raises:
         TopologyError: If any peer/pool/placement/resource constraint is
             violated. The error aggregates every problem found.
-        NotImplementedError: For now — submission arrives in the next
-            implementation phase. Validation is wired and tested; the
-            end-to-end submission flow comes next.
+        NotImplementedError: If the submission uses functionality that ships
+            in a later phase (replica sets, multi-pool topologies, per-peer
+            packaging, restart/callback failure policies, named-node placement).
+        RuntimeError: If called outside a :class:`Cluster` context.
 
     Example:
         Leader + sidecars:
@@ -296,11 +297,11 @@ def parallel(
     )
     validate_spec(spec)
 
-    # Submission is wired in the next implementation phase. The spec is
-    # stashed on the error so tests / debuggers can inspect it if needed.
-    raise NotImplementedError(
-        "parallel() submission is wired in the next implementation phase. "
-        "Validation succeeded for the spec; submission machinery "
-        "(rendering, supervisor, runner dispatch) arrives in Phase 2. "
-        "For now, use _build_spec(...) + validate_spec(...) directly in tests."
-    )
+    # Resolve the active Cluster the same way @task-decorated calls do. This
+    # keeps the user-facing contract consistent: ``with Cluster(...) as c:``
+    # is the entry path for both ``train(cfg)`` and ``parallel(train, metrics)``.
+    from ..context import _resolve_cluster
+    from .._parallel_submission import submit_parallel_spec
+
+    cluster = _resolve_cluster("parallel")
+    return submit_parallel_spec(cluster, spec)

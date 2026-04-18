@@ -51,10 +51,33 @@ class RunnerArgs:
     stderr_path: Optional[str] = None
     pre_submission_id: Optional[str] = None
 
+    # Parallel-step dispatch. ``step`` is a selector like ``"peer:<name>"`` or
+    # (future) ``"peer:<name>:by-taskid"``. For Phase 2 it is informational —
+    # args come from ``--args-file`` / ``--kwargs-file`` just like regular jobs,
+    # so the peer path reuses :func:`_load_regular_task_arguments`.
+    step: Optional[str] = None
+
     @property
     def is_array_job(self) -> bool:
         """Check if this is an array job based on arguments."""
         return self.array_index is not None
+
+    @property
+    def is_peer_step(self) -> bool:
+        """Check if this invocation runs a peer step of a ``parallel(...)`` job."""
+        return self.step is not None and self.step.startswith("peer:")
+
+    @property
+    def peer_name(self) -> Optional[str]:
+        """Return the peer name parsed from ``--step peer:<name>[:...]``."""
+        if not self.is_peer_step:
+            return None
+        # step format: "peer:<name>" or "peer:<name>:by-taskid" (Phase 5+)
+        assert self.step is not None
+        parts = self.step.split(":", 2)
+        if len(parts) >= 2 and parts[1]:
+            return parts[1]
+        return None
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
@@ -107,6 +130,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--pre-submission-id",
         help="SDK pre-submission identifier associated with this run",
     )
+    parser.add_argument(
+        "--step",
+        help=(
+            "Parallel-step selector, e.g. 'peer:<name>'. Set by the "
+            "supervisor for steps inside a parallel(...) allocation."
+        ),
+    )
 
     return parser
 
@@ -138,6 +168,7 @@ def parse_args(argv: Optional[list[str]] = None) -> RunnerArgs:
         stdout_path=args.stdout_path,
         stderr_path=args.stderr_path,
         pre_submission_id=args.pre_submission_id,
+        step=args.step,
     )
 
 
@@ -167,6 +198,17 @@ def log_startup_info(args: RunnerArgs) -> None:
         logger.debug("Module=%s, Function=%s", args.module, args.function)
         logger.debug("Array index=%s", args.array_index)
         logger.debug("Array items file=%s", args.array_items_file)
+        logger.debug("Output file=%s", args.output_file)
+        logger.debug("Callbacks file=%s", args.callbacks_file)
+    elif args.is_peer_step:
+        logger.info(
+            "Starting peer step execution (step=%s, peer=%s)",
+            args.step,
+            args.peer_name,
+        )
+        logger.debug("Module=%s, Function=%s", args.module, args.function)
+        logger.debug("Args file=%s", args.args_file)
+        logger.debug("Kwargs file=%s", args.kwargs_file)
         logger.debug("Output file=%s", args.output_file)
         logger.debug("Callbacks file=%s", args.callbacks_file)
     else:
@@ -214,6 +256,8 @@ def load_task_arguments(
     """
     if args.is_array_job:
         return _load_array_task_arguments(args, job_dir)
+    elif args.is_peer_step:
+        return _load_peer_task_arguments(args, job_dir)
     else:
         return _load_regular_task_arguments(args)
 
@@ -292,6 +336,54 @@ def _load_array_task_arguments(
     return task_args, task_kwargs
 
 
+def _load_peer_task_arguments(
+    args: RunnerArgs, job_dir: Optional[str] = None
+) -> Tuple[tuple, dict]:
+    """Load arguments for a peer step inside a ``parallel(...)`` allocation.
+
+    For Phase 2, peer args are serialized to per-peer files and passed via the
+    standard ``--args-file`` / ``--kwargs-file`` flags, so this helper reuses
+    :func:`_load_regular_task_arguments` — it exists so the dispatch branch in
+    :func:`load_task_arguments` matches the plan and to give later phases
+    (by-taskid replica loading, registry lookup) an obvious hook.
+
+    Paths are resolved relative to ``job_dir`` when not absolute, mirroring the
+    array-item helper.
+
+    Args:
+        args: Parsed runner arguments.
+        job_dir: Job directory for resolving relative paths.
+
+    Returns:
+        Tuple of (task_args, task_kwargs).
+    """
+    from .._serialization import read_pickled
+
+    if args.args_file is None or args.kwargs_file is None:
+        raise RuntimeError(
+            "Peer step invocation is missing --args-file or --kwargs-file. "
+            "This is an internal error in the parallel rendering pipeline."
+        )
+
+    args_path = args.args_file
+    kwargs_path = args.kwargs_file
+    if job_dir:
+        if not os.path.isabs(args_path):
+            args_path = os.path.join(job_dir, args_path)
+        if not os.path.isabs(kwargs_path):
+            kwargs_path = os.path.join(job_dir, kwargs_path)
+
+    logger.debug(
+        "Loading peer args from %s, kwargs from %s (peer=%s)",
+        args_path,
+        kwargs_path,
+        args.peer_name,
+    )
+    task_args = cast(tuple, read_pickled(args_path))
+    task_kwargs = cast(dict, read_pickled(kwargs_path))
+    return task_args, task_kwargs
+
+
 def load_callbacks(callbacks_file: str) -> List[BaseCallback]:
     """Load callbacks from a pickled file.
 
@@ -335,4 +427,5 @@ __all__ = [
     "restore_sys_path",
     "load_task_arguments",
     "load_callbacks",
+    "_load_peer_task_arguments",
 ]

@@ -61,6 +61,12 @@ class JobContext:
     )
     output_dir: Optional[Path] = None
 
+    # Topology identity — populated for peers launched via ``parallel(...)``.
+    # Richer discovery surfaces (``peers``, ``nodes``, ``shared_dir``,
+    # ``shutdown_requested``, ``announce()``) arrive in later phases.
+    peer_name: Optional[str] = None
+    peer_pool: Optional[str] = None
+
     def torch_distributed_env(
         self, *, master_port: Optional[int] = None
     ) -> Dict[str, str]:
@@ -150,6 +156,9 @@ def build_job_context(env: Optional[Dict[str, str]] = None) -> JobContext:
     if job_dir_str:
         output_dir = Path(job_dir_str)
 
+    peer_name = env_map.get("SLURM_SDK_PEER_NAME") or None
+    peer_pool = env_map.get("SLURM_SDK_PEER_POOL") or None
+
     return JobContext(
         job_id=job_id,
         step_id=step_id,
@@ -165,6 +174,8 @@ def build_job_context(env: Optional[Dict[str, str]] = None) -> JobContext:
         master_port=master_port,
         environment=slurm_environment,
         output_dir=output_dir,
+        peer_name=peer_name,
+        peer_pool=peer_pool,
     )
 
 
