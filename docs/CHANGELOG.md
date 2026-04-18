@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   peer steps so user code can identify which peer it is running as
 - Runner `--step peer:<name>` dispatch flag for tasks launched inside a
   `parallel(...)` allocation
+- Python supervisor (`slurm.parallel.topology_supervisor`) owns the lifecycle
+  of a `parallel(...)` allocation — launches each peer's `srun`, applies
+  `on_failure="kill"` / `"continue"` policies, propagates leader exits to
+  siblings with a configurable grace window before hard-kill
+- Bootstrap (`slurm.parallel.topology_bootstrap`) resolves hostnames and
+  writes a `registry.json` skeleton at allocation start for downstream
+  service-discovery APIs (expanded in later phases)
 
 ### Fixed
 

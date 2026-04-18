@@ -121,8 +121,26 @@ def test_parallel_submits_and_returns_parallel_job(cluster):
 
     # The rendered script was actually handed to the backend and persisted.
     assert backend.submitted_script is not None
-    assert "--step peer:_train" in backend.submitted_script
-    assert "--step peer:_metrics" in backend.submitted_script
+    # Bootstrap + supervisor entrypoints replace the inline shell supervisor.
+    assert "slurm.parallel.topology_bootstrap" in backend.submitted_script
+    assert "slurm.parallel.topology_supervisor" in backend.submitted_script
+    # Per-peer srun commands live inside the base64-encoded plan.json heredoc.
+    # Decode and check that each peer is addressed by --step peer:<name>.
+    import base64 as _b64
+    import re as _re
+    from slurm.parallel.plan import Plan
+
+    m = _re.search(
+        r'base64 -d > "plan\.json" << "BASE64_PARALLEL_PLAN"\n(.*?)\nBASE64_PARALLEL_PLAN',
+        backend.submitted_script,
+        _re.DOTALL,
+    )
+    assert m is not None
+    plan = Plan.from_json(_b64.b64decode(m.group(1).strip()).decode("utf-8"))
+    names = sorted(p.name for p in plan.peers)
+    assert names == ["_metrics", "_train"]
+    for peer in plan.peers:
+        assert f"--step peer:{peer.name}" in peer.srun_command_line
 
 
 def test_parallel_leader_result_routing(cluster):

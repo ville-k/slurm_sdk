@@ -1,11 +1,10 @@
 """Rendering for ``parallel(...)`` — single-pool batch script with N srun steps.
 
-Phase 2 scope: one implicit pool (or an explicit :class:`Topology` with
-exactly one pool), one ``#SBATCH`` header, one ``srun`` per peer. The
-supervisor-as-shell lifecycle emitted here — `trap`, background peers,
-leader wait, grace-window `scancel` — is a temporary stand-in: Phase 3
-replaces it with a Python supervisor (``slurm.parallel.topology_supervisor``)
-that owns restart / callback / registry concerns.
+Single implicit pool (or an explicit :class:`Topology` with exactly one
+pool), one ``#SBATCH`` header, one ``srun`` per peer. The lifecycle is
+owned by a Python supervisor (:mod:`slurm.parallel.topology_supervisor`)
+invoked at the end of the rendered script; the per-peer ``srun`` commands
+are handed to it via a ``plan.json`` file emitted as a base64 heredoc.
 
 Everything structural (sbatch directives, packaging setup, per-peer runner
 command construction) reuses helpers from :mod:`slurm.rendering` so the
@@ -34,6 +33,7 @@ from ..rendering import (
     _job_directory_setup_lines,
 )
 from ..task import BoundTask
+from .plan import Plan, PlanPeer
 
 if TYPE_CHECKING:
     from ..cluster import Cluster
@@ -324,111 +324,73 @@ def _emit_peer_srun_command(
     return f"{srun_prefix} {wrapped}"
 
 
-def _emit_shell_supervisor(
+def build_plan(
     *,
+    spec: "_ParallelSpec",
     peer_commands: List[Tuple["Peer", str]],
-    grace_seconds: int,
-) -> List[str]:
-    """Emit the temporary shell "supervisor" — background peers + lifecycle.
+    pool_name: str,
+    pre_submission_id: str,
+) -> Plan:
+    """Translate a ``_ParallelSpec`` + per-peer srun strings into a :class:`Plan`.
 
-    Two shapes:
-
-    - Leader present: launch every non-leader with ``&``, block on the leader,
-      then ``scancel --signal=TERM`` with a grace window.
-    - No leader: launch every peer with ``&``, ``wait -n`` until one finishes.
-      If it failed with ``on_failure="kill"``, signal the rest. If it
-      succeeded, keep waiting for remaining peers.
-
-    This is deliberately bash-ish and deliberately thin. Phase 3 deletes the
-    whole thing in favour of a Python supervisor.
+    Called by the renderer (and directly by tests that want to round-trip
+    plan.json without invoking the full rendering pipeline).
     """
-    lines: List[str] = []
-    leader_entries = [(p, cmd) for p, cmd in peer_commands if p.leader]
-    non_leader_entries = [(p, cmd) for p, cmd in peer_commands if not p.leader]
-
-    lines.append("trap 'scancel --signal=TERM \"$SLURM_JOB_ID\" 2>/dev/null' EXIT")
-    lines.append("")
-
-    if leader_entries:
-        if len(leader_entries) > 1:
-            # Validation should have caught duplicate leaders before reaching
-            # rendering — this check is defense in depth.
-            names = ", ".join(p.resolved_name for p, _ in leader_entries)
-            raise RuntimeError(
-                f"Phase 2 supports at most one leader peer; got: {names}"
-            )
-
-        for peer, cmd in non_leader_entries:
-            lines.append(f"# --- launching non-leader peer: {peer.resolved_name} ---")
-            lines.append(f"{cmd} &")
-            lines.append(f"PEER_PID_{peer.resolved_name.upper()}=$!")
-            lines.append("")
-
-        leader_peer, leader_cmd = leader_entries[0]
-        lines.append(f"# --- launching leader peer: {leader_peer.resolved_name} ---")
-        lines.append(leader_cmd)
-        lines.append("LEADER_EXIT=$?")
-        lines.append("")
-        lines.append(
-            "# leader exited — signal helpers, grace window, hard-cancel stragglers"
+    plan_peers = [
+        PlanPeer(
+            name=peer.resolved_name,
+            pool=peer.pool or pool_name,
+            leader=peer.leader,
+            on_failure=peer.on_failure,
+            max_restarts=peer.max_restarts,
+            srun_command_line=cmd,
         )
-        lines.append('scancel --signal=TERM "$SLURM_JOB_ID" 2>/dev/null || true')
-        lines.append(f'sleep "${{SLURM_SDK_GRACE:-{grace_seconds}}}"')
-        lines.append('scancel "$SLURM_JOB_ID" 2>/dev/null || true')
-        lines.append("wait")
-        lines.append("exit $LEADER_EXIT")
-    else:
-        # All-equal-peers case — fail fast on the first ``on_failure="kill"``
-        # exit. Peers with ``on_failure="continue"`` are allowed to die
-        # silently; we accumulate their exit status but don't trigger
-        # shutdown. Phase 4 generalises this into the Python supervisor.
-        lines.append("declare -A _PEER_POLICY=()")
-        lines.append("declare -A _PEER_NAME=()")
-        for peer, cmd in non_leader_entries:
-            lines.append(f"# --- launching peer: {peer.resolved_name} ---")
-            lines.append(f"{cmd} &")
-            lines.append(f"PEER_PID_{peer.resolved_name.upper()}=$!")
-            lines.append(
-                f'_PEER_POLICY[$PEER_PID_{peer.resolved_name.upper()}]="{peer.on_failure}"'
-            )
-            lines.append(
-                f'_PEER_NAME[$PEER_PID_{peer.resolved_name.upper()}]="{peer.resolved_name}"'
-            )
-            lines.append("")
-        lines.append("FINAL_EXIT=0")
-        lines.append("# Collect PIDs currently being tracked.")
-        lines.append('_PENDING=( "${!_PEER_POLICY[@]}" )')
-        lines.append("while (( ${#_PENDING[@]} > 0 )); do")
-        lines.append('    wait -n -p _FINISHED_PID "${_PENDING[@]}"')
-        lines.append("    _FINISHED_STATUS=$?")
-        lines.append('    if [ -z "${_FINISHED_PID:-}" ]; then')
-        lines.append("        # Defensive: some bashes may leave _FINISHED_PID unset.")
-        lines.append("        break")
-        lines.append("    fi")
-        lines.append('    _POLICY="${_PEER_POLICY[$_FINISHED_PID]:-kill}"')
-        lines.append('    _NAME="${_PEER_NAME[$_FINISHED_PID]:-peer}"')
-        lines.append("    unset _PEER_POLICY[$_FINISHED_PID]")
-        lines.append("    unset _PEER_NAME[$_FINISHED_PID]")
-        lines.append('    _PENDING=( "${!_PEER_POLICY[@]}" )')
-        lines.append(
-            '    if [ "$_FINISHED_STATUS" -ne 0 ] && [ "$_POLICY" = "kill" ]; then'
-        )
-        lines.append("        FINAL_EXIT=$_FINISHED_STATUS")
-        lines.append(
-            '        echo "peer $_NAME exited with $_FINISHED_STATUS (kill); cancelling siblings" >&2'
-        )
-        lines.append(
-            '        scancel --signal=TERM "$SLURM_JOB_ID" 2>/dev/null || true'
-        )
-        lines.append(f'        sleep "${{SLURM_SDK_GRACE:-{grace_seconds}}}"')
-        lines.append('        scancel "$SLURM_JOB_ID" 2>/dev/null || true')
-        lines.append("        break")
-        lines.append("    fi")
-        lines.append("done")
-        lines.append("wait")
-        lines.append("exit $FINAL_EXIT")
+        for peer, cmd in peer_commands
+    ]
+    return Plan(
+        peers=plan_peers,
+        grace_period_seconds=spec.grace_period_seconds,
+        pool_names=[pool_name],
+        pre_submission_id=pre_submission_id,
+    )
 
-    return lines
+
+def _emit_plan_heredoc(plan: Plan) -> List[str]:
+    """Emit a base64 heredoc that materialises ``$JOB_DIR/plan.json``.
+
+    The heredoc lives alongside the per-peer arg heredocs so the plan file
+    appears on disk before the bootstrap reads it, whether the batch script
+    runs on the submission host (local backend) or on a remote compute node
+    (SSH backend — the whole script is uploaded verbatim).
+    """
+    encoded = base64.b64encode(plan.to_json().encode("utf-8")).decode("ascii")
+    return [
+        "# --- parallel supervisor plan ---",
+        'base64 -d > "plan.json" << "BASE64_PARALLEL_PLAN"',
+        encoded,
+        "BASE64_PARALLEL_PLAN",
+    ]
+
+
+def _emit_supervisor_invocation() -> List[str]:
+    """Emit the lines that hand control to the Python supervisor.
+
+    Bootstrap runs first (resolves hostnames, writes the registry skeleton),
+    then ``exec`` replaces the shell with the supervisor so the supervisor's
+    exit code becomes the batch job's exit code and Slurm accounting sees
+    the supervisor's PID as the batch step leader.
+    """
+    return [
+        "# --- bootstrap then supervisor ---",
+        'echo "Starting parallel bootstrap + supervisor"',
+        '"$PY_EXEC_RESOLVED" -m slurm.parallel.topology_bootstrap --job-dir "$JOB_DIR"',
+        "BOOTSTRAP_EXIT=$?",
+        "if [ $BOOTSTRAP_EXIT -ne 0 ]; then",
+        '    echo "Parallel bootstrap failed with code $BOOTSTRAP_EXIT" >&2',
+        "    exit $BOOTSTRAP_EXIT",
+        "fi",
+        'exec "$PY_EXEC_RESOLVED" -m slurm.parallel.topology_supervisor --job-dir "$JOB_DIR"',
+    ]
 
 
 def render_parallel_script(
@@ -446,9 +408,9 @@ def render_parallel_script(
 
     Args:
         spec: Validated :class:`_ParallelSpec`. Must contain exactly one pool
-            (Phase 2 scope).
-        packaging_strategy: Shared packaging strategy — all peers in Phase 2
-            use the same image / venv. Per-peer packaging arrives in Phase 10.
+            (multi-pool / hetjob support ships in Phase 6).
+        packaging_strategy: Shared packaging strategy — every peer uses the
+            same image / venv. Per-peer packaging arrives in Phase 10.
         target_job_dir: Absolute path on the backend where the job runs.
         pre_submission_id: The base SDK id for this allocation. Each peer
             derives its own id via :func:`peer_pre_submission_id`.
@@ -466,7 +428,7 @@ def render_parallel_script(
     """
     if len(spec.topology.pools) != 1:
         raise NotImplementedError(
-            "Phase 2 supports single-pool parallel(...) submissions. "
+            "render_parallel_script supports single-pool submissions only. "
             "Multi-pool topologies (hetjobs) arrive in Phase 6."
         )
     pool_name, pool = next(iter(spec.topology.pools.items()))
@@ -474,7 +436,7 @@ def render_parallel_script(
     # We need a representative task_func for helpers that expect one (sbatch
     # directives, packaging setup, environment exports). Prefer the leader,
     # else the first peer. The surface they read (``__name__``, ``__module__``)
-    # is homogeneous across peers in the single-pool Phase 2.
+    # is homogeneous across peers in a single-pool submission.
     representative_peer = next((p for p in spec.peers if p.leader), spec.peers[0])
     representative_task = (
         representative_peer.task.task.func
@@ -567,12 +529,17 @@ def render_parallel_script(
         )
         peer_commands.append((peer, cmd))
 
-    script_lines.extend(
-        _emit_shell_supervisor(
-            peer_commands=peer_commands,
-            grace_seconds=spec.grace_period_seconds,
-        )
+    # Serialise the supervisor plan and hand control to the Python
+    # bootstrap/supervisor chain.
+    plan = build_plan(
+        spec=spec,
+        peer_commands=peer_commands,
+        pool_name=pool_name,
+        pre_submission_id=pre_submission_id,
     )
+    script_lines.extend(_emit_plan_heredoc(plan))
+    script_lines.append("")
+    script_lines.extend(_emit_supervisor_invocation())
 
     return "\n".join(line.rstrip("\r") for line in "\n".join(script_lines).splitlines())
 
@@ -624,6 +591,7 @@ def _emit_shared_runner_inputs(
 
 __all__ = [
     "render_parallel_script",
+    "build_plan",
     "peer_pre_submission_id",
     "PEER_ARGS_BASENAME",
     "PEER_KWARGS_BASENAME",
