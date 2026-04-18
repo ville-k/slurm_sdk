@@ -79,6 +79,21 @@ class RunnerArgs:
             return parts[1]
         return None
 
+    @property
+    def is_replica_peer_step(self) -> bool:
+        """Whether this invocation is a ``:by-taskid`` replica dispatch.
+
+        Replica peers run one ``srun --ntasks=N`` step. Each of the N Slurm
+        tasks inside that step invokes the runner with the same
+        ``--step peer:<name>:by-taskid`` selector; the runner then reads
+        ``SLURM_PROCID`` to pick its replica's args file.
+        """
+        if not self.is_peer_step:
+            return False
+        assert self.step is not None
+        parts = self.step.split(":", 2)
+        return len(parts) == 3 and parts[2] == "by-taskid"
+
 
 def create_argument_parser() -> argparse.ArgumentParser:
     """Create the argument parser for the runner script.
@@ -202,9 +217,10 @@ def log_startup_info(args: RunnerArgs) -> None:
         logger.debug("Callbacks file=%s", args.callbacks_file)
     elif args.is_peer_step:
         logger.info(
-            "Starting peer step execution (step=%s, peer=%s)",
+            "Starting peer step execution (step=%s, peer=%s, replica=%s)",
             args.step,
             args.peer_name,
+            args.is_replica_peer_step,
         )
         logger.debug("Module=%s, Function=%s", args.module, args.function)
         logger.debug("Args file=%s", args.args_file)
@@ -256,6 +272,8 @@ def load_task_arguments(
     """
     if args.is_array_job:
         return _load_array_task_arguments(args, job_dir)
+    elif args.is_replica_peer_step:
+        return _load_peer_replica_arguments(args, job_dir)
     elif args.is_peer_step:
         return _load_peer_task_arguments(args, job_dir)
     else:
@@ -384,6 +402,73 @@ def _load_peer_task_arguments(
     return task_args, task_kwargs
 
 
+def _load_peer_replica_arguments(
+    args: RunnerArgs, job_dir: Optional[str] = None
+) -> Tuple[tuple, dict]:
+    """Load per-replica args for a ``:by-taskid`` peer step dispatch.
+
+    The replica index is read from ``SLURM_PROCID`` (0..count-1 within the
+    step). The per-replica pickle lives at ``peer_<name>_<i>_args.pkl`` in
+    ``$JOB_DIR`` — written once per replica at submission time so the runner
+    only has to select and deserialise.
+
+    The pickle contains a single value whose type drives unpacking: ``dict``
+    becomes ``kwargs``, ``tuple`` becomes positional args, anything else is
+    passed as the first positional arg (same shape as array-item unpacking).
+
+    Args:
+        args: Parsed runner arguments — ``step == "peer:<name>:by-taskid"``.
+        job_dir: Job directory for resolving relative paths.
+
+    Returns:
+        ``(task_args, task_kwargs)`` ready for ``execute_task``.
+    """
+    from .._serialization import read_pickled
+    from slurm.array_items import unpack_item_to_args_kwargs
+
+    peer_name = args.peer_name
+    if not peer_name:
+        raise RuntimeError(
+            "Replica peer step invocation has no peer name; the runner "
+            "expected '--step peer:<name>:by-taskid'."
+        )
+
+    # SLURM_PROCID is the per-step task id Slurm assigns to each of the N
+    # tasks spawned by ``srun --ntasks=N``. Tests that exercise the loader
+    # out-of-band can set ``SLURM_PROCID`` manually.
+    procid_raw = os.environ.get("SLURM_PROCID")
+    if procid_raw is None:
+        raise RuntimeError(
+            "Replica peer step invocation requires SLURM_PROCID to select "
+            "the replica's args file. The supervisor / parallel renderer "
+            "should set this via ``srun --ntasks=<count>``."
+        )
+    try:
+        replica_index = int(procid_raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"SLURM_PROCID={procid_raw!r} is not a valid integer."
+        ) from exc
+    if replica_index < 0:
+        raise RuntimeError(f"SLURM_PROCID={replica_index} must be non-negative.")
+
+    args_filename = f"peer_{peer_name}_{replica_index}_args.pkl"
+    args_path = args_filename
+    if job_dir and not os.path.isabs(args_path):
+        args_path = os.path.join(job_dir, args_path)
+
+    logger.debug(
+        "Loading replica args for peer=%s replica=%s from %s",
+        peer_name,
+        replica_index,
+        args_path,
+    )
+
+    item = read_pickled(args_path)
+    task_args, task_kwargs = unpack_item_to_args_kwargs(item)
+    return task_args, task_kwargs
+
+
 def load_callbacks(callbacks_file: str) -> List[BaseCallback]:
     """Load callbacks from a pickled file.
 
@@ -428,4 +513,5 @@ __all__ = [
     "load_task_arguments",
     "load_callbacks",
     "_load_peer_task_arguments",
+    "_load_peer_replica_arguments",
 ]

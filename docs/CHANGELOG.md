@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Replica sets via `Peer.replicas(count=N, args=...)` — one Slurm step runs
+  `--ntasks=N` tasks; each replica picks its per-index args from a pickle
+  selected by `SLURM_PROCID`. `args=` accepts `None`, a length-`count` list,
+  a `range`, or a `Callable[[int], dict|tuple|scalar]` evaluated eagerly at
+  submission time
+- Runner `--step peer:<name>:by-taskid` dispatch reads `SLURM_PROCID` and
+  loads the matching `peer_<name>_<i>_args.pkl` file
+- `JobContext.replica_index` / `JobContext.replica_count` are populated for
+  tasks running inside a replica peer; `None` for singleton peers
+- `ReplicaGroup` handle — `job["<replica_peer>"]` returns a `ReplicaGroup`
+  with `__len__`, `__iter__`, `__getitem__(i)`, `wait()`, and `get_results()`
+  that collects results in replica-index order
+- `ParallelJob["<name>", i]` tuple indexing returns the individual
+  per-replica `Job`
+- `ParallelJob.get_results()` returns a `list` of length `count` for replica
+  peers (mixed with scalar values for singleton peers)
+- `ParallelJob.peer_outcomes()` flattens replica peers to `"<name>[<i>]"`
+  keys, matching how `PeerFailureError` names replica failures
 - `on_failure="restart"` policy with `max_restarts` budget — the supervisor
   re-launches a failed peer (keeping name / args / placement) until it
   succeeds or the budget is exhausted. Exhausted restarts fall through to

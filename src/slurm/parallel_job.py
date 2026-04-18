@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from .errors import CompositeJobError, PeerFailureError
 from .parallel.registry import (
@@ -74,6 +74,95 @@ class PeerOutcome:
     message: Optional[str] = None
 
 
+def _outcome_from_entry(entry: Dict[str, Any]) -> "PeerOutcome":
+    """Build a :class:`PeerOutcome` from a raw registry entry dict."""
+    outcome_str = entry.get("outcome") or OUTCOME_NOT_STARTED
+    exit_code = entry.get("final_exit_code")
+    if exit_code is not None:
+        exit_code = int(exit_code)
+    restart_count = int(entry.get("restart_count", 0) or 0)
+    message = entry.get("message")
+    return PeerOutcome(
+        status=outcome_str,
+        exit_code=exit_code,
+        restart_count=restart_count,
+        message=message,
+    )
+
+
+class ReplicaGroup:
+    """Handle for the replicas of a single replica peer.
+
+    Returned by ``ParallelJob["<name>"]`` when ``<name>`` refers to a peer
+    created via :meth:`Peer.replicas`. Exposes list-like access to the
+    underlying per-replica :class:`Job` objects plus aggregate
+    :meth:`wait` / :meth:`get_results`.
+
+    **Outcome atomicity (Phase 5 limitation):** the Slurm step that runs a
+    replica peer is one ``srun --ntasks=<count>`` — the step has one exit
+    code for all replicas. Phase 5 records that exit code as a *group*
+    outcome: if it is non-zero and the peer's ``on_failure`` policy resolves
+    to ``kill``, every replica's registry entry reads ``OUTCOME_FATAL``;
+    on success, every replica reads ``OUTCOME_SUCCESS``. Per-replica
+    granular outcome recording (one replica succeeds, another fails inside
+    the same step) requires the runner to write per-task outcome sentinels
+    to the registry and is deferred to Phase 7.
+
+    Attributes:
+        peer_name: Name of the replica peer.
+        replica_jobs: Ordered list of per-replica :class:`Job` objects.
+    """
+
+    def __init__(self, peer_name: str, replica_jobs: List["Job"]) -> None:
+        if not replica_jobs:
+            raise ValueError(
+                f"ReplicaGroup for peer {peer_name!r} must contain at least "
+                "one replica Job"
+            )
+        self.peer_name = peer_name
+        self._jobs: List["Job"] = list(replica_jobs)
+
+    @property
+    def replica_jobs(self) -> List["Job"]:
+        """Shallow copy of the per-replica Job list (ordered by index)."""
+        return list(self._jobs)
+
+    def __len__(self) -> int:
+        return len(self._jobs)
+
+    def __iter__(self) -> Iterator["Job"]:
+        return iter(self._jobs)
+
+    def __getitem__(self, index: int) -> "Job":
+        return self._jobs[index]
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Wait for every replica to reach a terminal state.
+
+        Returns ``True`` if every replica completed within ``timeout``,
+        ``False`` otherwise. Replicas share one Slurm job id so they
+        terminate together — this loops for symmetry with
+        :meth:`ParallelJob.wait`.
+        """
+        for job in self._jobs:
+            if not job.wait(timeout=timeout):
+                return False
+        return True
+
+    def get_results(self, timeout: Optional[float] = None) -> List[Any]:
+        """Collect each replica's result in index order.
+
+        Raises whatever the per-replica :meth:`Job.get_result` raises — this
+        surface is deliberately thin. For outcome-aware reading (fatal vs.
+        shutdown-by-leader vs. continue) use
+        :meth:`ParallelJob.get_results`, which consults the registry.
+        """
+        return [job.get_result(timeout=timeout) for job in self._jobs]
+
+    def __repr__(self) -> str:
+        return f"ReplicaGroup(peer={self.peer_name!r}, count={len(self._jobs)})"
+
+
 class ParallelJob:
     """Aggregate handle for a submitted ``parallel(...)`` allocation.
 
@@ -110,6 +199,7 @@ class ParallelJob:
         peer_jobs: Dict[str, "Job"],
         spec: "_ParallelSpec",
         target_job_dir: Optional[str] = None,
+        peer_replica_jobs: Optional[Dict[str, List["Job"]]] = None,
     ) -> None:
         if not peer_jobs:
             raise ValueError("ParallelJob requires at least one peer job")
@@ -120,6 +210,13 @@ class ParallelJob:
         # Snapshot the target job dir so ``peer_outcomes`` can find
         # ``registry.json`` even if the per-peer Jobs get re-parented later.
         self._target_job_dir = target_job_dir
+        # ``peer_replica_jobs`` holds the full per-replica Job list for every
+        # replica peer; ``peer_jobs[name]`` only tracks the representative
+        # (replica 0) Job to keep the legacy surface working. Singleton peers
+        # never appear here.
+        self._peer_replica_jobs: Dict[str, List["Job"]] = {
+            name: list(jobs) for name, jobs in (peer_replica_jobs or {}).items()
+        }
 
     @property
     def job_id(self) -> str:
@@ -140,12 +237,55 @@ class ParallelJob:
     def __contains__(self, name: object) -> bool:
         return name in self._peer_jobs
 
-    def __getitem__(self, name: str) -> "Job":
-        """Return the :class:`Job` for the peer with the given name.
+    def __getitem__(
+        self, key: Union[str, Tuple[str, int]]
+    ) -> Union["Job", "ReplicaGroup"]:
+        """Look up a peer by name, or a specific replica by ``(name, index)``.
+
+        * ``job["name"]`` for a singleton peer → the peer's :class:`Job`.
+        * ``job["name"]`` for a replica peer → a :class:`ReplicaGroup`
+          wrapping the per-replica Jobs (iterate / index / ``.get_results()``).
+        * ``job["name", i]`` for a replica peer → the individual :class:`Job`
+          at replica index ``i``.
 
         Raises:
-            KeyError: If ``name`` is not a peer in this allocation.
+            KeyError: If ``name`` is not a peer in this allocation, or the
+                replica index is out of range.
+            TypeError: If ``(name, i)`` is passed for a non-replica peer.
         """
+        if isinstance(key, tuple):
+            if (
+                len(key) != 2
+                or not isinstance(key[0], str)
+                or not isinstance(key[1], int)
+            ):
+                raise KeyError(
+                    "ParallelJob tuple indexing requires (peer_name, "
+                    f"replica_index); got {key!r}"
+                )
+            name, idx = key
+            if name not in self._peer_replica_jobs:
+                if name in self._peer_jobs:
+                    raise TypeError(
+                        f"Peer {name!r} is not a replica set — use "
+                        f'job["{name}"] without an index.'
+                    )
+                available = ", ".join(sorted(self._peer_jobs.keys()))
+                raise KeyError(
+                    f"ParallelJob has no peer {name!r}. Available peers: {available}"
+                )
+            jobs = self._peer_replica_jobs[name]
+            if idx < 0 or idx >= len(jobs):
+                raise KeyError(
+                    f"Replica index {idx} out of range for peer {name!r} "
+                    f"(count={len(jobs)})"
+                )
+            return jobs[idx]
+
+        # Plain string key — singleton Job or ReplicaGroup.
+        name = key
+        if name in self._peer_replica_jobs:
+            return ReplicaGroup(name, self._peer_replica_jobs[name])
         try:
             return self._peer_jobs[name]
         except KeyError as exc:
@@ -155,22 +295,29 @@ class ParallelJob:
             ) from exc
 
     def wait(self, timeout: Optional[float] = None) -> bool:
-        """Block until every peer has reached a terminal state.
+        """Block until every peer (and replica) has reached a terminal state.
 
         Every peer shares the same Slurm job id, so we only need to wait on one
         of them — but we iterate for symmetry with :class:`ArrayJob` and to
-        surface a ``False`` return if any per-peer wait times out.
+        surface a ``False`` return if any wait times out.
 
         Args:
             timeout: Optional wall-clock timeout in seconds.
 
         Returns:
-            ``True`` if every peer reached a terminal state, ``False`` on
-            timeout.
+            ``True`` if every peer/replica reached a terminal state,
+            ``False`` on timeout.
         """
-        for job in self._peer_jobs.values():
-            if not job.wait(timeout=timeout):
-                return False
+        for name, job in self._peer_jobs.items():
+            if name in self._peer_replica_jobs:
+                # Replica peers — waiting on replica 0 is enough (same job
+                # id) but iterate for symmetry and timeout aggregation.
+                for rjob in self._peer_replica_jobs[name]:
+                    if not rjob.wait(timeout=timeout):
+                        return False
+            else:
+                if not job.wait(timeout=timeout):
+                    return False
         return True
 
     def _registry_path(self) -> Optional[str]:
@@ -200,9 +347,17 @@ class ParallelJob:
         registry never materialised) map to ``"not_started"`` so callers
         always see a fully-populated dict.
 
+        Replica peers are flattened to per-replica keys — a replica peer
+        named ``worker`` with ``count=3`` produces ``worker[0]``,
+        ``worker[1]``, ``worker[2]`` in the returned dict. That matches how
+        :class:`PeerFailureError` renders replica failures (``peer[i]``)
+        and lets callers write uniform handling against
+        ``peer_outcomes().values()``.
+
         Returns:
-            A mapping keyed by :attr:`Peer.resolved_name`. One entry per
-            peer declared in the spec.
+            A mapping with one entry per singleton peer and one entry per
+            replica of every replica peer, using ``<name>[<i>]`` keys for
+            replicas.
         """
         registry: Dict[str, Any] = {}
         reg_path = self._registry_path()
@@ -217,19 +372,15 @@ class ParallelJob:
         for peer in self._spec.peers:
             name = peer.resolved_name
             entries = peers_section.get(name, [])
-            entry = entries[0] if entries else {}
-            outcome_str = entry.get("outcome") or OUTCOME_NOT_STARTED
-            exit_code = entry.get("final_exit_code")
-            if exit_code is not None:
-                exit_code = int(exit_code)
-            restart_count = int(entry.get("restart_count", 0) or 0)
-            message = entry.get("message")
-            outcomes[name] = PeerOutcome(
-                status=outcome_str,
-                exit_code=exit_code,
-                restart_count=restart_count,
-                message=message,
-            )
+            if peer.is_replica_set:
+                for replica_index in range(peer.count):
+                    entry = (
+                        entries[replica_index] if replica_index < len(entries) else {}
+                    )
+                    outcomes[f"{name}[{replica_index}]"] = _outcome_from_entry(entry)
+            else:
+                entry = entries[0] if entries else {}
+                outcomes[name] = _outcome_from_entry(entry)
         return outcomes
 
     def get_results(self, timeout: Optional[float] = None) -> Dict[str, Any]:
@@ -246,6 +397,10 @@ class ParallelJob:
           to a :class:`CompositeJobError` raised at the end. Every fatal peer
           is reported, so the user sees the full failure surface.
 
+        Replica peers (``count > 1``) produce a ``list`` value of length
+        ``count``, one entry per replica. Singleton peers produce a scalar
+        value. The top-level dict mixes both when a job has both shapes.
+
         The registry is the system-of-record — the per-peer ``Job.get_result``
         call is still what deserializes user data. When no registry is
         available (tests using mocks that bypass the supervisor), this falls
@@ -257,7 +412,8 @@ class ParallelJob:
                 peer's :meth:`Job.get_result`.
 
         Returns:
-            Dict keyed by peer name.
+            Dict keyed by peer name. Scalar value for singleton peers, list
+            value (length = replica count) for replica peers.
 
         Raises:
             CompositeJobError: If any peer outcome is ``"fatal"`` or
@@ -271,48 +427,121 @@ class ParallelJob:
         results: Dict[str, Any] = {}
         failures: list[PeerFailureError] = []
 
-        for peer_name, job in self._peer_jobs.items():
-            peer = self._spec.peer_by_name(peer_name)
-            outcome = outcomes.get(peer_name)
-
-            if has_registry_data and outcome is not None:
-                # Authoritative path — the supervisor recorded an outcome.
-                if outcome.status in (OUTCOME_SUCCESS, OUTCOME_RESTARTED):
-                    results[peer_name] = job.get_result(timeout=timeout)
-                elif outcome.status in (
-                    OUTCOME_CONTINUE_ON_FAILURE,
-                    OUTCOME_SHUTDOWN_BY_LEADER,
-                ):
-                    results[peer_name] = None
-                else:
-                    # fatal / not_started — gather for CompositeJobError.
-                    results[peer_name] = None
-                    failures.append(
-                        PeerFailureError(
-                            peer_name=peer_name,
-                            replica_index=None,
-                            exit_code=outcome.exit_code
-                            if outcome.exit_code is not None
-                            else -1,
-                            message=outcome.message
-                            or f"peer outcome: {outcome.status}",
+        for peer in self._spec.peers:
+            peer_name = peer.resolved_name
+            if peer.is_replica_set:
+                replica_jobs = self._peer_replica_jobs.get(peer_name, [])
+                replica_results: List[Any] = []
+                for replica_index in range(peer.count):
+                    outcome = outcomes.get(f"{peer_name}[{replica_index}]")
+                    rjob = (
+                        replica_jobs[replica_index]
+                        if replica_index < len(replica_jobs)
+                        else None
+                    )
+                    replica_results.append(
+                        self._collect_replica_result(
+                            peer,
+                            replica_index,
+                            rjob,
+                            outcome,
+                            has_registry_data,
+                            timeout,
+                            failures,
                         )
                     )
-                continue
-
-            # Legacy path — no registry; fall back to Phase 3 behavior.
-            try:
-                results[peer_name] = job.get_result(timeout=timeout)
-            except Exception:
-                if peer.on_failure == "continue":
-                    results[peer_name] = None
-                else:
-                    raise
+                results[peer_name] = replica_results
+            else:
+                job = self._peer_jobs[peer_name]
+                outcome = outcomes.get(peer_name)
+                results[peer_name] = self._collect_singleton_result(
+                    peer, job, outcome, has_registry_data, timeout, failures
+                )
 
         if failures:
             raise CompositeJobError(failures)
 
         return results
+
+    def _collect_singleton_result(
+        self,
+        peer: Any,
+        job: "Job",
+        outcome: Optional[PeerOutcome],
+        has_registry_data: bool,
+        timeout: Optional[float],
+        failures: "list[PeerFailureError]",
+    ) -> Any:
+        """Resolve one singleton peer's result slot."""
+        if has_registry_data and outcome is not None:
+            if outcome.status in (OUTCOME_SUCCESS, OUTCOME_RESTARTED):
+                return job.get_result(timeout=timeout)
+            if outcome.status in (
+                OUTCOME_CONTINUE_ON_FAILURE,
+                OUTCOME_SHUTDOWN_BY_LEADER,
+            ):
+                return None
+            failures.append(
+                PeerFailureError(
+                    peer_name=peer.resolved_name,
+                    replica_index=None,
+                    exit_code=outcome.exit_code
+                    if outcome.exit_code is not None
+                    else -1,
+                    message=outcome.message or f"peer outcome: {outcome.status}",
+                )
+            )
+            return None
+
+        # Legacy path — no registry; fall back to Phase 3 behavior.
+        try:
+            return job.get_result(timeout=timeout)
+        except Exception:
+            if peer.on_failure == "continue":
+                return None
+            raise
+
+    def _collect_replica_result(
+        self,
+        peer: Any,
+        replica_index: int,
+        job: Optional["Job"],
+        outcome: Optional[PeerOutcome],
+        has_registry_data: bool,
+        timeout: Optional[float],
+        failures: "list[PeerFailureError]",
+    ) -> Any:
+        """Resolve one replica's result slot (see :meth:`get_results`)."""
+        if has_registry_data and outcome is not None:
+            if outcome.status in (OUTCOME_SUCCESS, OUTCOME_RESTARTED):
+                if job is None:
+                    return None
+                return job.get_result(timeout=timeout)
+            if outcome.status in (
+                OUTCOME_CONTINUE_ON_FAILURE,
+                OUTCOME_SHUTDOWN_BY_LEADER,
+            ):
+                return None
+            failures.append(
+                PeerFailureError(
+                    peer_name=peer.resolved_name,
+                    replica_index=replica_index,
+                    exit_code=outcome.exit_code
+                    if outcome.exit_code is not None
+                    else -1,
+                    message=outcome.message or f"peer outcome: {outcome.status}",
+                )
+            )
+            return None
+
+        if job is None:
+            return None
+        try:
+            return job.get_result(timeout=timeout)
+        except Exception:
+            if peer.on_failure == "continue":
+                return None
+            raise
 
     def __repr__(self) -> str:
         peers = ", ".join(sorted(self._peer_jobs.keys()))

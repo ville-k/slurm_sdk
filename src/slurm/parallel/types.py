@@ -425,6 +425,14 @@ class Peer:
         """Whether this peer is a replica set (``count > 1``)."""
         return self.count > 1
 
+    def replica_indices(self) -> range:
+        """Iterate over replica indices ``0..count-1``.
+
+        Returns ``range(1)`` for singleton peers so callers can uniformly
+        enumerate replicas without branching on :attr:`is_replica_set`.
+        """
+        return range(self.count)
+
     @property
     def resolved_name(self) -> str:
         """The peer's name, falling back to the task function's ``__name__``."""

@@ -66,6 +66,10 @@ class JobContext:
     # ``shutdown_requested``, ``announce()``) arrive in later phases.
     peer_name: Optional[str] = None
     peer_pool: Optional[str] = None
+    # Replica identity — populated only when the peer is a replica set
+    # (``Peer.replicas(...)``). For singleton peers both fields are ``None``.
+    replica_index: Optional[int] = None
+    replica_count: Optional[int] = None
 
     def torch_distributed_env(
         self, *, master_port: Optional[int] = None
@@ -159,6 +163,18 @@ def build_job_context(env: Optional[Dict[str, str]] = None) -> JobContext:
     peer_name = env_map.get("SLURM_SDK_PEER_NAME") or None
     peer_pool = env_map.get("SLURM_SDK_PEER_POOL") or None
 
+    # Replica identity: the parallel renderer exports ``SLURM_SDK_REPLICA_COUNT``
+    # for replica peers (count > 1). When present, ``SLURM_PROCID`` is the
+    # replica index within the step. Singleton peers leave both at ``None`` so
+    # user code can branch cleanly between replica and non-replica contexts.
+    replica_count_env = _parse_int(env_map.get("SLURM_SDK_REPLICA_COUNT"))
+    if replica_count_env is not None and replica_count_env > 0:
+        replica_count_val: Optional[int] = replica_count_env
+        replica_index_val: Optional[int] = _parse_int(env_map.get("SLURM_PROCID")) or 0
+    else:
+        replica_count_val = None
+        replica_index_val = None
+
     return JobContext(
         job_id=job_id,
         step_id=step_id,
@@ -176,6 +192,8 @@ def build_job_context(env: Optional[Dict[str, str]] = None) -> JobContext:
         output_dir=output_dir,
         peer_name=peer_name,
         peer_pool=peer_pool,
+        replica_index=replica_index_val,
+        replica_count=replica_count_val,
     )
 
 

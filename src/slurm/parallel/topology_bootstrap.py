@@ -66,34 +66,39 @@ def _resolve_hostnames(nodelist: str) -> Tuple[str, ...]:
 def build_registry_skeleton(plan: Plan, hostnames: Tuple[str, ...]) -> dict:
     """Build the initial registry dict — all peers ``pending``, nodes seeded.
 
-    Every peer entry lists the full pool hostname tuple; once replica sets
-    ship in Phase 5 each replica will carry its own single-hostname view.
-    Phase 3 is single-replica so this simplification is correct.
+    Every peer entry lists the full pool hostname tuple. Replica peers get
+    ``peer.replica_count`` entries in the registry list (one per replica
+    index); singleton peers get exactly one. Hostnames within the tuple are
+    not yet partitioned per replica — that requires per-replica placement
+    resolution, which lands in Phase 8.
     """
     pool_name = plan.pool_names[0] if plan.pool_names else "default"
     default_hostname = hostnames[0] if hostnames else ""
 
     peers_out: dict = {}
     for peer in plan.peers:
-        peers_out[peer.name] = [
-            {
-                "name": peer.name,
-                "pool": peer.pool,
-                "replica_index": 0,
-                "replica_count": 1,
-                "hostname": default_hostname,
-                "hostnames": list(hostnames),
-                "node_label": None,
-                "step_id": None,
-                "ports": {},
-                "metadata": {},
-                "state": STATE_PENDING,
-                "restart_count": 0,
-                "outcome": None,
-                "final_exit_code": None,
-                "message": None,
-            }
-        ]
+        entries = []
+        for replica_index in range(peer.replica_count):
+            entries.append(
+                {
+                    "name": peer.name,
+                    "pool": peer.pool,
+                    "replica_index": replica_index,
+                    "replica_count": peer.replica_count,
+                    "hostname": default_hostname,
+                    "hostnames": list(hostnames),
+                    "node_label": None,
+                    "step_id": None,
+                    "ports": {},
+                    "metadata": {},
+                    "state": STATE_PENDING,
+                    "restart_count": 0,
+                    "outcome": None,
+                    "final_exit_code": None,
+                    "message": None,
+                }
+            )
+        peers_out[peer.name] = entries
 
     nodes_out: dict = {}
     for ordinal, hostname in enumerate(hostnames):
