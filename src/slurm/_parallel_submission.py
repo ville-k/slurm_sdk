@@ -1,16 +1,17 @@
 """Submission pipeline for ``parallel(...)`` — sibling to ``_submission.py``.
 
-Phase 2 scope: single implicit pool (or an explicit one-pool topology), one
-shared packaging config, inline shell supervision. The flow mirrors the
-single-job path — ``setup_job_directory`` → ``prepare_packaging_strategy`` →
-``merge_sbatch_options`` → render → ``backend.submit_job`` → build per-peer
-:class:`Job` objects → return :class:`ParallelJob` — so callers reading both
-files can map concepts one-to-one.
+The flow mirrors the single-job path — ``setup_job_directory`` →
+per-peer ``prepare_packaging_strategy`` → ``merge_sbatch_options`` → render →
+``backend.submit_job`` → build per-peer :class:`Job` objects → return
+:class:`ParallelJob` — so callers reading both files can map concepts
+one-to-one.
 
-Scope-boundary errors (``NotImplementedError`` for replicas, multi-pool,
-per-peer packaging, and advanced failure policies) are raised here rather
-than in :mod:`slurm.parallel` so the entry point stays small and the
-validator/rendering layers don't have to know about phasing.
+Per-peer packaging (Phase 10): each peer can carry its own
+``@task(packaging=...)`` declaration — different container images, wheels,
+or ``"none"`` bare-node steps. Configs are deduped by canonical key so
+shared images only run ``prepare()`` once; ``"inherit"`` peers are resolved
+to the leader (or first peer) at submission time so rendering sees a flat
+``{peer_name: strategy}`` dict.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from ._submission import (
 )
 from .callbacks import SubmitBeginContext, SubmitEndContext
 from .errors import SubmissionError
+from .packaging.inherit import InheritPackagingStrategy
 from .parallel.rendering import (
     peer_pre_submission_id,
     render_parallel_script,
@@ -34,42 +36,126 @@ from .task import BoundTask
 if TYPE_CHECKING:
     from .cluster import Cluster
     from .job import Job
+    from .packaging.base import PackagingStrategy
     from .parallel.types import Peer, _ParallelSpec
     from .parallel_job import ParallelJob
 
 logger = logging.getLogger(__name__)
 
 
-def _check_phase2_scope(spec: "_ParallelSpec") -> None:
-    """Reject submissions that need functionality deferred to later phases.
+# ---------------------------------------------------------------------------
+# Per-peer packaging preparation (Phase 10)
+# ---------------------------------------------------------------------------
 
-    Each branch points at the phase that delivers the missing piece, so the
-    message is actionable rather than confusing.
+
+def _packaging_config_key(config: Dict[str, Any] | None) -> str:
+    """Return a stable canonical key for deduping prepared packaging strategies.
+
+    Two peers whose ``@task(packaging=...)`` declarations resolve to the
+    same key share one :class:`PackagingStrategy` instance — so a container
+    image is pulled / pushed / probed exactly once per unique resolved
+    reference, even when three peers reference it.
+
+    Volatile fields are excluded: an auto-generated ``tag`` from
+    :class:`ContainerPackagingStrategy` (``build-<uuid>``) should NOT make
+    two otherwise-identical configs look different. The caller is expected
+    to have already resolved the config so deterministic keys
+    (image / dockerfile / context / digest) stand in for the whole thing.
+    """
+    if not config:
+        return "none:"
+
+    ctype = str(config.get("type") or "none")
+    # Volatile fields that do not affect what the strategy will actually run.
+    volatile = {"tag"}
+    canonical = sorted(
+        (k, str(v)) for k, v in config.items() if k not in volatile and v is not None
+    )
+    return f"{ctype}:" + "|".join(f"{k}={v}" for k, v in canonical)
+
+
+def _peer_packaging_config(peer: "Peer") -> Dict[str, Any] | None:
+    """Pull the effective packaging dict off a peer's underlying task."""
+    if isinstance(peer.task, BoundTask):
+        return peer.task.task.packaging or None
+    return None
+
+
+def _resolve_inherit_source_peer(spec: "_ParallelSpec") -> "Peer":
+    """Return the peer whose packaging ``"inherit"`` peers clone.
+
+    Rule: the leader if one exists, otherwise the first peer in declaration
+    order. Documented in CHANGELOG and the design doc's §7.
     """
     for peer in spec.peers:
-        if peer.on_node is not None or peer.colocate_with is not None:
-            raise NotImplementedError(
-                "Peer placement directives (on_node, colocate_with) are not "
-                "supported yet. Named-node placement ships in Phase 8."
-            )
+        if peer.leader:
+            return peer
+    return spec.peers[0]
 
-    # All peers share one packaging config in Phase 2 — catch the common
-    # footgun of passing a mix of tasks with different ``packaging=`` set.
-    packaging_signatures = set()
+
+def _prepare_per_peer_packaging(
+    cluster: "Cluster",
+    spec: "_ParallelSpec",
+) -> Dict[str, "PackagingStrategy"]:
+    """Prepare one :class:`PackagingStrategy` per unique peer config.
+
+    Returns a ``{peer_name: strategy}`` dict. Peers with equivalent
+    packaging configs share the same strategy instance (so containers pull
+    once); peers declaring ``packaging="inherit"`` are resolved to the
+    leader (or first peer) *before* :meth:`prepare` runs — inheritance is a
+    submission-time concept only.
+    """
+    # First pass: decide which config each peer resolves to. Inherit peers
+    # get redirected to the inheritance source's config.
+    inherit_source = _resolve_inherit_source_peer(spec)
+    inherit_source_config = _peer_packaging_config(inherit_source)
+
+    resolved_configs: Dict[str, Dict[str, Any] | None] = {}
     for peer in spec.peers:
-        if isinstance(peer.task, BoundTask):
-            pkg = peer.task.task.packaging or {}
+        cfg = _peer_packaging_config(peer)
+        if cfg and cfg.get("type") == "inherit":
+            if peer.resolved_name == inherit_source.resolved_name:
+                # Validation should have caught this, but belt-and-braces:
+                # the inheritance source cannot itself inherit.
+                raise SubmissionError(
+                    f'Peer {peer.resolved_name!r} uses packaging="inherit" '
+                    "but is the inheritance source (leader or first peer). "
+                    "Point inheriting peers at a concrete packaging target."
+                )
+            resolved_configs[peer.resolved_name] = inherit_source_config
         else:
-            pkg = {}
-        # Make comparable: sort keys and freeze into a tuple of (k, str(v)).
-        sig = tuple(sorted((k, str(v)) for k, v in pkg.items()))
-        packaging_signatures.add(sig)
-    if len(packaging_signatures) > 1:
-        raise NotImplementedError(
-            "Per-peer packaging is not supported yet — every peer in a "
-            "parallel(...) call must share the same @task(packaging=...) "
-            "config. Heterogeneous packaging ships in Phase 10."
-        )
+            resolved_configs[peer.resolved_name] = cfg
+
+    # Second pass: dedupe by canonical key, preparing once per unique config.
+    # We preserve first-encounter order so the rendered script emits setup
+    # blocks deterministically.
+    strategies_by_key: Dict[str, "PackagingStrategy"] = {}
+    peer_to_strategy: Dict[str, "PackagingStrategy"] = {}
+    for peer in spec.peers:
+        cfg = resolved_configs[peer.resolved_name]
+        key = _packaging_config_key(cfg)
+        if key not in strategies_by_key:
+            bound = peer.task if isinstance(peer.task, BoundTask) else None
+            representative_task = bound.task if bound is not None else peer.task
+            strategy = prepare_packaging_strategy(
+                cluster, representative_task, packaging_config=cfg
+            )
+            if isinstance(strategy, InheritPackagingStrategy):
+                # Defensive: if inherit resolution above failed to redirect
+                # (e.g. an unexpected code path), fail loudly rather than
+                # let an inherit strategy leak into the rendered script
+                # with no parent metadata.
+                raise SubmissionError(
+                    f"Peer {peer.resolved_name!r} resolved to an "
+                    "InheritPackagingStrategy at submission time. Parallel "
+                    'peers using packaging="inherit" are rewritten to the '
+                    "leader/first peer's config before prepare() — this "
+                    "path should never be hit."
+                )
+            strategies_by_key[key] = strategy
+        peer_to_strategy[peer.resolved_name] = strategies_by_key[key]
+
+    return peer_to_strategy
 
 
 def _leader_or_first(spec: "_ParallelSpec") -> "Peer":
@@ -192,20 +278,20 @@ def submit_parallel_spec(
     from .job import Job
     from .parallel_job import ParallelJob
 
-    _check_phase2_scope(spec)
-
     slurm_task, task_defaults, task_func = _representative_task_and_defaults(spec)
 
     pre_submission_id, _, target_job_dir, _ = setup_job_directory(
         cluster, slurm_task, task_defaults
     )
 
-    # Shared packaging (single-packaging assertion happens in
-    # _check_phase2_scope above). resolve_packaging_config picks up the
-    # task's packaging config by default.
-    packaging_strategy = prepare_packaging_strategy(
-        cluster, slurm_task, packaging_config=None
-    )
+    # Per-peer packaging — one prepare() call per unique config. Peers
+    # sharing an image share one strategy instance; ``packaging="inherit"``
+    # is resolved to the leader/first peer *before* prepare() runs.
+    peer_packaging_strategies = _prepare_per_peer_packaging(cluster, spec)
+    # Representative strategy for callbacks that expect a single value. The
+    # leader / first-peer strategy is the natural pick.
+    representative_peer = _leader_or_first(spec)
+    packaging_strategy = peer_packaging_strategies[representative_peer.resolved_name]
 
     # Build the ``#SBATCH`` header using the same precedence as the single-job
     # path — cluster defaults → slurmfile submit defaults → task defaults →
@@ -246,6 +332,7 @@ def submit_parallel_spec(
         sbatch_overrides={},
         callbacks=cluster.callbacks,
         replica_items=replica_items,
+        peer_packaging_strategies=peer_packaging_strategies,
     )
     logger.debug(
         "[%s] --- RENDERED PARALLEL SCRIPT ---\n%s\n[%s] --- END RENDERED SCRIPT ---",

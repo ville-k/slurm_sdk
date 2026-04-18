@@ -603,6 +603,7 @@ def render_parallel_script(
     sbatch_overrides: Dict[str, Any],
     callbacks: Optional[List[Any]] = None,
     replica_items: Optional[Dict[str, List[Any]]] = None,
+    peer_packaging_strategies: Optional[Dict[str, "PackagingStrategy"]] = None,
 ) -> str:
     """Render the batch script for a ``parallel(...)`` submission.
 
@@ -613,8 +614,11 @@ def render_parallel_script(
 
     Args:
         spec: Validated :class:`_ParallelSpec`. May contain one or more pools.
-        packaging_strategy: Shared packaging strategy — every peer uses the
-            same image / venv. Per-peer packaging arrives in Phase 10.
+        packaging_strategy: Representative packaging strategy — drives the
+            batch-level sbatch directives and environment exports. When
+            ``peer_packaging_strategies`` is omitted (tests, single-image
+            submissions) this strategy is also used to wrap every peer's
+            srun command.
         target_job_dir: Absolute path on the backend where the job runs.
         pre_submission_id: The base SDK id for this allocation. Each peer
             derives its own id via :func:`peer_pre_submission_id`.
@@ -631,10 +635,36 @@ def render_parallel_script(
             scalar) already resolved by the submission pipeline — the
             renderer emits one heredoc per replica index. Required for every
             replica peer in ``spec``; raises otherwise.
+        peer_packaging_strategies: Optional ``{peer_name: PackagingStrategy}``
+            giving each peer its own strategy (Phase 10 heterogeneous
+            packaging). Strategies are deduped by identity so the rendered
+            script emits setup/cleanup once per unique strategy instance.
+            When omitted every peer falls back to ``packaging_strategy``.
 
     Returns:
         The rendered bash script as a single string.
     """
+    # Per-peer strategy map — default every peer to the single shared
+    # strategy so callers that do not opt into Phase 10 (e.g. tests) keep
+    # working byte-for-byte.
+    if peer_packaging_strategies is None:
+        peer_packaging_strategies = {
+            peer.resolved_name: packaging_strategy for peer in spec.peers
+        }
+    else:
+        # Belt-and-braces: validation should have caught this, but the
+        # renderer depends on every peer having an entry.
+        missing = [
+            p.resolved_name
+            for p in spec.peers
+            if p.resolved_name not in peer_packaging_strategies
+        ]
+        if missing:
+            raise RuntimeError(
+                "peer_packaging_strategies is missing entries for peer(s): "
+                f"{missing}. Every peer in the spec must have a resolved "
+                "packaging strategy."
+            )
     # Pools in declaration order — component 0 is the first pool. Dict
     # insertion order preservation (3.7+) is what lets us use the ordered
     # list directly as the component layout.
@@ -719,11 +749,32 @@ def render_parallel_script(
     script_lines.append("")
     script_lines.extend(_job_directory_setup_lines())
     script_lines.append("")
-    script_lines.extend(
-        _emit_packaging_setup(
-            packaging_strategy, representative_task, pre_submission_id
+
+    # Emit packaging setup once per unique strategy instance. Dedup by
+    # Python object identity: ``_prepare_per_peer_packaging`` already
+    # collapsed equivalent configs to the same instance, so object identity
+    # is the right dedup key here (comparing .config dicts would also work
+    # but would re-hash on every peer).
+    #
+    # Peers are iterated in declaration order so setup blocks appear in the
+    # order strategies were first encountered — this keeps the rendered
+    # script deterministic for golden-file tests.
+    unique_strategies: List["PackagingStrategy"] = []
+    seen_ids: set[int] = set()
+    for peer in spec.peers:
+        strategy = peer_packaging_strategies[peer.resolved_name]
+        if id(strategy) in seen_ids:
+            continue
+        seen_ids.add(id(strategy))
+        unique_strategies.append(strategy)
+
+    # Use the representative task as the token handed to each strategy;
+    # packaging hooks only read ``__name__``/``__module__`` which are
+    # homogeneous across peers in a single parallel() call.
+    for strategy in unique_strategies:
+        script_lines.extend(
+            _emit_packaging_setup(strategy, representative_task, pre_submission_id)
         )
-    )
     script_lines.append("")
 
     # Callbacks + sys.path are shared across peers — one heredoc for each.
@@ -761,7 +812,10 @@ def render_parallel_script(
     script_lines.append("")
 
     # Build per-peer srun commands. The tuple order follows spec.peers so the
-    # rendered script respects the caller's declaration order.
+    # rendered script respects the caller's declaration order. Each peer's
+    # runner command is wrapped by *its own* packaging strategy — peers with
+    # ``packaging="none"`` emit a bare srun while containerised peers
+    # prepend ``srun --container-image=…``.
     peer_commands: List[Tuple["Peer", str]] = []
     default_pool_name = pool_items[0][0]
     for peer in spec.peers:
@@ -778,7 +832,7 @@ def render_parallel_script(
             kwargs_basename=kwargs_basename,
             callbacks_file=callbacks_file,
             pickled_sys_path=pickled_sys_path,
-            packaging_strategy=packaging_strategy,
+            packaging_strategy=peer_packaging_strategies[peer.resolved_name],
             component_index=comp_index_for_peer,
         )
         peer_commands.append((peer, cmd))
@@ -796,6 +850,24 @@ def render_parallel_script(
     script_lines.extend(_emit_plan_heredoc(plan))
     script_lines.append("")
     script_lines.extend(_emit_supervisor_invocation())
+
+    # Per-strategy cleanup — emitted after the supervisor's ``exec`` so it
+    # only runs if ``exec`` fails (defensive) and, importantly, gives each
+    # strategy a place to record teardown hooks that container-only
+    # deployments might need. Reverse-declaration order so inter-strategy
+    # dependencies (e.g. a venv strategy built on top of a container) tear
+    # down safely. Currently every concrete strategy returns ``[]`` here so
+    # this is a no-op in practice, but the scaffolding lets strategies opt
+    # in without another rendering change.
+    for strategy in reversed(unique_strategies):
+        cleanup = strategy.generate_cleanup_commands(
+            task=representative_task,
+            job_id=pre_submission_id,
+            job_dir="$JOB_DIR",
+        )
+        if cleanup:
+            script_lines.append("")
+            script_lines.extend(cleanup)
 
     return "\n".join(line.rstrip("\r") for line in "\n".join(script_lines).splitlines())
 
