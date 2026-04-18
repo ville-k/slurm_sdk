@@ -59,11 +59,6 @@ def _check_phase2_scope(spec: "_ParallelSpec") -> None:
                 f"Peer.replicas(count={peer.count}) is not supported yet. "
                 "Replica sets ship in Phase 5."
             )
-        if peer.on_failure in ("restart", "callback"):
-            raise NotImplementedError(
-                f"Peer on_failure={peer.on_failure!r} is not supported yet. "
-                "Restart / callback failure policies ship in Phase 4."
-            )
         if peer.on_node is not None or peer.colocate_with is not None:
             raise NotImplementedError(
                 "Peer placement directives (on_node, colocate_with) are not "
@@ -273,6 +268,7 @@ def submit_parallel_spec(
         job_id=base_job_id,
         peer_jobs=peer_jobs,
         spec=spec,
+        target_job_dir=target_job_dir,
     )
 
     # Emit end-of-submit callback using the representative peer's Job so

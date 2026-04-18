@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `on_failure="restart"` policy with `max_restarts` budget — the supervisor
+  re-launches a failed peer (keeping name / args / placement) until it
+  succeeds or the budget is exhausted. Exhausted restarts fall through to
+  the `"kill"` path and trigger cascading shutdown
+- `on_failure="callback"` policy — users supply a top-level function resolved
+  by `module:qualname` at supervisor startup. On failure the supervisor
+  invokes the callback with a `JobSnapshot` and dispatches on its return
+  value (`"kill"` or `"continue"`). Lambdas and nested functions are rejected
+  at spec-validation time
+- `ParallelJob.peer_outcomes()` returns a `{peer_name: PeerOutcome}` dict
+  describing exactly what happened to each peer: `success`, `restarted`,
+  `continue_on_failure`, `fatal`, `shutdown_by_leader`, or `not_started`
+- `PeerOutcome` frozen dataclass exposing `status`, `exit_code`,
+  `restart_count`, and a diagnostic `message`
+- `ParallelJob.get_results()` now raises `CompositeJobError` aggregating
+  every fatal peer's `PeerFailureError` when any peer's outcome is `"fatal"`
+  or `"not_started"`
 - `parallel(...)` entry point now submits single-pool allocations end-to-end.
   Each peer runs as its own `srun` step inside one `sbatch` job, with
   per-peer result files accessible via `job["<peer_name>"].get_result()`

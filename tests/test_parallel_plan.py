@@ -75,3 +75,26 @@ def test_plan_defaults_max_restarts_when_missing():
 }"""
     plan = Plan.from_json(raw)
     assert plan.peers[0].max_restarts == 0
+    # Missing callback field defaults to None — Phase 4 adds the field but
+    # older plans written by the Phase 3 pipeline must still round-trip.
+    assert plan.peers[0].callback is None
+
+
+def test_plan_peer_preserves_callback_fqname():
+    peer = PlanPeer(
+        name="worker",
+        pool="default",
+        leader=False,
+        on_failure="callback",
+        max_restarts=0,
+        srun_command_line="echo",
+        callback="my.module:my_callback",
+    )
+    plan = Plan(
+        peers=[peer],
+        grace_period_seconds=5,
+        pool_names=["default"],
+        pre_submission_id="cb",
+    )
+    restored = Plan.from_json(plan.to_json())
+    assert restored.peers[0].callback == "my.module:my_callback"

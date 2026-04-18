@@ -89,6 +89,9 @@ def build_registry_skeleton(plan: Plan, hostnames: Tuple[str, ...]) -> dict:
                 "metadata": {},
                 "state": STATE_PENDING,
                 "restart_count": 0,
+                "outcome": None,
+                "final_exit_code": None,
+                "message": None,
             }
         ]
 

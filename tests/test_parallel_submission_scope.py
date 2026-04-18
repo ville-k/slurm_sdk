@@ -77,23 +77,27 @@ def test_replica_set_raises_not_implemented():
         _check_phase2_scope(spec)
 
 
-def test_restart_policy_raises_not_implemented():
+def test_restart_policy_passes_scope_check():
+    # Phase 4 enables restart/callback — these must pass the scope gate now.
     spec = _spec(
         Peer(_a.partial(cfg={}), on_failure="restart", max_restarts=2),
     )
-    with pytest.raises(NotImplementedError, match="Phase 4"):
-        _check_phase2_scope(spec)
+    _check_phase2_scope(spec)
 
 
-def test_callback_policy_raises_not_implemented():
-    def cb(snap: Any):
-        return "kill"
+def _module_level_callback(snap: Any) -> str:
+    return "kill"
 
+
+def test_callback_policy_passes_scope_check():
     spec = _spec(
-        Peer(_a.partial(cfg={}), on_failure="callback", callback=cb),
+        Peer(
+            _a.partial(cfg={}),
+            on_failure="callback",
+            callback=_module_level_callback,
+        ),
     )
-    with pytest.raises(NotImplementedError, match="Phase 4"):
-        _check_phase2_scope(spec)
+    _check_phase2_scope(spec)
 
 
 def test_heterogeneous_packaging_raises_not_implemented():

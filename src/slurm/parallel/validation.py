@@ -70,6 +70,7 @@ def validate_spec(spec: _ParallelSpec) -> None:
     _check_colocate_with(spec, problems)
     _check_capacity(spec, problems)
     _check_outer_options(spec, problems)
+    _check_callback_resolvability(spec, problems)
 
     if problems:
         lines = [f"  • {p}" for p in problems]
@@ -373,3 +374,37 @@ def _check_outer_options(spec: _ParallelSpec, problems: list[str]) -> None:
         problems.append(
             f"grace_period_seconds must be >= 0, got {spec.grace_period_seconds!r}."
         )
+
+
+def _check_callback_resolvability(spec: _ParallelSpec, problems: list[str]) -> None:
+    """Reject callbacks the supervisor cannot import by fully-qualified name.
+
+    The supervisor runs in its own process, so live callables cannot travel
+    across the submission boundary via pickle reliably — we serialize them
+    by ``module:qualname`` instead. That works for top-level functions and
+    class methods with stable locations but fails for lambdas, nested
+    functions, and anything else whose ``__qualname__`` contains ``<locals>``
+    or ``<lambda>``. Detecting this at spec-build time gives users a clear
+    error instead of a confusing ``AttributeError`` when the supervisor
+    tries to resolve the callback.
+    """
+    for peer in spec.peers:
+        if peer.on_failure != "callback" or peer.callback is None:
+            continue
+        cb = peer.callback
+        module = getattr(cb, "__module__", None)
+        qualname = getattr(cb, "__qualname__", None)
+        if not module or not qualname:
+            problems.append(
+                f"Peer {peer.resolved_name!r} callback has no resolvable "
+                "module/qualname — use a top-level function defined in an "
+                "importable module."
+            )
+            continue
+        if "<lambda>" in qualname or "<locals>" in qualname:
+            problems.append(
+                f"Peer {peer.resolved_name!r} callback {module}:{qualname} "
+                "is a lambda or nested function — the supervisor cannot "
+                "resolve it by name. Define the callback as a top-level "
+                "function in an importable module."
+            )

@@ -324,6 +324,25 @@ def _emit_peer_srun_command(
     return f"{srun_prefix} {wrapped}"
 
 
+def _serialize_callback(cb: Any) -> "str | None":
+    """Serialize a user callback to ``module:qualname`` for the supervisor.
+
+    Returns ``None`` for peers without a callback. Validation has already
+    rejected lambdas / nested functions, so callers here can assume a
+    resolvable location.
+    """
+    if cb is None:
+        return None
+    module = getattr(cb, "__module__", None)
+    qualname = getattr(cb, "__qualname__", None)
+    if not module or not qualname:
+        raise RuntimeError(
+            "Callback has no module/qualname; this should have been rejected "
+            "by spec validation."
+        )
+    return f"{module}:{qualname}"
+
+
 def build_plan(
     *,
     spec: "_ParallelSpec",
@@ -344,6 +363,7 @@ def build_plan(
             on_failure=peer.on_failure,
             max_restarts=peer.max_restarts,
             srun_command_line=cmd,
+            callback=_serialize_callback(peer.callback),
         )
         for peer, cmd in peer_commands
     ]

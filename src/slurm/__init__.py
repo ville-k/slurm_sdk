@@ -19,7 +19,7 @@ from .runtime import JobContext
 from .workflow import WorkflowContext
 from .array_job import ArrayJob
 from .parallel import parallel, Peer, Pool, Topology
-from .parallel_job import ParallelJob
+from .parallel_job import ParallelJob, PeerOutcome
 from .packaging import PackagingConfig
 from .callbacks import (
     BaseCallback,
@@ -61,6 +61,7 @@ __all__ = [
     "Pool",
     "Topology",
     "ParallelJob",
+    "PeerOutcome",
     # Configuration
     "PackagingConfig",
     # Callbacks

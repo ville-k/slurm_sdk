@@ -166,13 +166,15 @@ def test_first_fatal_exit_code_wins():
     assert rc == 11
 
 
-def test_unknown_policy_raises_not_implemented():
+def test_restart_on_success_is_treated_as_success():
+    # A peer with on_failure="restart" that exits 0 on its first attempt
+    # doesn't actually restart — just succeeds. Phase 4 adds this policy;
+    # the "restart budget exhausted" path lives in its own test file.
     plan = _plan(
         _peer("learner", "exit 0", on_failure="restart"),
     )
-    # The Popen survives briefly; wait for classification to raise.
-    with pytest.raises(NotImplementedError, match="Phase 4"):
-        topology_supervisor.run_supervisor(plan, launch=_shell_launch)
+    rc = topology_supervisor.run_supervisor(plan, launch=_shell_launch)
+    assert rc == 0
 
 
 def test_signal_slurm_job_is_noop_without_scancel(monkeypatch):
