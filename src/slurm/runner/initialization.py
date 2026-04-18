@@ -57,6 +57,12 @@ class RunnerArgs:
     # so the peer path reuses :func:`_load_regular_task_arguments`.
     step: Optional[str] = None
 
+    # Phase 9: base64-encoded JSON of ``@task(ports=...)`` for this peer.
+    # Resolved at startup — fixed ints passed through, ``"auto"`` entries
+    # get ephemeral sockets bound (and the resulting port number recorded
+    # in the registry) before user code runs.
+    peer_ports_b64: Optional[str] = None
+
     @property
     def is_array_job(self) -> bool:
         """Check if this is an array job based on arguments."""
@@ -152,6 +158,14 @@ def create_argument_parser() -> argparse.ArgumentParser:
             "supervisor for steps inside a parallel(...) allocation."
         ),
     )
+    parser.add_argument(
+        "--peer-ports-b64",
+        help=(
+            "Base64-encoded JSON mapping for the peer's declared ports "
+            "(``@task(ports=...)``). The runner binds ephemeral sockets "
+            "for any 'auto' entries before user code runs."
+        ),
+    )
 
     return parser
 
@@ -184,6 +198,7 @@ def parse_args(argv: Optional[list[str]] = None) -> RunnerArgs:
         stderr_path=args.stderr_path,
         pre_submission_id=args.pre_submission_id,
         step=args.step,
+        peer_ports_b64=args.peer_ports_b64,
     )
 
 
@@ -469,6 +484,51 @@ def _load_peer_replica_arguments(
     return task_args, task_kwargs
 
 
+def resolve_peer_ports(args: RunnerArgs) -> Optional[dict]:
+    """Resolve this peer's ports before user code starts.
+
+    Decodes the base64 JSON spec passed via ``--peer-ports-b64``. Any
+    ``"auto"`` entries trigger an ephemeral socket bind + close dance that
+    captures a concrete port number. Fixed ``int`` entries pass through
+    unchanged. Returns a ``{name: int}`` map suitable for populating
+    :attr:`JobContext.my_ports` and the peer's registry entry.
+
+    Returns ``None`` when no spec was provided — peer didn't declare any
+    ports via ``@task(ports=...)``.
+    """
+    if not args.peer_ports_b64:
+        return None
+    import base64 as _b64
+    import json as _json
+    from slurm.runtime import _reserve_ephemeral_port
+
+    try:
+        raw = _b64.b64decode(args.peer_ports_b64.encode()).decode("utf-8")
+        spec = _json.loads(raw)
+    except Exception as exc:
+        logger.error("Could not parse --peer-ports-b64: %s", exc)
+        return None
+    if not isinstance(spec, dict):
+        logger.error("--peer-ports-b64 did not decode to a dict: %r", spec)
+        return None
+
+    resolved: dict = {}
+    for name, value in spec.items():
+        if isinstance(value, str) and value == "auto":
+            try:
+                resolved[str(name)] = _reserve_ephemeral_port()
+            except OSError as exc:
+                logger.error("Could not reserve auto port %s: %s", name, exc)
+        elif isinstance(value, bool):
+            # bool ⊂ int — guard against a bad spec slipping through.
+            logger.error("Invalid port value for %s: %r", name, value)
+        elif isinstance(value, int):
+            resolved[str(name)] = int(value)
+        else:
+            logger.error("Invalid port value for %s: %r", name, value)
+    return resolved
+
+
 def load_callbacks(callbacks_file: str) -> List[BaseCallback]:
     """Load callbacks from a pickled file.
 
@@ -512,6 +572,7 @@ __all__ = [
     "restore_sys_path",
     "load_task_arguments",
     "load_callbacks",
+    "resolve_peer_ports",
     "_load_peer_task_arguments",
     "_load_peer_replica_arguments",
 ]

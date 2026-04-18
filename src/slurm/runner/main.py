@@ -27,6 +27,7 @@ from slurm.runtime import (
     _bind_job_context,
     _function_wants_job_context,
     current_job_context,
+    install_shutdown_handler,
 )
 from slurm.workflow import WorkflowContext
 
@@ -37,6 +38,7 @@ from .initialization import (
     load_task_arguments,
     log_startup_info,
     parse_args,
+    resolve_peer_ports,
     restore_sys_path,
 )
 from .callbacks import run_callbacks
@@ -53,6 +55,29 @@ from .workflow_builder import (
 )
 
 logger = logging.getLogger("slurm.runner")
+
+
+def _publish_initial_ports(job_context: JobContext, ports: dict) -> None:
+    """Write the peer's resolved ports into the registry entry.
+
+    Only runs when the runner is executing a peer step (``peer_name`` set)
+    and a registry path is available. Outside parallel allocations (plain
+    task runs, tests) it is a no-op.
+    """
+    if job_context.peer_name is None or job_context._registry_path is None:
+        return
+    try:
+        from slurm.parallel.registry import update_peer_ports
+
+        replica = job_context.replica_index or 0
+        update_peer_ports(
+            job_context._registry_path,
+            job_context.peer_name,
+            replica,
+            ports=ports,
+        )
+    except (FileNotFoundError, KeyError, IndexError, OSError) as exc:
+        logger.debug("Could not publish initial ports: %s", exc)
 
 
 def get_job_id_from_env() -> Optional[str]:
@@ -250,8 +275,31 @@ def main():
     configure_logging(args.loglevel)
     log_startup_info(args)
 
+    # Install SIGTERM handler from the main thread so ``ctx.shutdown_requested``
+    # flips when the supervisor (or operator) signals the runner. This must
+    # happen in ``main()`` because Python only allows ``signal.signal`` from
+    # the main thread.
+    try:
+        install_shutdown_handler()
+    except ValueError:
+        # Not on the main thread (e.g. runner invoked under a test harness).
+        logger.debug("Could not install SIGTERM handler — not on main thread")
+
+    # Resolve any ports declared via ``@task(ports=...)`` before user code
+    # runs. ``"auto"`` entries bind ephemeral sockets; fixed ints pass
+    # through. ``None`` means the peer didn't declare ports.
+    resolved_ports = resolve_peer_ports(args)
+
     # Get runtime context
     job_context: JobContext = current_job_context()
+    if resolved_ports:
+        # Mutate the frozen-dataclass's underlying dict in place so
+        # ``ctx.my_ports`` reflects startup bindings. ``_my_ports`` is a
+        # mutable dict precisely so ``reserve_port`` / this path can
+        # publish without rebuilding the context.
+        job_context._my_ports.update(resolved_ports)
+        # Record in the registry so peers discover each other's ports.
+        _publish_initial_ports(job_context, resolved_ports)
     job_id = get_job_id_from_env()
     job_dir = args.job_dir or os.environ.get("JOB_DIR")
     stdout_path = args.stdout_path or os.environ.get("SLURM_STDOUT")
