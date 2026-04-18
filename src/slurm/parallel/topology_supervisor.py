@@ -34,6 +34,7 @@ import argparse
 import importlib
 import logging
 import os
+import shlex
 import signal
 import subprocess  # nosec B404 - Popen is the supervisor's core mechanism
 import sys
@@ -147,24 +148,141 @@ def _hard_cancel_slurm_job(
         logger.debug("scancel (hard) not issued: %s", err)
 
 
-def _terminate_local_processes(processes: Dict[int, subprocess.Popen]) -> None:
+def _terminate_local_processes(
+    processes: Dict[int, subprocess.Popen], *, use_process_groups: bool = False
+) -> None:
+    """Send SIGTERM to each peer subprocess.
+
+    When ``use_process_groups`` is True (local mode), we signal the whole
+    process group via :func:`os.killpg` so descendants the peer spawned
+    also receive the signal. Real-Slurm mode relies on ``scancel
+    --signal=TERM`` for remote step processes and only needs ``terminate()``
+    on the local ``srun`` wrapper.
+    """
     for pid, proc in list(processes.items()):
         try:
-            proc.terminate()
+            if use_process_groups:
+                try:
+                    pgid = os.getpgid(pid)
+                except ProcessLookupError:
+                    continue
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
         except ProcessLookupError:
             pass
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("terminate pid=%s failed: %s", pid, exc)
 
 
-def _kill_local_processes(processes: Dict[int, subprocess.Popen]) -> None:
+def _kill_local_processes(
+    processes: Dict[int, subprocess.Popen], *, use_process_groups: bool = False
+) -> None:
+    """Send SIGKILL to each peer subprocess (hard-kill cascade)."""
     for pid, proc in list(processes.items()):
         try:
-            proc.kill()
+            if use_process_groups:
+                try:
+                    pgid = os.getpgid(pid)
+                except ProcessLookupError:
+                    continue
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                proc.kill()
         except ProcessLookupError:
             pass
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("kill pid=%s failed: %s", pid, exc)
+
+
+def _extract_runner_argv(srun_command_line: str) -> List[str]:
+    """Pull the ``python -m slurm.runner ...`` portion out of an srun line.
+
+    Rendered srun commands follow the shape::
+
+        srun <flags> --export=... "$PY_EXEC_RESOLVED" -m slurm.runner <args>
+
+    Local mode skips the ``srun`` prefix entirely — we need the runner's
+    argv so we can launch it directly under the current Python interpreter.
+    Split on the ``"$PY_EXEC_RESOLVED"`` sentinel; the tail is the runner
+    invocation modulo the interpreter token (which the caller prepends
+    using :data:`sys.executable`).
+
+    Returns:
+        A list of tokens starting at ``-m`` (inclusive). Raises
+        :class:`RuntimeError` when the sentinel is absent — that would
+        indicate a rendering change that broke the local-mode contract.
+    """
+    sentinel = '"$PY_EXEC_RESOLVED"'
+    idx = srun_command_line.find(sentinel)
+    if idx < 0:
+        raise RuntimeError(
+            "Cannot extract runner argv from srun command line — "
+            f"missing sentinel {sentinel!r}: {srun_command_line!r}"
+        )
+    tail = srun_command_line[idx + len(sentinel) :].strip()
+    # shlex handles the double-quoted arg values the renderer emits.
+    return shlex.split(tail)
+
+
+def _launch_peer_local(
+    peer: PlanPeer,
+    *,
+    registry_path: Optional[Path] = None,
+    shared_dir: Optional[Path] = None,
+    replica_index: int = 0,
+    replica_count: int = 1,
+    job_id: Optional[str] = None,
+) -> subprocess.Popen:
+    """Launch one peer's runner directly (no ``srun``) for local mode.
+
+    Real Slurm would use ``srun`` to spawn the runner with
+    ``SLURM_PROCID`` / ``SLURM_NTASKS`` / ``SLURM_JOB_ID`` set. In local
+    mode we synthesise those env vars per subprocess so
+    :func:`build_job_context` sees a coherent picture.
+
+    For replica peers (``replica_count > 1``) this helper is called once
+    per replica index — each call gets its own ``SLURM_PROCID``.
+    """
+    argv = _extract_runner_argv(peer.srun_command_line)
+    env = os.environ.copy()
+    env["PY_EXEC_RESOLVED"] = sys.executable
+    # The runner argv carries literal ``$JOB_DIR`` tokens because the real
+    # srun path expects bash expansion. In local mode we do the expansion
+    # ourselves so the runner sees concrete paths (``os.path.expandvars``
+    # relies on the supervisor's env which inherits ``JOB_DIR`` from the
+    # backend bootstrap).
+    argv = [os.path.expandvars(arg) for arg in argv]
+    cmd = [sys.executable, *argv]
+    logger.info(
+        "Launching peer %s[%d/%d] locally: %s",
+        peer.name,
+        replica_index,
+        replica_count,
+        cmd,
+    )
+    # Synthesize the SLURM_* env vars the runner's JobContext reads.
+    synthetic_job_id = job_id or str(os.getpid())
+    env["SLURM_JOB_ID"] = synthetic_job_id
+    env["SLURM_PROCID"] = str(replica_index)
+    env["SLURM_NTASKS"] = str(replica_count)
+    env["SLURM_SDK_PEER_NAME"] = peer.name
+    env["SLURM_SDK_PEER_POOL"] = peer.pool
+    if replica_count > 1:
+        env["SLURM_SDK_REPLICA_COUNT"] = str(replica_count)
+    if registry_path is not None:
+        env["SLURM_SDK_REGISTRY_PATH"] = str(registry_path)
+    if shared_dir is not None:
+        env["SLURM_SDK_SHARED_DIR"] = str(shared_dir)
+
+    # Each peer gets its own process group so a cascading SIGTERM to one
+    # process group doesn't take down siblings accidentally and so the
+    # supervisor can ``killpg`` descendants too.
+    return subprocess.Popen(  # nosec B603 - runner argv comes from SDK-rendered plan.json
+        cmd,
+        env=env,
+        start_new_session=True,
+    )
 
 
 def _launch_peer(
@@ -465,6 +583,7 @@ def run_supervisor(
     registry_path: Optional[Path] = None,
     component_count: Optional[int] = None,
     shared_dir: Optional[Path] = None,
+    local_mode: bool = False,
 ) -> int:
     """Launch every peer, apply failure policies, return final exit code.
 
@@ -487,6 +606,11 @@ def run_supervisor(
             of ``plan.pool_names`` when ``None``. Drives the scancel cascade:
             with ``component_count > 1`` the supervisor cancels every
             component's job id (``<jobid>``, ``<jobid>+1``, ...).
+        local_mode: When ``True``, peers are launched directly (no ``srun``)
+            via :func:`_launch_peer_local`. Replica peers spawn one subprocess
+            per replica (real srun would use ``--ntasks=N`` to do this for us).
+            Shutdown uses process-group SIGTERM / SIGKILL instead of ``scancel``
+            because there is no Slurm controller in local mode.
     """
     if launch is None:
         # Bind the registry path into the default launcher so peer ``Popen``s
@@ -495,9 +619,14 @@ def run_supervisor(
         # skipping it — most tests don't need peer-discovery surfaces).
         from functools import partial as _partial
 
-        launch_fn: Callable[[PlanPeer], subprocess.Popen] = _partial(
-            _launch_peer, registry_path=registry_path, shared_dir=shared_dir
-        )
+        if local_mode:
+            # Local mode ignores component_count (no hetjob concept without
+            # Slurm) and always launches peers as direct Python subprocesses.
+            launch_fn = None  # type: ignore[assignment]
+        else:
+            launch_fn = _partial(
+                _launch_peer, registry_path=registry_path, shared_dir=shared_dir
+            )
     else:
         launch_fn = launch
     if component_count is None:
@@ -514,11 +643,41 @@ def run_supervisor(
     # if we extend this loop later to stagger launches).
     peers_by_name: Dict[str, PlanPeer] = {peer.name: peer for peer in plan.peers}
     recorded: Dict[str, str] = {}
+    # In local mode we spawn one subprocess per replica (real srun would use
+    # --ntasks=N inside one step). Track which peer "owns" each Popen so the
+    # policy logic can treat every child uniformly while still consulting
+    # the peer's on_failure setting.
+    #
+    # We close over the registry / shared dir / job_id when launching, so
+    # the default launcher keeps its minimal (peer,) signature while the
+    # local launcher can accept replica_index / replica_count.
+
+    def _launch_one(peer: PlanPeer, replica_index: int) -> subprocess.Popen:
+        """Launch one subprocess for ``peer`` — real Slurm or local mode.
+
+        In local mode we call :func:`_launch_peer_local` with the replica
+        coordinates. In Slurm mode we fall through to the caller-provided
+        (or default) launch function, which launches exactly one ``srun``
+        per peer regardless of replica count.
+        """
+        if local_mode:
+            return _launch_peer_local(
+                peer,
+                registry_path=registry_path,
+                shared_dir=shared_dir,
+                replica_index=replica_index,
+                replica_count=max(1, peer.replica_count),
+                job_id=job_id,
+            )
+        assert launch_fn is not None
+        return launch_fn(peer)
 
     for peer in plan.peers:
-        proc = launch_fn(peer)
-        processes[proc.pid] = proc
-        peer_by_pid[proc.pid] = peer
+        launches = max(1, peer.replica_count) if local_mode else 1
+        for replica_index in range(launches):
+            proc = _launch_one(peer, replica_index)
+            processes[proc.pid] = proc
+            peer_by_pid[proc.pid] = peer
 
     final_exit = 0
     shutdown_deadline: Optional[float] = None
@@ -533,8 +692,9 @@ def run_supervisor(
                 len(processes),
             )
             shutdown_deadline = time.time() + plan.grace_period_seconds
-            _signal_slurm_job(job_id, "TERM", component_count=component_count)
-            _terminate_local_processes(processes)
+            if not local_mode:
+                _signal_slurm_job(job_id, "TERM", component_count=component_count)
+            _terminate_local_processes(processes, use_process_groups=local_mode)
 
         # 2. Reap any peers that exited since the last poll.
         for pid in list(processes):
@@ -574,8 +734,11 @@ def run_supervisor(
                         len(processes),
                     )
                     shutdown_deadline = time.time() + plan.grace_period_seconds
-                    _signal_slurm_job(job_id, "TERM", component_count=component_count)
-                    _terminate_local_processes(processes)
+                    if not local_mode:
+                        _signal_slurm_job(
+                            job_id, "TERM", component_count=component_count
+                        )
+                    _terminate_local_processes(processes, use_process_groups=local_mode)
                 continue
 
             # Non-zero: shutdown-in-progress peers became victims of the
@@ -613,7 +776,14 @@ def run_supervisor(
                     new_count,
                     peer.max_restarts,
                 )
-                new_proc = launch_fn(peer)
+                # Restart semantics: in local mode we restart replica 0 only
+                # (the runner's restart counter is peer-wide, not replica-wide).
+                # Real-Slurm path restarts the whole step.
+                if local_mode:
+                    new_proc = _launch_one(peer, 0)
+                else:
+                    assert launch_fn is not None
+                    new_proc = launch_fn(peer)
                 processes[new_proc.pid] = new_proc
                 peer_by_pid[new_proc.pid] = peer
                 continue
@@ -654,8 +824,9 @@ def run_supervisor(
                     len(processes),
                 )
                 shutdown_deadline = time.time() + plan.grace_period_seconds
-                _signal_slurm_job(job_id, "TERM", component_count=component_count)
-                _terminate_local_processes(processes)
+                if not local_mode:
+                    _signal_slurm_job(job_id, "TERM", component_count=component_count)
+                _terminate_local_processes(processes, use_process_groups=local_mode)
 
         # 3. Enforce grace window — hard-kill anything still running when
         #    the deadline passes.
@@ -669,8 +840,9 @@ def run_supervisor(
                 "Grace window expired; hard-killing %d remaining peer(s)",
                 len(processes),
             )
-            _kill_local_processes(processes)
-            _hard_cancel_slurm_job(job_id, component_count=component_count)
+            _kill_local_processes(processes, use_process_groups=local_mode)
+            if not local_mode:
+                _hard_cancel_slurm_job(job_id, component_count=component_count)
             hard_killed = True
 
         if processes:
@@ -740,6 +912,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             "during cascading shutdown. Defaults to the plan's value."
         ),
     )
+    parser.add_argument(
+        "--local-mode",
+        action="store_true",
+        help=(
+            "Launch peers directly (no ``srun``) with synthesized "
+            "SLURM_* env vars. Used by LocalBackend when Slurm is not "
+            "installed on the developer workstation."
+        ),
+    )
     args = parser.parse_args(argv)
 
     _configure_logging()
@@ -770,6 +951,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         registry_path=registry_path if registry_path.exists() else None,
         component_count=component_count,
         shared_dir=shared_dir if shared_dir.exists() else None,
+        local_mode=bool(args.local_mode),
     )
     logger.info("Supervisor exiting with code %s", exit_code)
     return exit_code

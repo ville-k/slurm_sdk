@@ -17,6 +17,7 @@ to the leader (or first peer) at submission time so rendering sees a flat
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from ._submission import (
@@ -251,6 +252,28 @@ def _resolve_replica_items(peer: "Peer") -> List[Any]:
     )
 
 
+def _backend_will_bypass_sbatch(cluster: "Cluster") -> bool:
+    """Return ``True`` when :meth:`LocalBackend._should_bypass_sbatch` would fire.
+
+    Used by the submission pipeline to decide whether to run the Phase 12
+    local-host capacity check. We inspect the cluster's backend type and
+    check for the sbatch binary directly — cheaper than rendering a script
+    and asking the backend afterward.
+    """
+    import shutil as _shutil
+
+    backend_type = getattr(cluster, "backend_type", "") or ""
+    if backend_type.lower() != "local":
+        return False
+    if os.environ.get("SLURM_SDK_FORCE_LOCAL_PARALLEL", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return True
+    return _shutil.which("sbatch") is None
+
+
 def _per_peer_stdout_stderr(
     target_job_dir: str, pre_submission_id: str, peer_name: str
 ) -> Tuple[str, str]:
@@ -290,6 +313,15 @@ def submit_parallel_spec(
     """
     from .job import Job
     from .parallel_job import ParallelJob
+
+    # When the backend is local and Slurm is not installed (developer
+    # workstation), validate that the host can physically accommodate the
+    # job before we render anything — a clear error here beats a confusing
+    # OOM / CPU-thrash failure deep inside the supervisor.
+    if _backend_will_bypass_sbatch(cluster):
+        from .parallel.validation import validate_local_capacity
+
+        validate_local_capacity(spec)
 
     slurm_task, task_defaults, task_func = _representative_task_and_defaults(spec)
 
