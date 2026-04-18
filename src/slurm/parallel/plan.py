@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -60,6 +60,11 @@ class PlanPeer:
     # produced by :meth:`Peer.replicas`. The bootstrap uses this to size
     # the registry skeleton (``count`` entries per replica peer).
     replica_count: int = 1
+    # Hetjob component index — 0-based position of the peer's pool in the
+    # hetjob header sequence. Single-pool submissions leave this at ``0``.
+    # Drives ``srun --het-group=<N>`` at render time and the bootstrap's
+    # ``SLURM_JOB_NODELIST_HET_GROUP_<N>`` lookup.
+    component_index: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -71,6 +76,7 @@ class PlanPeer:
             "srun_command_line": self.srun_command_line,
             "callback": self.callback,
             "replica_count": self.replica_count,
+            "component_index": self.component_index,
         }
 
     @classmethod
@@ -84,6 +90,35 @@ class PlanPeer:
             srun_command_line=data["srun_command_line"],
             callback=data.get("callback"),
             replica_count=int(data.get("replica_count", 1)),
+            component_index=int(data.get("component_index", 0)),
+        )
+
+
+@dataclass
+class PlanComponent:
+    """Per-hetjob-component metadata.
+
+    Attributes:
+        index: 0-based component index. Component ``0`` is the first ``#SBATCH``
+            block in the rendered script.
+        pool: The pool name this component materialises.
+        nodes: Node count reserved for the component. Used by the bootstrap to
+            size the hostname slice it assigns to this component.
+    """
+
+    index: int
+    pool: str
+    nodes: int
+
+    def to_dict(self) -> dict:
+        return {"index": self.index, "pool": self.pool, "nodes": self.nodes}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PlanComponent":
+        return cls(
+            index=int(data["index"]),
+            pool=str(data["pool"]),
+            nodes=int(data.get("nodes", 1)),
         )
 
 
@@ -95,9 +130,15 @@ class Plan:
         peers: Peer declarations in declaration order.
         grace_period_seconds: SIGTERM-to-SIGKILL window during cascading
             shutdown.
-        pool_names: Pool names in hetjob component order. Always length 1 in
-            Phase 3; Phase 6 grows it.
+        pool_names: Pool names in hetjob component order. Length ``1`` for
+            single-pool submissions; equal to the number of components for
+            hetjob submissions.
         pre_submission_id: SDK base id threaded through for logging.
+        components: Per-component metadata. Length ``1`` for single-pool
+            submissions; matches ``pool_names`` for hetjob submissions. Added
+            in Phase 6 so the supervisor and bootstrap can drive per-component
+            scancel + nodelist resolution without having to reconstruct the
+            mapping from ``peers``.
     """
 
     peers: List[PlanPeer]
@@ -105,8 +146,16 @@ class Plan:
     pool_names: List[str]
     pre_submission_id: str = ""
     schema_version: int = 1
+    components: Optional[List[PlanComponent]] = None
 
     def to_json(self) -> str:
+        components = self.components
+        if components is None:
+            # Back-compat synthesis: one component per pool_name, same index.
+            components = [
+                PlanComponent(index=i, pool=name, nodes=1)
+                for i, name in enumerate(self.pool_names)
+            ]
         return json.dumps(
             {
                 "schema_version": self.schema_version,
@@ -114,6 +163,7 @@ class Plan:
                 "grace_period_seconds": self.grace_period_seconds,
                 "pool_names": list(self.pool_names),
                 "pre_submission_id": self.pre_submission_id,
+                "components": [c.to_dict() for c in components],
             },
             indent=2,
         )
@@ -122,12 +172,22 @@ class Plan:
     def from_json(cls, text: str) -> "Plan":
         data = json.loads(text)
         peers = [PlanPeer.from_dict(p) for p in data.get("peers", [])]
+        pool_names = list(data.get("pool_names", []))
+        raw_components = data.get("components")
+        if raw_components is None:
+            components = [
+                PlanComponent(index=i, pool=name, nodes=1)
+                for i, name in enumerate(pool_names)
+            ]
+        else:
+            components = [PlanComponent.from_dict(c) for c in raw_components]
         return cls(
             peers=peers,
             grace_period_seconds=int(data.get("grace_period_seconds", 10)),
-            pool_names=list(data.get("pool_names", [])),
+            pool_names=pool_names,
             pre_submission_id=str(data.get("pre_submission_id", "")),
             schema_version=int(data.get("schema_version", 1)),
+            components=components,
         )
 
     def peer_by_name(self, name: str) -> PlanPeer:
@@ -135,6 +195,15 @@ class Plan:
             if peer.name == name:
                 return peer
         raise KeyError(name)
+
+    def effective_components(self) -> List[PlanComponent]:
+        """Return ``components`` with a single-pool fallback synthesised."""
+        if self.components is not None:
+            return list(self.components)
+        return [
+            PlanComponent(index=i, pool=name, nodes=1)
+            for i, name in enumerate(self.pool_names)
+        ]
 
 
 def write_plan(path: "str | Path", plan: Plan) -> None:
@@ -152,7 +221,7 @@ def read_plan(path: "str | Path") -> Plan:
     return Plan.from_json(Path(path).read_text())
 
 
-__all__ = ["Plan", "PlanPeer", "read_plan", "write_plan"]
+__all__ = ["Plan", "PlanComponent", "PlanPeer", "read_plan", "write_plan"]
 
 
 # Keep default_factory import so ruff doesn't flag field as unused; reserved

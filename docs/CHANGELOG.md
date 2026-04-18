@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multi-pool `parallel(...)` submissions now render as Slurm heterogeneous
+  jobs (`hetjob`). Each pool declared in a `Topology` compiles to its own
+  `#SBATCH` header block separated by `#SBATCH hetjob` dividers; every peer's
+  `srun` step gets `--het-group=<component_index>` so it lands in the right
+  component. One `sbatch` call submits the whole allocation
+- The allocation bootstrap resolves per-component nodelists via
+  `SLURM_JOB_NODELIST_HET_GROUP_<N>` and seeds each peer's registry entry
+  with hostnames from its own pool
+- The supervisor now cancels every hetjob component on shutdown — `scancel`
+  receives `<jobid>`, `<jobid>+1`, `<jobid>+2`, ... in one call so Slurm tears
+  the whole allocation down atomically
+- Validation flags peers pinned to GPU-less pools when they declare
+  `gpus_per_task > 0`, pointing callers at the pools that actually have GPUs
+- `PlanComponent` metadata is serialised into `plan.json` so the supervisor
+  and bootstrap can drive per-component scancel / nodelist resolution without
+  reconstructing the mapping from `peers`
 - Replica sets via `Peer.replicas(count=N, args=...)` — one Slurm step runs
   `--ntasks=N` tasks; each replica picks its per-index args from a pickle
   selected by `SLURM_PROCID`. `args=` accepts `None`, a length-`count` list,

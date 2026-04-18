@@ -246,7 +246,9 @@ def test_on_node_label_resolves():
 
 
 def test_on_nodes_length_matches_count():
-    top = Topology(pools={"main": Pool(nodes=4, node_labels=["a", "b", "c", "d"])})
+    top = Topology(
+        pools={"main": Pool(nodes=4, gpus_per_node=1, node_labels=["a", "b", "c", "d"])}
+    )
     err = _run_parallel(
         Peer.replicas(_sim, count=4, pool="main", on_nodes=["a", "b", "c", "d"]),
         topology=top,
@@ -255,7 +257,9 @@ def test_on_nodes_length_matches_count():
 
 
 def test_on_nodes_individual_ref_validated():
-    top = Topology(pools={"main": Pool(nodes=4, node_labels=["a", "b", "c", "d"])})
+    top = Topology(
+        pools={"main": Pool(nodes=4, gpus_per_node=1, node_labels=["a", "b", "c", "d"])}
+    )
     with _expect_topology_error("unknown label", "'zzz'"):
         parallel(
             Peer.replicas(_sim, count=4, pool="main", on_nodes=["a", "b", "zzz", "d"]),
@@ -327,6 +331,36 @@ def test_pool_gpu_overflow_reported():
             ),
             topology=top,
         )
+
+
+def test_gpu_peer_in_cpu_only_pool_flagged():
+    """Phase 6: peer requesting GPUs in a CPU-only pool should be flagged as 'wrong pool'."""
+    top = Topology(
+        pools={
+            "gpu": Pool(nodes=1, gpus_per_node=8),
+            "cpu": Pool(nodes=1, cpus_per_node=32),
+        }
+    )
+    with _expect_topology_error("wrong pool", "'cpu'", "Pools with GPUs"):
+        parallel(
+            Peer(_inference, pool="cpu"),
+            topology=top,
+        )
+
+
+def test_gpu_peer_in_correct_pool_accepted():
+    top = Topology(
+        pools={
+            "gpu": Pool(nodes=1, gpus_per_node=4, cpus_per_node=32),
+            "cpu": Pool(nodes=1, cpus_per_node=32),
+        }
+    )
+    # inference needs gpus_per_task=2 — placing it in gpu pool fits.
+    err = _run_parallel(
+        Peer(_inference, pool="gpu"),
+        topology=top,
+    )
+    assert err is None
 
 
 def test_pool_cpu_overflow_reported():
