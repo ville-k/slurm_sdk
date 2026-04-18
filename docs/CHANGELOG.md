@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@task(nodelist=…)` pinning and `@task(nodes=2)` allocation spans
   against the two-node cluster, exercising only the existing
   single-task API
+- Documentation suite for `parallel(...)` following the Diataxis framework:
+  a tutorial (`Your first multi-peer job`), four how-to guides (add
+  sidecars, deploy a heterogeneous topology, run replica sets, discover
+  peers at runtime), an API reference page wired through mkdocstrings, and
+  an explanation page covering hetjob mechanics and the supervisor
+  lifecycle
 - Local-mode parity for `parallel(...)` — run multi-peer allocations on a
   developer workstation without Slurm installed. `LocalBackend.submit_job`
   detects parallel-rendered scripts via a supervisor sentinel and, when
