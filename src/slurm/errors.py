@@ -289,3 +289,97 @@ class SlurmfileEnvironmentNotFoundError(SlurmfileError):
         >>> cluster = Cluster.from_env("producton")  # Typo!
         SlurmfileEnvironmentNotFoundError: Environment 'producton' not defined in Slurmfile
     """
+
+
+class TopologyError(Exception):
+    """Raised when a ``parallel(...)`` submission has an invalid topology.
+
+    Topology errors surface before the job is submitted. They indicate
+    declarative problems — pool / peer / resource / placement conflicts —
+    that the SDK can detect at spec-validation time. Users see a single
+    aggregated error listing every problem found, so a 24-hour RL job never
+    fails after 30 seconds because a pool was mis-sized.
+
+    Common causes:
+        - Peer references a pool name that does not exist in ``Topology.pools``
+        - Sum of peer resource claims exceeds a pool's per-node capacity
+        - Two peer names collide
+        - ``leader=True`` combined with ``on_failure="continue"``
+        - ``on_node="label"`` but the label is not in ``Pool.node_labels``
+        - ``colocate_with="X"`` targets a peer in a different pool
+        - Cycle in the ``colocate_with`` dependency graph
+        - ``Peer.replicas(args=...)`` length does not match ``count``
+
+    What to check:
+        - The error message lists each problem with the offending peer/pool name
+          and, where possible, a concrete suggestion
+        - Inspect ``Topology.pools`` and each ``Peer``'s ``pool=`` reference
+        - For capacity overflow, either shrink the peer's resource claim,
+          grow the pool, or move the peer to a larger pool
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        problems: Optional[list[str]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.problems = list(problems) if problems is not None else []
+
+
+class PeerFailureError(Exception):
+    """Raised to describe a single peer's fatal failure in a ``parallel()`` job.
+
+    Used by the supervisor and ``ParallelJob`` to report which peer's exit was
+    propagated upward. Never raised directly at the top level — always wrapped
+    in a :class:`CompositeJobError` via ``ParallelJob.get_results()`` when one
+    or more fatal peers died.
+
+    Attributes:
+        peer_name: Name of the peer that failed.
+        replica_index: Replica index (0-based) for replica sets, else ``None``.
+        exit_code: Process exit code reported by the supervisor.
+    """
+
+    def __init__(
+        self,
+        peer_name: str,
+        replica_index: Optional[int],
+        exit_code: int,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.peer_name = peer_name
+        self.replica_index = replica_index
+        self.exit_code = exit_code
+
+    def __str__(self) -> str:
+        suffix = f"[{self.replica_index}]" if self.replica_index is not None else ""
+        return (
+            f"peer {self.peer_name!r}{suffix} failed with exit code "
+            f"{self.exit_code}: {self.args[0] if self.args else ''}"
+        )
+
+
+class CompositeJobError(Exception):
+    """Raised by :meth:`ParallelJob.get_results` when fatal peer(s) died.
+
+    "Fatal" means the peer's configured ``on_failure`` resolved to ``"kill"``
+    — either directly or after a restart budget was exhausted. Peers with
+    ``on_failure="continue"`` do **not** contribute to this error; they surface
+    via ``ParallelJob.peer_outcomes()`` as tolerated failures and leave a
+    ``None`` in the results dict.
+
+    Attributes:
+        failures: List of :class:`PeerFailureError` describing each fatal peer.
+    """
+
+    def __init__(self, failures: "list[PeerFailureError]") -> None:
+        lines = [f"  - {failure}" for failure in failures]
+        super().__init__(
+            f"parallel job had {len(failures)} fatal peer failure(s):\n"
+            + "\n".join(lines)
+        )
+        self.failures = list(failures)

@@ -14,10 +14,11 @@ except Exception:
 from .cluster import Cluster
 from .decorators import task, workflow, parse_packaging_config
 from .job import Job, JobSnapshot
-from .task import SlurmTask, WorkflowTask
+from .task import SlurmTask, WorkflowTask, BoundTask
 from .runtime import JobContext
 from .workflow import WorkflowContext
 from .array_job import ArrayJob
+from .parallel import parallel, Peer, Pool, Topology
 from .packaging import PackagingConfig
 from .callbacks import (
     BaseCallback,
@@ -33,6 +34,9 @@ from .errors import (
     BackendCommandError,
     PackagingError,
     SlurmfileError,
+    TopologyError,
+    PeerFailureError,
+    CompositeJobError,
 )
 
 __all__ = [
@@ -47,8 +51,14 @@ __all__ = [
     "Cluster",
     "SlurmTask",
     "WorkflowTask",
+    "BoundTask",
     "JobContext",
     "WorkflowContext",
+    # Parallel / topology
+    "parallel",
+    "Peer",
+    "Pool",
+    "Topology",
     # Configuration
     "PackagingConfig",
     # Callbacks
@@ -64,4 +74,7 @@ __all__ = [
     "BackendCommandError",
     "PackagingError",
     "SlurmfileError",
+    "TopologyError",
+    "PeerFailureError",
+    "CompositeJobError",
 ]
