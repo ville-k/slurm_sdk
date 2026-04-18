@@ -20,6 +20,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@task(nodelist=…)` pinning and `@task(nodes=2)` allocation spans
   against the two-node cluster, exercising only the existing
   single-task API
+- Peer service-discovery runtime API — peer functions can now inspect every
+  other peer in the allocation via `ctx.peers["<name>"]`, a read-only mapping
+  of `PeerGroup` views. Each `PeerGroup` exposes replicas, their hostnames,
+  declared ports, announced metadata, and lifecycle state; iteration, indexing,
+  `first`, `hostnames`, `ready_only()`, `refresh()`, and `wait_all(keys=..., timeout=...)` are available. A blocking `wait_all()` polls the registry with
+  exponential backoff (50 ms → 1 s cap) and raises `TimeoutError` with a list
+  of laggard replicas on expiry
+- `ctx.announce(ready=True, **fields)` publishes runtime metadata to the peer
+  registry via an atomic tmp-and-rename write. Announced fields merge into the
+  current replica's `metadata`; `ready=True` flips the replica's `state` to
+  `"ready"`. Reserved registry keys (`name`, `hostname`, `step_id`, `ports`,
+  `state`, etc.) are rejected; the reserved set is shared with the existing
+  static `Peer.announce=` validator so mistakes surface the same way in both
+  paths
+- `PeerInfo` and `PeerGroup` are now exported at the top level
+  (`from slurm import PeerInfo, PeerGroup`) as the typed view surface over
+  peer registry entries
+- The supervisor now exports `SLURM_SDK_REGISTRY_PATH` to each peer it
+  launches so `JobContext.peers` / `JobContext.announce()` can find the
+  registry without any extra wiring in user code
 - Multi-pool `parallel(...)` submissions now render as Slurm heterogeneous
   jobs (`hetjob`). Each pool declared in a `Topology` compiles to its own
   `#SBATCH` header block separated by `#SBATCH hetjob` dividers; every peer's

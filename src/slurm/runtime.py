@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import re
 import threading
@@ -10,9 +11,32 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple, get_args, get_origin
+from types import MappingProxyType
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Mapping,
+    Optional,
+    Tuple,
+    get_args,
+    get_origin,
+)
+
+if TYPE_CHECKING:
+    from .parallel.peer_info import PeerGroup
 
 _DEFAULT_MASTER_PORT = 29500
+
+logger = logging.getLogger("slurm.runtime")
+
+# Environment variable carrying the registry path through to user peer
+# code. Set by the supervisor when launching peer ``Popen``s; absent for
+# local-mode / non-parallel runs, in which case ``ctx.peers`` is an
+# empty read-only mapping and ``ctx.announce()`` is a no-op.
+_REGISTRY_PATH_ENV = "SLURM_SDK_REGISTRY_PATH"
 
 
 @dataclass(frozen=True)
@@ -62,14 +86,102 @@ class JobContext:
     output_dir: Optional[Path] = None
 
     # Topology identity — populated for peers launched via ``parallel(...)``.
-    # Richer discovery surfaces (``peers``, ``nodes``, ``shared_dir``,
-    # ``shutdown_requested``, ``announce()``) arrive in later phases.
+    # Further discovery surfaces (``nodes``, ``shared_dir``,
+    # ``shutdown_requested``) arrive in later phases; ``peers`` and
+    # ``announce()`` are wired in Phase 7.
     peer_name: Optional[str] = None
     peer_pool: Optional[str] = None
     # Replica identity — populated only when the peer is a replica set
     # (``Peer.replicas(...)``). For singleton peers both fields are ``None``.
     replica_index: Optional[int] = None
     replica_count: Optional[int] = None
+    # Path to the parallel allocation's ``registry.json``. Populated from
+    # ``SLURM_SDK_REGISTRY_PATH`` when the peer runs under the supervisor;
+    # ``None`` for non-parallel runs.
+    _registry_path: Optional[Path] = None
+
+    @property
+    def peers(self) -> Mapping[str, "PeerGroup"]:
+        """Read-only view of every peer in the parallel allocation.
+
+        Returns a mapping keyed by peer name. Each value is a
+        :class:`~slurm.parallel.peer_info.PeerGroup` exposing the peer's
+        replicas, their hostnames, declared ports, announced metadata,
+        and lifecycle state.
+
+        Always returns a real :class:`Mapping` — outside a parallel
+        allocation (no registry path set) the mapping is empty instead of
+        ``None`` so downstream code doesn't need to branch.
+
+        The mapping is re-read from disk on every access; callers wanting
+        a stable snapshot across multiple reads should hold the result of
+        a single ``ctx.peers`` call.
+        """
+        if self._registry_path is None:
+            return MappingProxyType({})
+        from .parallel.registry import load_peer_groups
+
+        return load_peer_groups(self._registry_path)
+
+    def announce(self, *, ready: bool = False, **fields: Any) -> None:
+        """Publish runtime metadata to the peer registry.
+
+        Merges ``fields`` into this peer's ``metadata`` dict so every other
+        peer in the allocation can read them via
+        ``ctx.peers["<name>"][i].metadata``. Writes are atomic
+        (``tmp + rename``); concurrent writers never produce torn files.
+
+        The dedicated ``ready=True`` signal flips the peer's ``state`` to
+        ``"ready"`` — the only way user code is allowed to influence state,
+        since all other state transitions are the supervisor's province.
+
+        Args:
+            ready: When ``True``, set ``state="ready"`` on this replica's
+                registry entry in addition to merging ``fields``. Peers
+                typically call ``ctx.announce(ready=True, ...)`` once the
+                service they run is actually accepting connections.
+            **fields: Arbitrary user-defined key/value pairs. Reserved
+                keys (those owned by the registry schema) are rejected —
+                see :data:`slurm.parallel.registry._RESERVED_ANNOUNCE_KEYS`.
+
+        Raises:
+            ValueError: If any key in ``fields`` is reserved.
+            RuntimeError: If this context has no peer identity
+                (``ctx.peer_name`` is ``None``). Announce is a parallel-
+                allocation operation; calling it from a non-parallel task
+                is a programmer error rather than a silent no-op.
+
+        Note:
+            If the supervisor isn't managing this process (no registry
+            path in the environment), the call is a no-op with a DEBUG
+            log. This keeps ``ctx.announce()`` safe to sprinkle through
+            code that also runs under ``cluster.run_local()``.
+        """
+        if self.peer_name is None:
+            raise RuntimeError(
+                "ctx.announce() requires a peer identity; this JobContext "
+                "has peer_name=None. announce() is only meaningful for "
+                "tasks launched via parallel(...)."
+            )
+        if self._registry_path is None:
+            logger.debug(
+                "announce(): no registry path — skipping (peer=%s, fields=%s, ready=%s)",
+                self.peer_name,
+                sorted(fields.keys()),
+                ready,
+            )
+            return
+
+        from .parallel.registry import announce_peer_metadata
+
+        replica = self.replica_index or 0
+        announce_peer_metadata(
+            self._registry_path,
+            self.peer_name,
+            replica,
+            fields=fields,
+            ready=ready,
+        )
 
     def torch_distributed_env(
         self, *, master_port: Optional[int] = None
@@ -175,6 +287,9 @@ def build_job_context(env: Optional[Dict[str, str]] = None) -> JobContext:
         replica_count_val = None
         replica_index_val = None
 
+    registry_path_raw = env_map.get(_REGISTRY_PATH_ENV)
+    registry_path = Path(registry_path_raw) if registry_path_raw else None
+
     return JobContext(
         job_id=job_id,
         step_id=step_id,
@@ -194,6 +309,7 @@ def build_job_context(env: Optional[Dict[str, str]] = None) -> JobContext:
         peer_pool=peer_pool,
         replica_index=replica_index_val,
         replica_count=replica_count_val,
+        _registry_path=registry_path,
     )
 
 

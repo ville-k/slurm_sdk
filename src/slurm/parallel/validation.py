@@ -25,25 +25,10 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..errors import TopologyError
+from .registry import _RESERVED_ANNOUNCE_KEYS
 from .types import Peer, Pool, _ParallelSpec
 
-# Keys reserved by the peer registry; ``Peer.announce`` cannot use them.
-_RESERVED_ANNOUNCE_KEYS = frozenset(
-    {
-        "name",
-        "replica_index",
-        "replica_count",
-        "pool",
-        "hostname",
-        "hostnames",
-        "node_label",
-        "step_id",
-        "ports",
-        "state",
-        "restart_count",
-        "metadata",
-    }
-)
+__all__ = ["validate_spec", "_RESERVED_ANNOUNCE_KEYS"]
 
 
 def validate_spec(spec: _ParallelSpec) -> None:
