@@ -32,6 +32,7 @@ from .types import (
 from .validation import validate_spec
 
 if TYPE_CHECKING:
+    from ..parallel_job import ParallelJob
     from ..task import BoundTask, SlurmTask
 
 
@@ -233,7 +234,7 @@ def parallel(
     grace_period_seconds: int = 10,
     after: object = None,
     **named_peers: PeerInput,
-):
+) -> "ParallelJob":
     """Submit a single Slurm allocation running N peer tasks concurrently.
 
     Args:
