@@ -55,7 +55,9 @@ def _spec(*peers, topology=None):
     return spec
 
 
-def test_multi_pool_raises_not_implemented():
+def test_multi_pool_passes_scope_check():
+    # Phase 6 enables multi-pool / hetjob submissions — the scope gate must
+    # accept them.
     topo = Topology(
         pools={
             "gpu": Pool(nodes=1, gpus_per_node=1),
@@ -67,8 +69,8 @@ def test_multi_pool_raises_not_implemented():
         Peer(_b.partial(cfg={}), pool="cpu"),
         topology=topo,
     )
-    with pytest.raises(NotImplementedError, match="Phase 6"):
-        _check_phase2_scope(spec)
+    # Does not raise.
+    _check_phase2_scope(spec)
 
 
 def test_replica_set_passes_scope_check():

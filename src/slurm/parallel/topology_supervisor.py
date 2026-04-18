@@ -80,13 +80,47 @@ def _install_sigterm_handler() -> None:
     signal.signal(signal.SIGINT, _handler)
 
 
-def _signal_slurm_job(job_id: Optional[str], sig: str = "TERM") -> None:
-    """Best-effort ``scancel --signal=<sig> <job_id>``; no-op without scancel."""
+def _component_job_ids(job_id: Optional[str], component_count: int) -> List[str]:
+    """Return the scancel targets for a (possibly hetjob) allocation.
+
+    Slurm addresses each hetjob component by a distinct job id of the form
+    ``<base>+<N>`` (literal ``+N`` suffix — not shell arithmetic). Cancelling
+    every component takes one target per component, so the supervisor builds
+    the list up front and passes them all to ``scancel`` in a single call.
+
+    For single-pool submissions (``component_count <= 1``) the return value
+    is just ``[job_id]`` so callers don't need to branch on the shape.
+    """
     if not job_id:
+        return []
+    if component_count <= 1:
+        return [job_id]
+    # Component 0 is addressable as both ``<jobid>`` and ``<jobid>+0`` — we use
+    # the bare form to match the single-pool path and avoid surprising users
+    # who read supervisor logs.
+    ids = [job_id]
+    for idx in range(1, component_count):
+        ids.append(f"{job_id}+{idx}")
+    return ids
+
+
+def _signal_slurm_job(
+    job_id: Optional[str],
+    sig: str = "TERM",
+    *,
+    component_count: int = 1,
+) -> None:
+    """Best-effort ``scancel --signal=<sig> <job_id>[ +1 +2 ...]``.
+
+    For hetjob submissions every component is signalled in one ``scancel``
+    call so Slurm's reaper tears down the whole allocation atomically.
+    """
+    targets = _component_job_ids(job_id, component_count)
+    if not targets:
         return
     try:
         subprocess.run(  # nosec B603,B607 - trusted scancel invocation
-            ["scancel", f"--signal={sig}", job_id],
+            ["scancel", f"--signal={sig}", *targets],
             check=False,
             timeout=5,
         )
@@ -94,13 +128,18 @@ def _signal_slurm_job(job_id: Optional[str], sig: str = "TERM") -> None:
         logger.debug("scancel --signal=%s not issued: %s", sig, err)
 
 
-def _hard_cancel_slurm_job(job_id: Optional[str]) -> None:
-    """Best-effort ``scancel <job_id>``; no-op without scancel."""
-    if not job_id:
+def _hard_cancel_slurm_job(
+    job_id: Optional[str],
+    *,
+    component_count: int = 1,
+) -> None:
+    """Best-effort ``scancel <job_id>[ +1 +2 ...]``; no-op without scancel."""
+    targets = _component_job_ids(job_id, component_count)
+    if not targets:
         return
     try:
         subprocess.run(  # nosec B603,B607 - trusted scancel invocation
-            ["scancel", job_id],
+            ["scancel", *targets],
             check=False,
             timeout=5,
         )
@@ -371,6 +410,7 @@ def run_supervisor(
     poll_interval: float = 0.05,
     launch: Optional[Callable[[PlanPeer], subprocess.Popen]] = None,
     registry_path: Optional[Path] = None,
+    component_count: Optional[int] = None,
 ) -> int:
     """Launch every peer, apply failure policies, return final exit code.
 
@@ -389,8 +429,14 @@ def run_supervisor(
             ``None``, outcomes are not persisted (tests that don't need
             outcome tracking). The main CLI passes this path so the
             registry stays current.
+        component_count: Number of hetjob components. Defaults to the length
+            of ``plan.pool_names`` when ``None``. Drives the scancel cascade:
+            with ``component_count > 1`` the supervisor cancels every
+            component's job id (``<jobid>``, ``<jobid>+1``, ...).
     """
     launch_fn = launch or _launch_peer
+    if component_count is None:
+        component_count = max(1, len(plan.pool_names))
 
     processes: Dict[int, subprocess.Popen] = {}
     peer_by_pid: Dict[int, PlanPeer] = {}
@@ -422,7 +468,7 @@ def run_supervisor(
                 len(processes),
             )
             shutdown_deadline = time.time() + plan.grace_period_seconds
-            _signal_slurm_job(job_id, "TERM")
+            _signal_slurm_job(job_id, "TERM", component_count=component_count)
             _terminate_local_processes(processes)
 
         # 2. Reap any peers that exited since the last poll.
@@ -463,7 +509,7 @@ def run_supervisor(
                         len(processes),
                     )
                     shutdown_deadline = time.time() + plan.grace_period_seconds
-                    _signal_slurm_job(job_id, "TERM")
+                    _signal_slurm_job(job_id, "TERM", component_count=component_count)
                     _terminate_local_processes(processes)
                 continue
 
@@ -543,7 +589,7 @@ def run_supervisor(
                     len(processes),
                 )
                 shutdown_deadline = time.time() + plan.grace_period_seconds
-                _signal_slurm_job(job_id, "TERM")
+                _signal_slurm_job(job_id, "TERM", component_count=component_count)
                 _terminate_local_processes(processes)
 
         # 3. Enforce grace window — hard-kill anything still running when
@@ -559,7 +605,7 @@ def run_supervisor(
                 len(processes),
             )
             _kill_local_processes(processes)
-            _hard_cancel_slurm_job(job_id)
+            _hard_cancel_slurm_job(job_id, component_count=component_count)
             hard_killed = True
 
         if processes:
@@ -644,16 +690,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             pool_names=plan.pool_names,
             pre_submission_id=plan.pre_submission_id,
             schema_version=plan.schema_version,
+            components=plan.components,
         )
 
     _preload_callbacks(plan)
 
     registry_path = job_dir / "registry.json"
     job_id = os.environ.get("SLURM_JOB_ID")
+    component_count = max(1, len(plan.effective_components()))
     exit_code = run_supervisor(
         plan,
         job_id=job_id,
         registry_path=registry_path if registry_path.exists() else None,
+        component_count=component_count,
     )
     logger.info("Supervisor exiting with code %s", exit_code)
     return exit_code

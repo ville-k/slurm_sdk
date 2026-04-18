@@ -291,6 +291,33 @@ def _check_capacity(spec: _ParallelSpec, problems: list[str]) -> None:
         pool = pools[pool_name]
         demand = _compute_per_node_demand(peers, pool.nodes)
 
+        # Wrong-pool GPU peer check: a GPU-requesting peer pinned to a pool
+        # with no GPUs is almost always a mistake (e.g. peer sent to a CPU
+        # pool while another pool has the GPUs). Flag each peer individually
+        # so the error points at the offender rather than the pool sum.
+        pool_has_gpus = pool.gpus_per_node is not None and pool.gpus_per_node > 0
+        if not pool_has_gpus:
+            for peer in peers:
+                opts = _task_sbatch_options(peer)
+                gpt = opts.get("gpus_per_task")
+                if gpt is not None and gpt > 0:
+                    gpu_pools = [
+                        name
+                        for name, p in pools.items()
+                        if p.gpus_per_node and p.gpus_per_node > 0
+                    ]
+                    hint = (
+                        f" Pools with GPUs: {gpu_pools}."
+                        if gpu_pools
+                        else " No pool in this topology declares GPUs."
+                    )
+                    problems.append(
+                        f"Peer {peer.resolved_name!r} requests "
+                        f"gpus_per_task={gpt} but pool {pool_name!r} has "
+                        f"gpus_per_node={pool.gpus_per_node!r}. The peer is "
+                        f"pinned to the wrong pool.{hint}"
+                    )
+
         if pool.cpus_per_node is not None and demand["cpus"] is not None:
             if demand["cpus"] > pool.cpus_per_node:
                 problems.append(

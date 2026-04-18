@@ -46,13 +46,6 @@ def _check_phase2_scope(spec: "_ParallelSpec") -> None:
     Each branch points at the phase that delivers the missing piece, so the
     message is actionable rather than confusing.
     """
-    if len(spec.topology.pools) > 1:
-        names = ", ".join(spec.topology.pools.keys())
-        raise NotImplementedError(
-            f"parallel(...) with multiple pools is not supported yet "
-            f"(got pools: {names}). Multi-pool hetjob support ships in Phase 6."
-        )
-
     for peer in spec.peers:
         if peer.on_node is not None or peer.colocate_with is not None:
             raise NotImplementedError(

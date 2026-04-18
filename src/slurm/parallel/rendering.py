@@ -33,7 +33,7 @@ from ..rendering import (
     _job_directory_setup_lines,
 )
 from ..task import BoundTask
-from .plan import Plan, PlanPeer
+from .plan import Plan, PlanComponent, PlanPeer
 
 if TYPE_CHECKING:
     from ..cluster import Cluster
@@ -146,13 +146,23 @@ def _peer_sbatch_options(peer: "Peer") -> Dict[str, Any]:
     return dict(bt.task.sbatch_options)
 
 
-def _srun_flags_for_peer(peer: "Peer") -> List[str]:
+def _srun_flags_for_peer(
+    peer: "Peer",
+    *,
+    component_index: Optional[int] = None,
+) -> List[str]:
     """Compute the per-step ``srun`` flags from the peer's task decorator.
 
     These mirror what the single-job renderer derives from the ``@task``
-    decorator — Phase 2 only needs resources that the single-pool shell
-    supervisor honours: ``--ntasks``, ``--cpus-per-task``, ``--mem``, and
-    optional ``--gpus``. Advanced placement flags live in Phase 6 / 8.
+    decorator. Resource flags (``--ntasks``, ``--cpus-per-task``, ``--mem``,
+    ``--gpus``) come from the peer's underlying ``@task`` decorator.
+
+    ``component_index`` controls emission of ``--het-group=<N>``:
+
+    - ``None`` (single-pool submission) — no ``--het-group`` flag is emitted
+      so the byte-identical Phase 2 rendering shape is preserved.
+    - ``int`` (hetjob submission) — the flag is added so the step runs inside
+      the correct hetjob component.
 
     For replica peers (``count > 1``) the step runs ``--ntasks=<count>`` and
     each Slurm task inside the step selects its per-replica args by
@@ -162,6 +172,10 @@ def _srun_flags_for_peer(peer: "Peer") -> List[str]:
     opts = _peer_sbatch_options(peer)
     ntasks = peer.count if peer.is_replica_set else 1
     flags: List[str] = ["--exact", "--overlap", f"--ntasks={ntasks}"]
+    if component_index is not None:
+        # Place the flag after --ntasks so the hetjob routing is visible
+        # up-front in the rendered script — simplifies debugging.
+        flags.append(f"--het-group={component_index}")
     if peer.is_replica_set and peer.tasks_per_node is not None:
         flags.append(f"--ntasks-per-node={peer.tasks_per_node}")
 
@@ -325,6 +339,7 @@ def _emit_peer_srun_command(
     callbacks_file: str,
     pickled_sys_path: str,
     packaging_strategy: "PackagingStrategy",
+    component_index: Optional[int] = None,
 ) -> str:
     """Build the full ``srun ... python -m slurm.runner ...`` line for one peer.
 
@@ -405,7 +420,7 @@ def _emit_peer_srun_command(
         job_dir='"$JOB_DIR"',
     )
 
-    srun_flags = _srun_flags_for_peer(peer)
+    srun_flags = _srun_flags_for_peer(peer, component_index=component_index)
     export = _export_clause(peer, pool_name)
     srun_prefix = "srun " + " ".join(srun_flags + [export])
     return f"{srun_prefix} {wrapped}"
@@ -434,32 +449,74 @@ def build_plan(
     *,
     spec: "_ParallelSpec",
     peer_commands: List[Tuple["Peer", str]],
-    pool_name: str,
+    pool_name: Optional[str] = None,
     pre_submission_id: str,
+    pool_component_index: Optional[Dict[str, int]] = None,
 ) -> Plan:
     """Translate a ``_ParallelSpec`` + per-peer srun strings into a :class:`Plan`.
 
     Called by the renderer (and directly by tests that want to round-trip
     plan.json without invoking the full rendering pipeline).
+
+    Args:
+        spec: The validated parallel spec.
+        peer_commands: ``(peer, srun_command_line)`` pairs in declaration order.
+        pool_name: Back-compat pool name used for single-pool submissions when
+            ``pool_component_index`` is not provided. Ignored otherwise.
+        pre_submission_id: SDK base id for logging.
+        pool_component_index: Pool name → component index mapping for hetjob
+            submissions. When ``None``, a single-component plan is built using
+            ``pool_name`` (Phase 3-style back-compat).
     """
-    plan_peers = [
-        PlanPeer(
-            name=peer.resolved_name,
-            pool=peer.pool or pool_name,
-            leader=peer.leader,
-            on_failure=peer.on_failure,
-            max_restarts=peer.max_restarts,
-            srun_command_line=cmd,
-            callback=_serialize_callback(peer.callback),
-            replica_count=peer.count,
+    if pool_component_index is None:
+        # Back-compat path: single-pool submission.
+        if pool_name is None:
+            raise ValueError(
+                "build_plan requires either pool_name (single-pool) or "
+                "pool_component_index (multi-pool)."
+            )
+        pool_component_index = {pool_name: 0}
+        pool_names_ordered = [pool_name]
+    else:
+        # Hetjob: derive ordered pool names from the mapping, which the caller
+        # builds in declaration order so indices match component positions.
+        pool_names_ordered = [
+            name
+            for name, _ in sorted(pool_component_index.items(), key=lambda kv: kv[1])
+        ]
+
+    plan_peers = []
+    for peer, cmd in peer_commands:
+        peer_pool = peer.pool or pool_names_ordered[0]
+        plan_peers.append(
+            PlanPeer(
+                name=peer.resolved_name,
+                pool=peer_pool,
+                leader=peer.leader,
+                on_failure=peer.on_failure,
+                max_restarts=peer.max_restarts,
+                srun_command_line=cmd,
+                callback=_serialize_callback(peer.callback),
+                replica_count=peer.count,
+                component_index=pool_component_index[peer_pool],
+            )
         )
-        for peer, cmd in peer_commands
+
+    components = [
+        PlanComponent(
+            index=pool_component_index[name],
+            pool=name,
+            nodes=spec.topology.pools[name].nodes if name in spec.topology.pools else 1,
+        )
+        for name in pool_names_ordered
     ]
+
     return Plan(
         peers=plan_peers,
         grace_period_seconds=spec.grace_period_seconds,
-        pool_names=[pool_name],
+        pool_names=pool_names_ordered,
         pre_submission_id=pre_submission_id,
+        components=components,
     )
 
 
@@ -513,11 +570,15 @@ def render_parallel_script(
     callbacks: Optional[List[Any]] = None,
     replica_items: Optional[Dict[str, List[Any]]] = None,
 ) -> str:
-    """Render the batch script for a single-pool ``parallel(...)`` submission.
+    """Render the batch script for a ``parallel(...)`` submission.
+
+    Supports both single-pool submissions (one ``#SBATCH`` header block, one
+    implicit component) and multi-pool hetjob submissions (N ``#SBATCH``
+    blocks separated by ``#SBATCH hetjob`` dividers, one per pool in
+    declaration order).
 
     Args:
-        spec: Validated :class:`_ParallelSpec`. Must contain exactly one pool
-            (multi-pool / hetjob support ships in Phase 6).
+        spec: Validated :class:`_ParallelSpec`. May contain one or more pools.
         packaging_strategy: Shared packaging strategy — every peer uses the
             same image / venv. Per-peer packaging arrives in Phase 10.
         target_job_dir: Absolute path on the backend where the job runs.
@@ -540,17 +601,19 @@ def render_parallel_script(
     Returns:
         The rendered bash script as a single string.
     """
-    if len(spec.topology.pools) != 1:
-        raise NotImplementedError(
-            "render_parallel_script supports single-pool submissions only. "
-            "Multi-pool topologies (hetjobs) arrive in Phase 6."
-        )
-    pool_name, pool = next(iter(spec.topology.pools.items()))
+    # Pools in declaration order — component 0 is the first pool. Dict
+    # insertion order preservation (3.7+) is what lets us use the ordered
+    # list directly as the component layout.
+    pool_items: List[Tuple[str, "Pool"]] = list(spec.topology.pools.items())
+    pool_component_index: Dict[str, int] = {
+        name: idx for idx, (name, _pool) in enumerate(pool_items)
+    }
+    is_hetjob = len(pool_items) > 1
 
     # We need a representative task_func for helpers that expect one (sbatch
     # directives, packaging setup, environment exports). Prefer the leader,
     # else the first peer. The surface they read (``__name__``, ``__module__``)
-    # is homogeneous across peers in a single-pool submission.
+    # is homogeneous across peers.
     representative_peer = next((p for p in spec.peers if p.leader), spec.peers[0])
     representative_task = (
         representative_peer.task.task.func
@@ -558,35 +621,59 @@ def render_parallel_script(
         else representative_peer.task
     )
 
-    sbatch_params = _sbatch_params_from_pool(
-        pool, spec, task_defaults, sbatch_overrides
-    )
+    # Build per-component #SBATCH blocks. Component 0 carries the shebang
+    # emitted by ``_emit_sbatch_directives``; subsequent components are
+    # separated by ``#SBATCH hetjob`` and skip the shebang.
+    script_lines: List[str] = []
+    for comp_index, (pool_name, pool) in enumerate(pool_items):
+        component_params = _sbatch_params_from_pool(
+            pool, spec, task_defaults, sbatch_overrides
+        )
+        # "cpus_per_node" is a Pool concept; flatten to cpus_per_task so the
+        # shared sbatch emitter handles it without special-casing.
+        if (
+            "cpus_per_node" in component_params
+            and "cpus_per_task" not in component_params
+        ):
+            component_params["cpus_per_task"] = component_params.pop("cpus_per_node")
+        else:
+            component_params.pop("cpus_per_node", None)
 
-    # "cpus_per_node" is a Pool concept, not an sbatch flag. Flatten it into
-    # cpus_per_task here since each peer runs ``--ntasks=1`` in Phase 2 — the
-    # pool's per-node budget becomes the allocation's per-task budget. This
-    # keeps _emit_sbatch_directives happy (it expects sbatch-style keys).
-    if "cpus_per_node" in sbatch_params and "cpus_per_task" not in sbatch_params:
-        sbatch_params["cpus_per_task"] = sbatch_params.pop("cpus_per_node")
-    else:
-        sbatch_params.pop("cpus_per_node", None)
+        if comp_index == 0:
+            # Top-level output/error point at the batch script's stdout; Slurm
+            # directs the supervisor's output here. Only needed on component 0
+            # — per-component output redirection is a Phase 9 concern.
+            stdout_path = component_params.get("output") or (
+                f"{target_job_dir}/slurm_{pre_submission_id}.out"
+            )
+            stderr_path = component_params.get("error") or (
+                f"{target_job_dir}/slurm_{pre_submission_id}.err"
+            )
+            component_params["output"] = stdout_path
+            component_params["error"] = stderr_path
+        else:
+            # Later components inherit the batch script's shared stdout/stderr
+            # via Slurm's hetjob defaults. Drop any inherited output/error keys
+            # so they are not re-emitted per component.
+            component_params.pop("output", None)
+            component_params.pop("error", None)
+            # job_name is a batch-level concept; dropping it keeps the
+            # component headers focused on placement.
+            component_params.pop("job_name", None)
+            # Insert the hetjob divider before emitting the next component.
+            script_lines.append("")
+            script_lines.append("#SBATCH hetjob")
 
-    # Ensure output/error paths are set so the rendered directives reference
-    # the job directory. The single-task renderer does this via
-    # _resolve_output_paths; we inline a simpler version — parallel Phase 2
-    # does not have an array index so the substitution is trivial.
-    stdout_path = sbatch_params.get("output") or (
-        f"{target_job_dir}/slurm_{pre_submission_id}.out"
-    )
-    stderr_path = sbatch_params.get("error") or (
-        f"{target_job_dir}/slurm_{pre_submission_id}.err"
-    )
-    sbatch_params["output"] = stdout_path
-    sbatch_params["error"] = stderr_path
-
-    script_lines = _emit_sbatch_directives(
-        sbatch_params, representative_task, packaging_strategy
-    )
+        component_lines = _emit_sbatch_directives(
+            component_params, representative_task, packaging_strategy
+        )
+        if comp_index > 0:
+            # The shared emitter prepends ``#!/bin/bash`` which is only valid
+            # for component 0. Strip it from later components.
+            component_lines = [
+                line for line in component_lines if line != "#!/bin/bash"
+            ]
+        script_lines.extend(component_lines)
 
     script_lines.append("")
     script_lines.extend(
@@ -642,27 +729,35 @@ def render_parallel_script(
     # Build per-peer srun commands. The tuple order follows spec.peers so the
     # rendered script respects the caller's declaration order.
     peer_commands: List[Tuple["Peer", str]] = []
+    default_pool_name = pool_items[0][0]
     for peer in spec.peers:
         args_basename, kwargs_basename = peer_arg_basenames[peer.resolved_name]
+        peer_pool_name = peer.pool or default_pool_name
+        comp_index_for_peer = (
+            pool_component_index[peer_pool_name] if is_hetjob else None
+        )
         cmd = _emit_peer_srun_command(
             peer=peer,
-            pool_name=pool_name,
+            pool_name=peer_pool_name,
             base_pre_submission_id=pre_submission_id,
             args_basename=args_basename,
             kwargs_basename=kwargs_basename,
             callbacks_file=callbacks_file,
             pickled_sys_path=pickled_sys_path,
             packaging_strategy=packaging_strategy,
+            component_index=comp_index_for_peer,
         )
         peer_commands.append((peer, cmd))
 
     # Serialise the supervisor plan and hand control to the Python
-    # bootstrap/supervisor chain.
+    # bootstrap/supervisor chain. Hetjobs carry the full pool→component
+    # mapping so the supervisor can drive per-component scancel.
     plan = build_plan(
         spec=spec,
         peer_commands=peer_commands,
-        pool_name=pool_name,
+        pool_name=default_pool_name if not is_hetjob else None,
         pre_submission_id=pre_submission_id,
+        pool_component_index=pool_component_index if is_hetjob else None,
     )
     script_lines.extend(_emit_plan_heredoc(plan))
     script_lines.append("")
