@@ -167,18 +167,30 @@ def _kill_local_processes(processes: Dict[int, subprocess.Popen]) -> None:
             logger.debug("kill pid=%s failed: %s", pid, exc)
 
 
-def _launch_peer(peer: PlanPeer) -> subprocess.Popen:
+def _launch_peer(
+    peer: PlanPeer, *, registry_path: Optional[Path] = None
+) -> subprocess.Popen:
     """Launch one peer's ``srun`` under ``bash -c``.
 
     ``bash -c`` matters because ``PlanPeer.srun_command_line`` references
     environment variables (``$PY_EXEC_RESOLVED``, ``$JOB_DIR``) that the
     surrounding batch script exports — the supervisor inherits them, and
     bash expands them when launching the child.
+
+    ``registry_path`` is exported as ``SLURM_SDK_REGISTRY_PATH`` so peer
+    code can build a :class:`JobContext` whose ``peers`` mapping points
+    at the live registry. We pass the env through ``env=`` (copying the
+    supervisor's own environment) rather than relying on shell ``export``
+    so the variable propagates through ``srun`` to the remote step.
     """
     logger.info("Launching peer %s", peer.name)
     logger.debug("Peer %s command: %s", peer.name, peer.srun_command_line)
+    env = os.environ.copy()
+    if registry_path is not None:
+        env["SLURM_SDK_REGISTRY_PATH"] = str(registry_path)
     return subprocess.Popen(  # nosec B603 - command comes from plan.json written by the SDK
-        ["/bin/bash", "-c", peer.srun_command_line]
+        ["/bin/bash", "-c", peer.srun_command_line],
+        env=env,
     )
 
 
@@ -434,7 +446,18 @@ def run_supervisor(
             with ``component_count > 1`` the supervisor cancels every
             component's job id (``<jobid>``, ``<jobid>+1``, ...).
     """
-    launch_fn = launch or _launch_peer
+    if launch is None:
+        # Bind the registry path into the default launcher so peer ``Popen``s
+        # inherit ``SLURM_SDK_REGISTRY_PATH``. Tests that supply their own
+        # launcher are responsible for setting the env var themselves (or
+        # skipping it — most tests don't need peer-discovery surfaces).
+        from functools import partial as _partial
+
+        launch_fn: Callable[[PlanPeer], subprocess.Popen] = _partial(
+            _launch_peer, registry_path=registry_path
+        )
+    else:
+        launch_fn = launch
     if component_count is None:
         component_count = max(1, len(plan.pool_names))
 

@@ -14,10 +14,46 @@ peers at most); the complexity of incremental updates is not worth it.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
+
+if TYPE_CHECKING:
+    from .peer_info import PeerGroup
+
+logger = logging.getLogger("slurm.parallel.registry")
+
+
+# Keys reserved by the peer registry — neither ``Peer.announce={...}`` (static,
+# topology-declaration time) nor ``ctx.announce(**kv)`` (runtime, inside peer
+# code) may write these names. They are owned by the bootstrap / supervisor
+# and represent the peer's identity and lifecycle state.
+#
+# ``state`` is reserved because only the supervisor flips it to terminal
+# values (``failed``, ``shutdown_by_leader``, etc.). The one exception is
+# the ``ctx.announce(ready=True)`` signal that user code emits to mark
+# itself ready — see :meth:`JobContext.announce`.
+_RESERVED_ANNOUNCE_KEYS = frozenset(
+    {
+        "name",
+        "replica_index",
+        "replica_count",
+        "pool",
+        "hostname",
+        "hostnames",
+        "node_label",
+        "step_id",
+        "ports",
+        "state",
+        "restart_count",
+        "component_index",
+        "metadata",
+    }
+)
 
 
 # Registry entry state values used across bootstrap / supervisor / runner.
@@ -61,6 +97,7 @@ class PeerRegistryEntry:
     metadata: Dict[str, Any] = field(default_factory=dict)
     state: str = STATE_PENDING
     restart_count: int = 0
+    component_index: int = 0
     outcome: Optional[str] = None
     final_exit_code: Optional[int] = None
     message: Optional[str] = None
@@ -79,6 +116,7 @@ class PeerRegistryEntry:
             "metadata": dict(self.metadata),
             "state": self.state,
             "restart_count": self.restart_count,
+            "component_index": self.component_index,
             "outcome": self.outcome,
             "final_exit_code": self.final_exit_code,
             "message": self.message,
@@ -100,6 +138,7 @@ class PeerRegistryEntry:
             metadata=dict(data.get("metadata", {})),
             state=data.get("state", STATE_PENDING),
             restart_count=int(data.get("restart_count", 0)),
+            component_index=int(data.get("component_index", 0)),
             outcome=data.get("outcome"),
             final_exit_code=int(exit_code_raw) if exit_code_raw is not None else None,
             message=data.get("message"),
@@ -139,15 +178,34 @@ class NodeRegistryEntry:
 def write_registry(path: "str | Path", registry: dict) -> None:
     """Atomically replace ``registry.json`` at ``path`` with ``registry``.
 
-    Writes to a sibling ``.tmp`` file first, then ``os.replace`` swaps it in.
+    Writes to a per-writer tmp file first, then ``os.replace`` swaps it in.
     ``os.replace`` is atomic on POSIX within the same filesystem, so readers
     never observe a half-written file.
+
+    The tmp path embeds the caller's PID and a monotonic counter so two
+    concurrent writers never race on the same tmp name. Without the unique
+    suffix, one writer's ``os.replace`` could observe the other's tmp file
+    vanish mid-rename and raise ``FileNotFoundError`` — rare on a single
+    process, real as soon as threads (or the bootstrap + supervisor) both
+    try to write.
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(json.dumps(registry, indent=2))
-    os.replace(tmp, target)
+    # ``os.getpid()`` + monotonic_ns gives a unique sibling name per writer
+    # without needing a cross-process lock.
+    suffix = f".tmp.{os.getpid()}.{time.monotonic_ns()}"
+    tmp = target.with_suffix(target.suffix + suffix)
+    try:
+        tmp.write_text(json.dumps(registry, indent=2))
+        os.replace(tmp, target)
+    finally:
+        # If we crashed between write_text and replace, clean up the
+        # orphaned tmp file so ``registry.json.tmp.*`` doesn't accumulate.
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def read_registry(path: "str | Path") -> dict:
@@ -176,6 +234,95 @@ def nodes_from_registry(registry: dict) -> Dict[str, NodeRegistryEntry]:
         key: NodeRegistryEntry.from_dict(entry)
         for key, entry in registry.get("nodes", {}).items()
     }
+
+
+def load_peer_groups(
+    registry_path: "str | Path",
+) -> Mapping[str, "PeerGroup"]:
+    """Load the peer section of ``registry.json`` into :class:`PeerGroup` views.
+
+    Returns an empty :class:`MappingProxyType` if the file is missing or
+    unreadable — service discovery must be robust against racing the
+    bootstrap during the first few hundred milliseconds of a peer's life.
+
+    Args:
+        registry_path: Path to ``registry.json``.
+
+    Returns:
+        Read-only mapping from peer name to :class:`PeerGroup`. Callers
+        iterate keys / values or look up a specific peer by name.
+    """
+    from .peer_info import _load_groups_from_path
+
+    path = Path(registry_path)
+    groups = dict(_load_groups_from_path(path))
+    return MappingProxyType(groups)
+
+
+def announce_peer_metadata(
+    path: "str | Path",
+    peer_name: str,
+    replica_index: int,
+    *,
+    fields: Mapping[str, Any],
+    ready: bool = False,
+) -> dict:
+    """Merge ``fields`` into a peer's metadata (and optionally set ``state=ready``).
+
+    This is the atomic-write helper backing ``JobContext.announce()``. It
+    diverges from :func:`update_peer_entry` in two ways:
+
+    - It *merges* into ``metadata`` rather than overwriting it, so
+      ``ctx.announce(foo=1)`` followed by ``ctx.announce(bar=2)`` leaves
+      both keys in place.
+    - It rejects any reserved key from appearing in ``fields``. The caller
+      is expected to have stripped the ``ready`` signal out first; the
+      reserved-key check here is a defence-in-depth guard.
+
+    Args:
+        path: Path to ``registry.json``.
+        peer_name: Peer identifier.
+        replica_index: Which replica's entry to update.
+        fields: Keys to merge into the entry's ``metadata`` dict.
+        ready: If ``True``, also flip the entry's ``state`` to
+            :data:`STATE_READY`.
+
+    Returns:
+        The updated registry dict (for callers that want to skip a second read).
+
+    Raises:
+        ValueError: If ``fields`` contains a reserved key.
+        KeyError: If ``peer_name`` is not in the registry.
+        IndexError: If ``replica_index`` is out of range.
+    """
+    conflicts = [k for k in fields if k in _RESERVED_ANNOUNCE_KEYS]
+    if conflicts:
+        raise ValueError(
+            f"Reserved key(s) {sorted(conflicts)!r} cannot be announced. "
+            f"Reserved keys are {sorted(_RESERVED_ANNOUNCE_KEYS)}."
+        )
+
+    registry = read_registry(path)
+    peers = registry.setdefault("peers", {})
+    entries = peers.get(peer_name)
+    if not entries:
+        raise KeyError(
+            f"Peer {peer_name!r} not found in registry (known: {sorted(peers.keys())})"
+        )
+    if replica_index < 0 or replica_index >= len(entries):
+        raise IndexError(
+            f"replica_index {replica_index} out of range for peer "
+            f"{peer_name!r} (have {len(entries)} entries)"
+        )
+    entry = dict(entries[replica_index])
+    metadata = dict(entry.get("metadata") or {})
+    metadata.update(fields)
+    entry["metadata"] = metadata
+    if ready:
+        entry["state"] = STATE_READY
+    entries[replica_index] = entry
+    write_registry(path, registry)
+    return registry
 
 
 def update_peer_entry(
@@ -230,6 +377,9 @@ __all__ = [
     "peers_from_registry",
     "nodes_from_registry",
     "update_peer_entry",
+    "announce_peer_metadata",
+    "load_peer_groups",
+    "_RESERVED_ANNOUNCE_KEYS",
     "STATE_PENDING",
     "STATE_READY",
     "STATE_RUNNING",
