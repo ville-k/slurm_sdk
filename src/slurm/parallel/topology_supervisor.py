@@ -168,7 +168,10 @@ def _kill_local_processes(processes: Dict[int, subprocess.Popen]) -> None:
 
 
 def _launch_peer(
-    peer: PlanPeer, *, registry_path: Optional[Path] = None
+    peer: PlanPeer,
+    *,
+    registry_path: Optional[Path] = None,
+    shared_dir: Optional[Path] = None,
 ) -> subprocess.Popen:
     """Launch one peer's ``srun`` under ``bash -c``.
 
@@ -195,9 +198,17 @@ def _launch_peer(
     env = os.environ.copy()
     if registry_path is not None:
         env["SLURM_SDK_REGISTRY_PATH"] = str(registry_path)
+    if shared_dir is not None:
+        env["SLURM_SDK_SHARED_DIR"] = str(shared_dir)
+    # ``os.setsid`` gives every peer its own process group so a SIGTERM
+    # that the runner installs a handler for still propagates to any
+    # subprocesses the peer spawns (tensorboard, node-exporter, ...). The
+    # supervisor already calls ``proc.terminate()`` on each Popen; the
+    # process group ensures descendants receive the signal too.
     return subprocess.Popen(  # nosec B603 - command comes from plan.json written by the SDK
         ["/bin/bash", "-c", cmd],
         env=env,
+        start_new_session=True,
     )
 
 
@@ -453,6 +464,7 @@ def run_supervisor(
     launch: Optional[Callable[[PlanPeer], subprocess.Popen]] = None,
     registry_path: Optional[Path] = None,
     component_count: Optional[int] = None,
+    shared_dir: Optional[Path] = None,
 ) -> int:
     """Launch every peer, apply failure policies, return final exit code.
 
@@ -484,7 +496,7 @@ def run_supervisor(
         from functools import partial as _partial
 
         launch_fn: Callable[[PlanPeer], subprocess.Popen] = _partial(
-            _launch_peer, registry_path=registry_path
+            _launch_peer, registry_path=registry_path, shared_dir=shared_dir
         )
     else:
         launch_fn = launch
@@ -749,6 +761,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _preload_callbacks(plan)
 
     registry_path = job_dir / "registry.json"
+    shared_dir = job_dir / "shared"
     job_id = os.environ.get("SLURM_JOB_ID")
     component_count = max(1, len(plan.effective_components()))
     exit_code = run_supervisor(
@@ -756,6 +769,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         job_id=job_id,
         registry_path=registry_path if registry_path.exists() else None,
         component_count=component_count,
+        shared_dir=shared_dir if shared_dir.exists() else None,
     )
     logger.info("Supervisor exiting with code %s", exit_code)
     return exit_code

@@ -240,6 +240,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("plan.json not found at %s — cannot bootstrap registry", plan_path)
         return 1
 
+    # Create the allocation-shared directory before any peer launches so
+    # cross-peer writes race against neither bootstrap nor sibling writers.
+    shared_dir = job_dir / "shared"
+    try:
+        shared_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning("Could not create shared dir %s: %s", shared_dir, exc)
+
     plan = read_plan(plan_path)
 
     hostnames, per_component_hostnames = _resolve_component_hostnames(plan)
@@ -277,6 +285,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 on_node=peer.on_node,
                 on_nodes=peer.on_nodes,
                 colocate_with=peer.colocate_with,
+                ports=dict(peer.ports),
             )
         )
     updated_plan = Plan(

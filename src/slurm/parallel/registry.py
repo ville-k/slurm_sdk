@@ -350,6 +350,42 @@ def announce_peer_metadata(
     return registry
 
 
+def update_peer_ports(
+    path: "str | Path",
+    peer_name: str,
+    replica_index: int,
+    *,
+    ports: Mapping[str, int],
+) -> dict:
+    """Atomically replace a peer's ``ports`` map.
+
+    Split from :func:`update_peer_entry` because ``ports`` is one of the
+    reserved keys that :func:`announce_peer_metadata` refuses to touch —
+    only the runner / supervisor is allowed to rewrite it (initial binding
+    at startup, mid-function :meth:`JobContext.reserve_port` calls).
+    Replaces rather than merges so callers pass a full desired map and we
+    never leave stale entries behind.
+    """
+    registry = read_registry(path)
+    peers = registry.setdefault("peers", {})
+    entries = peers.get(peer_name)
+    if not entries:
+        raise KeyError(
+            f"Peer {peer_name!r} not found in registry (known: {sorted(peers.keys())})"
+        )
+    if replica_index < 0 or replica_index >= len(entries):
+        raise IndexError(
+            f"replica_index {replica_index} out of range for peer "
+            f"{peer_name!r} (have {len(entries)} entries)"
+        )
+    entry = dict(entries[replica_index])
+    # JSON keys must be strings; values must be ints — the writer clamps here.
+    entry["ports"] = {str(k): int(v) for k, v in ports.items()}
+    entries[replica_index] = entry
+    write_registry(path, registry)
+    return registry
+
+
 def update_peer_entry(
     path: "str | Path",
     peer_name: str,
@@ -402,6 +438,7 @@ __all__ = [
     "peers_from_registry",
     "nodes_from_registry",
     "update_peer_entry",
+    "update_peer_ports",
     "announce_peer_metadata",
     "load_peer_groups",
     "load_node_group",

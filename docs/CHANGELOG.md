@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Port reservation at the `@task` decorator — tasks can now declare
+  `@task(ports={"rpc": "auto", "metrics": 50051})`. Fixed integer ports pass
+  through verbatim; `"auto"` entries trigger an ephemeral-socket
+  bind-and-release dance inside the runner before user code starts, and the
+  resolved port numbers are written into the peer's registry entry so
+  sibling peers can discover them via
+  `ctx.peers["<name>"].first.ports["<label>"]`. Peers also get
+  `ctx.my_ports` (read-only mapping of the peer's own resolved ports) and
+  `ctx.reserve_port(name)` for mid-function reservations
+- `ctx.shared_dir` — parallel allocations now expose a shared directory
+  at `$JOB_DIR/shared/` created by the bootstrap before any peer runs. The
+  supervisor exports `SLURM_SDK_SHARED_DIR` into each peer's environment so
+  every peer's `ctx.shared_dir` resolves to the same path. `None` outside a
+  parallel allocation so ordinary task runs are unaffected
+- `ctx.shutdown_requested` — a thread-safe flag driven by a process-wide
+  `threading.Event` that the runner flips when it receives SIGTERM. Peers
+  with long-running main loops can poll it to exit cleanly within the
+  supervisor's grace window. Peer Popens now run under
+  `start_new_session=True` so SIGTERM propagates through the peer's process
+  group to any tools the peer launched (tensorboard, node-exporter, ...)
+- `SlurmTask.with_sidecars(*sidecars, grace_period_seconds=10)` — sugar for
+  the common leader+sidecars shape. Returns a `BoundLeaderBundle`; calling
+  the bundle with the leader's args desugars to the full `parallel(...)`
+  call with `Peer(leader=True)` on the leader and
+  `Peer(on_failure="continue")` defaults on each sidecar. Accepts
+  `SlurmTask`, `BoundTask`, or `Peer` sidecars; an explicit user-provided
+  `Peer(..., on_failure="kill")` keeps its policy. Rejects `topology=` to
+  steer callers to the explicit `parallel(...)` form when pools are needed
 - Named-node placement for parallel allocations — peers can now pin to
   specific hosts within their pool via `Peer(on_node="<label>")` or
   `Peer(on_node=<ordinal>)`, and replica sets can pin per-replica via

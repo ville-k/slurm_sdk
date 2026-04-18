@@ -378,6 +378,19 @@ def _emit_peer_srun_command(
     module_name = _get_importable_module_name(task_func)
     func_name = task_func.__name__
 
+    # Encode the peer's port spec (``@task(ports=...)``) so the runner can
+    # resolve ``"auto"`` entries at startup before user code runs. Bare int
+    # values are left alone; the runner binds + records only the auto ones.
+    ports_spec: Dict[str, Any] = {}
+    if getattr(bt.task, "ports", None):
+        ports_spec = dict(bt.task.ports)
+    ports_flag: List[str] = []
+    if ports_spec:
+        import json as _json
+
+        encoded_ports = base64.b64encode(_json.dumps(ports_spec).encode()).decode()
+        ports_flag = [f'--peer-ports-b64 "{encoded_ports}"']
+
     if peer.is_replica_set:
         # Replica dispatch: the runner looks up ``peer_<name>_<procid>_args.pkl``
         # based on ``SLURM_PROCID`` at runtime — no single --args-file applies.
@@ -394,6 +407,7 @@ def _emit_peer_srun_command(
             '--job-dir "$JOB_DIR"',
             f'--pre-submission-id "{_escape_quotes(peer_pre_id)}"',
         ]
+        runner_parts.extend(ports_flag)
         # Intentionally omit args/kwargs file; dispatch happens by PROCID.
         del args_basename, kwargs_basename
     else:
@@ -411,6 +425,7 @@ def _emit_peer_srun_command(
             '--job-dir "$JOB_DIR"',
             f'--pre-submission-id "{_escape_quotes(peer_pre_id)}"',
         ]
+        runner_parts.extend(ports_flag)
     runner_command = " ".join(runner_parts)
 
     wrapped = packaging_strategy.wrap_execution_command(
@@ -488,6 +503,14 @@ def build_plan(
     plan_peers = []
     for peer, cmd in peer_commands:
         peer_pool = peer.pool or pool_names_ordered[0]
+        # Carry the peer task's declared ports through the plan so the
+        # runner (which owns the ephemeral-bind dance) can resolve them at
+        # step startup. Fixed ports are echoed through verbatim; ``"auto"``
+        # entries stay as the literal sentinel until the runner resolves.
+        peer_ports: Dict[str, Any] = {}
+        bt = peer.task if isinstance(peer.task, BoundTask) else None
+        if bt is not None and getattr(bt.task, "ports", None):
+            peer_ports = dict(bt.task.ports)
         plan_peers.append(
             PlanPeer(
                 name=peer.resolved_name,
@@ -502,6 +525,7 @@ def build_plan(
                 on_node=peer.on_node,
                 on_nodes=tuple(peer.on_nodes) if peer.on_nodes is not None else None,
                 colocate_with=peer.colocate_with,
+                ports=peer_ports,
             )
         )
 

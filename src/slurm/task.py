@@ -104,6 +104,49 @@ def normalize_sbatch_options(options: Dict[str, Any] | None) -> Dict[str, Any]:
     return normalized
 
 
+def _validate_ports_spec(ports: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Validate ``ports=`` on the @task decorator.
+
+    Accepts ``None`` / ``{}`` for no reservations. Otherwise every value must
+    be either a fixed ``int`` or the literal string ``"auto"`` — mixed is
+    fine. Any other value raises ``ValueError`` at decoration time so port
+    typos surface before submission.
+
+    Returns a fresh dict so mutations on the input do not leak onto the task.
+    """
+    if not ports:
+        return {}
+    if not isinstance(ports, dict):
+        raise ValueError(f"@task(ports=...) must be a dict; got {type(ports).__name__}")
+    validated: Dict[str, Any] = {}
+    for name, value in ports.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"@task(ports=...) keys must be non-empty strings; got {name!r}"
+            )
+        # bool is an int subclass; reject to avoid {"rpc": True} silently passing.
+        if isinstance(value, bool):
+            raise ValueError(
+                f"@task(ports=...): {name}={value!r} is not a valid port "
+                "value. Use a positive int or the literal string 'auto'."
+            )
+        if isinstance(value, int):
+            if value < 1 or value > 65535:
+                raise ValueError(
+                    f"@task(ports=...): {name}={value!r} is out of range. "
+                    "Ports must be 1..65535."
+                )
+            validated[name] = value
+        elif isinstance(value, str) and value == "auto":
+            validated[name] = "auto"
+        else:
+            raise ValueError(
+                f"@task(ports=...): {name}={value!r} is not a valid port "
+                "value. Use an int (1..65535) or the literal string 'auto'."
+            )
+    return validated
+
+
 class SlurmTask:
     """A wrapper around a Python function that can be executed on a Slurm cluster.
 
@@ -177,6 +220,7 @@ class SlurmTask:
         func: _NamedCallable,
         sbatch_options: Dict[str, Any] | None = None,
         packaging: Dict[str, Any] | None = None,
+        ports: Optional[Dict[str, Any]] = None,
     ):
         """Initialize a SlurmTask (typically done via @task decorator).
 
@@ -185,9 +229,15 @@ class SlurmTask:
             sbatch_options: SBATCH directive dictionary (will be normalized).
             packaging: Packaging configuration. Defaults to
                 `{"type": "wheel", "build_tool": "uv"}`.
+            ports: Optional port reservations for parallel-peer use. Keys are
+                logical port names; values are either a fixed ``int`` port or
+                the literal string ``"auto"`` to request an ephemeral
+                reservation made by the runner before user code starts.
 
         Raises:
             TypeError: If func is not callable.
+            ValueError: If ``ports`` contains invalid values (non-``int`` and
+                not the literal string ``"auto"``).
         """
         if not callable(func):
             raise TypeError(
@@ -197,6 +247,7 @@ class SlurmTask:
         self.func: _NamedCallable = func
         self.sbatch_options = normalize_sbatch_options(sbatch_options)
         self.packaging = packaging or {"type": "wheel", "build_tool": "uv"}
+        self.ports: Dict[str, Any] = _validate_ports_spec(ports)
         functools.update_wrapper(self, func)
 
         # Track explicit dependencies set via .after() (before task is called)
@@ -449,6 +500,7 @@ class SlurmTask:
             func=self.func,
             sbatch_options=self.sbatch_options.copy(),
             packaging=self.packaging.copy() if self.packaging else None,
+            ports=dict(self.ports) if self.ports else None,
         )
 
         if self._pending_dependencies:
@@ -524,6 +576,7 @@ class SlurmTask:
             func=self.func,
             sbatch_options=merged_sbatch,
             packaging=merged_packaging,
+            ports=dict(self.ports) if self.ports else None,
         )
         new_task._pending_dependencies = self._pending_dependencies.copy()
         new_task._container_dependencies = self._container_dependencies.copy()
@@ -556,6 +609,71 @@ class SlurmTask:
         """
         return BoundTask(task=self, args=args, kwargs=kwargs)
 
+    def with_sidecars(
+        self,
+        *sidecars: Any,
+        grace_period_seconds: int = 10,
+    ) -> "BoundLeaderBundle":
+        """Declare this task as a leader with one or more sidecars.
+
+        Returns a :class:`BoundLeaderBundle` that, when called with the
+        leader's arguments, desugars to a ``parallel(...)`` submission with
+        this task as ``Peer(leader=True)`` and every sidecar as
+        ``Peer(on_failure="continue")``.
+
+        Sidecar coercion:
+
+        - A bare :class:`SlurmTask` becomes ``Peer(task, on_failure="continue")``.
+        - A :class:`BoundTask` becomes ``Peer(bound, on_failure="continue")``.
+        - A pre-built ``Peer`` passes through untouched — a user who has
+          already set ``on_failure="kill"`` on a sidecar keeps that policy.
+
+        Args:
+            *sidecars: Sidecar tasks. May be :class:`SlurmTask`,
+                :class:`BoundTask`, or :class:`~slurm.parallel.types.Peer`.
+            grace_period_seconds: Window between SIGTERM and SIGKILL during
+                the leader-triggered cascading shutdown. Defaults to 10s.
+
+        Returns:
+            A :class:`BoundLeaderBundle`. Call the bundle with the leader's
+            args to submit the parallel job.
+
+        Raises:
+            TypeError: If ``sidecars`` is empty or contains an unsupported
+                type.
+
+        Example:
+            >>> @task(gpus=1, time="01:00:00")
+            ... def train(cfg: dict): ...
+            >>> @task(time="01:00:00")
+            ... def metrics_scraper(): ...
+            >>> job = train.with_sidecars(metrics_scraper)(cfg={"lr": 0.001})
+        """
+        from .parallel.types import Peer
+
+        if not sidecars:
+            raise TypeError(
+                "SlurmTask.with_sidecars() requires at least one sidecar. "
+                "Call the task directly if you don't need sidecars."
+            )
+
+        coerced: List[Peer] = []
+        for item in sidecars:
+            if isinstance(item, Peer):
+                coerced.append(item)
+            elif isinstance(item, (SlurmTask, BoundTask)):
+                coerced.append(Peer(task=item, on_failure="continue"))
+            else:
+                raise TypeError(
+                    "with_sidecars() items must be SlurmTask, BoundTask, or "
+                    f"Peer; got {type(item).__name__}"
+                )
+        return BoundLeaderBundle(
+            leader=self,
+            sidecars=tuple(coerced),
+            grace_period_seconds=grace_period_seconds,
+        )
+
     def with_dependencies(self, tasks: List["SlurmTask"]) -> "SlurmTask":
         """Specify tasks that need their containers pre-built before this workflow runs.
 
@@ -587,6 +705,7 @@ class SlurmTask:
             func=self.func,
             sbatch_options=self.sbatch_options.copy(),
             packaging=self.packaging.copy() if self.packaging else None,
+            ports=dict(self.ports) if self.ports else None,
         )
         new_task._pending_dependencies = self._pending_dependencies.copy()
         new_task._container_dependencies = list(tasks)
@@ -711,3 +830,86 @@ class BoundTask:
     def __repr__(self) -> str:
         name = self.task.func.__name__
         return f"BoundTask({name}, args={self.args!r}, kwargs={self.kwargs!r})"
+
+
+class BoundLeaderBundle:
+    """A leader task plus its sidecars, awaiting the leader's args.
+
+    Returned by :meth:`SlurmTask.with_sidecars`. A :class:`BoundLeaderBundle`
+    is a frozen container around the leader :class:`SlurmTask` and a
+    normalised tuple of sidecar :class:`~slurm.parallel.types.Peer` s. Calling
+    the bundle (``bundle(arg1, arg2, kwarg=val)``) desugars to the full
+    ``parallel(...)`` call:
+
+    .. code-block:: python
+
+        parallel(
+            Peer(leader.partial(arg1, arg2, kwarg=val), leader=True),
+            Peer(sidecar_a, on_failure="continue"),
+            Peer(sidecar_b, on_failure="continue"),
+            grace_period_seconds=grace_period_seconds,
+        )
+
+    Topology overrides are intentionally not supported — a user who needs
+    explicit pools should write the full ``parallel(...)`` call. The sugar
+    exists to keep the single-pool leader+sidecars shape concise.
+
+    Attributes:
+        leader: The leader :class:`SlurmTask`.
+        sidecars: Tuple of :class:`~slurm.parallel.types.Peer` s (already
+            coerced with ``on_failure="continue"`` defaults applied).
+        grace_period_seconds: Propagated to ``parallel(...)``.
+    """
+
+    __slots__ = ("leader", "sidecars", "grace_period_seconds")
+
+    def __init__(
+        self,
+        *,
+        leader: "SlurmTask",
+        sidecars: tuple,
+        grace_period_seconds: int = 10,
+    ) -> None:
+        if not isinstance(leader, SlurmTask):
+            raise TypeError(
+                "BoundLeaderBundle leader must be a SlurmTask; got "
+                f"{type(leader).__name__}"
+            )
+        self.leader = leader
+        self.sidecars = tuple(sidecars)
+        self.grace_period_seconds = int(grace_period_seconds)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Bind ``args`` / ``kwargs`` to the leader and submit via ``parallel``.
+
+        Raises:
+            TypeError: If ``topology=`` (or any other ``parallel``-level
+                keyword) is passed — use ``parallel(...)`` directly when the
+                leader+sidecars sugar isn't enough.
+        """
+        if "topology" in kwargs:
+            raise TypeError(
+                "SlurmTask.with_sidecars(...) does not accept topology=. "
+                "Call parallel(...) directly if you need explicit pools."
+            )
+        from .parallel import parallel
+        from .parallel.types import Peer
+
+        leader_peer = Peer(task=self.leader.partial(*args, **kwargs), leader=True)
+        return parallel(
+            leader_peer,
+            *self.sidecars,
+            grace_period_seconds=self.grace_period_seconds,
+        )
+
+    def __repr__(self) -> str:
+        leader_name = self.leader.func.__name__
+        sidecar_names = [
+            type(s).__name__ + "(" + (s.resolved_name or "?") + ")"
+            for s in self.sidecars
+        ]
+        return (
+            f"BoundLeaderBundle(leader={leader_name}, "
+            f"sidecars=[{', '.join(sidecar_names)}], "
+            f"grace_period_seconds={self.grace_period_seconds})"
+        )
