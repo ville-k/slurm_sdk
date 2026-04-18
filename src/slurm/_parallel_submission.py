@@ -17,7 +17,7 @@ to the leader (or first peer) at submission time so rendering sees a flat
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from ._submission import (
     merge_sbatch_options,
@@ -270,10 +270,23 @@ def _per_peer_stdout_stderr(
 def submit_parallel_spec(
     cluster: "Cluster",
     spec: "_ParallelSpec",
+    *,
+    dependency_ids: Optional[List[str]] = None,
 ) -> "ParallelJob":
     """Submit a validated :class:`_ParallelSpec` through ``cluster``.
 
-    Returns a :class:`ParallelJob` aggregating one :class:`Job` per peer.
+    Args:
+        cluster: Active :class:`Cluster` that owns the backend.
+        spec: Normalised ``_ParallelSpec`` returned by :func:`_build_spec`.
+        dependency_ids: Optional upstream Slurm job ids. When provided, every
+            hetjob component's ``#SBATCH`` header carries
+            ``--dependency=afterok:<id>[:<id>...]`` so Slurm only schedules
+            the allocation after every upstream job succeeds. Used by
+            :meth:`ParallelJob.after` and the ``parallel(..., after=...)``
+            kwarg.
+
+    Returns:
+        :class:`ParallelJob` aggregating one :class:`Job` per peer.
     """
     from .job import Job
     from .parallel_job import ParallelJob
@@ -322,6 +335,12 @@ def submit_parallel_spec(
         if peer.is_replica_set:
             replica_items[peer.resolved_name] = _resolve_replica_items(peer)
 
+    # Dependency string propagates to every hetjob component so Slurm only
+    # schedules the allocation once every upstream job has succeeded.
+    sbatch_overrides: Dict[str, Any] = {}
+    if dependency_ids:
+        sbatch_overrides["dependency"] = "afterok:" + ":".join(dependency_ids)
+
     script = render_parallel_script(
         spec=spec,
         packaging_strategy=packaging_strategy,
@@ -329,7 +348,7 @@ def submit_parallel_spec(
         pre_submission_id=pre_submission_id,
         cluster=cluster,
         task_defaults=effective_sbatch_options,
-        sbatch_overrides={},
+        sbatch_overrides=sbatch_overrides,
         callbacks=cluster.callbacks,
         replica_items=replica_items,
         peer_packaging_strategies=peer_packaging_strategies,
@@ -381,6 +400,13 @@ def submit_parallel_spec(
     # replica points at its own result file. Replica peers produce
     # ``count`` Job objects, each with a distinct ``pre_submission_id`` so
     # ``Job._result_filename`` yields distinct result paths.
+    #
+    # Only the representative peer's Job gets ``on_completed`` — every peer
+    # shares the same Slurm job id so dispatching the completion callback
+    # from multiple peer Jobs would produce duplicate
+    # :class:`CompletedContext` events. The representative poller fires
+    # exactly once for the whole allocation (Phase 11 contract).
+    representative_name = representative_peer.resolved_name
     peer_jobs: Dict[str, "Job"] = {}
     peer_replica_jobs: Dict[str, List["Job"]] = {}
     for peer in spec.peers:
@@ -420,6 +446,15 @@ def submit_parallel_spec(
                     replica_kwargs = base_kwargs
                 peer_stdout = f"{target_job_dir}/slurm_{pre_submission_id}.out"
                 peer_stderr = f"{target_job_dir}/slurm_{pre_submission_id}.err"
+                # Replica 0 of the representative peer is the surface that
+                # drives the aggregate completion callback; every other Job
+                # skips ``on_completed`` so duplicate events can't fire.
+                is_representative = (
+                    peer.resolved_name == representative_name and replica_idx == 0
+                )
+                on_completed = (
+                    cluster._emit_completed_context if is_representative else None
+                )
                 job = Job(
                     id=base_job_id,
                     cluster=cluster,
@@ -432,7 +467,7 @@ def submit_parallel_spec(
                     stdout_path=peer_stdout,
                     stderr_path=peer_stderr,
                     backend=cluster.backend,
-                    on_completed=cluster._emit_completed_context,
+                    on_completed=on_completed,
                 )
                 replica_jobs.append(job)
             peer_replica_jobs[peer.resolved_name] = replica_jobs
@@ -447,6 +482,10 @@ def submit_parallel_spec(
             peer_stdout, peer_stderr = _per_peer_stdout_stderr(
                 target_job_dir, pre_submission_id, peer.resolved_name
             )
+            is_representative = peer.resolved_name == representative_name
+            on_completed = (
+                cluster._emit_completed_context if is_representative else None
+            )
             job = Job(
                 id=base_job_id,
                 cluster=cluster,
@@ -459,7 +498,7 @@ def submit_parallel_spec(
                 stdout_path=peer_stdout,
                 stderr_path=peer_stderr,
                 backend=cluster.backend,
-                on_completed=cluster._emit_completed_context,
+                on_completed=on_completed,
             )
             peer_jobs[peer.resolved_name] = job
 
@@ -474,8 +513,8 @@ def submit_parallel_spec(
 
     # Emit end-of-submit callback using the representative peer's Job so
     # existing callback consumers (loggers, benchmarks) continue to work.
-    # Per-peer callback fanout is a Phase 11 concern.
-    representative_peer = _leader_or_first(spec)
+    # A ParallelJob emits exactly one :class:`SubmitEndContext` for the
+    # whole allocation (Phase 11 contract).
     submit_end_ctx = SubmitEndContext(
         job=peer_jobs[representative_peer.resolved_name],
         job_id=str(base_job_id),
@@ -487,18 +526,15 @@ def submit_parallel_spec(
     )
     cluster._dispatch_callbacks("on_end_submit_job_ctx", submit_end_ctx)
 
-    # Start the poller for each Job so existing status-polling
-    # infrastructure fires ``on_completed_ctx`` once per peer/replica. They
-    # share a job id so the backend query is redundant on multi-peer jobs —
-    # we accept that cost in Phase 2 and revisit in Phase 11.
-    polled_jobs: List["Job"] = []
-    for peer in spec.peers:
-        if peer.is_replica_set:
-            polled_jobs.extend(peer_replica_jobs[peer.resolved_name])
-        else:
-            polled_jobs.append(peer_jobs[peer.resolved_name])
-    for job in polled_jobs:
-        cluster._maybe_start_job_poller(job)
+    # A ParallelJob allocates one Slurm job id shared by every peer/replica.
+    # Starting one poller per peer (as Phase 2 did) would have every poller
+    # query the same job id and emit duplicate ``on_completed_ctx`` events.
+    # Phase 11: register exactly one poller — on the representative peer —
+    # and the single ``CompletedContext`` that fires represents the whole
+    # allocation. Per-peer callback consumers that need richer detail still
+    # have access to ``parallel_job.peer_outcomes()`` and
+    # ``parallel_job.snapshot()``.
+    cluster._maybe_start_job_poller(peer_jobs[representative_peer.resolved_name])
 
     return parallel_job
 

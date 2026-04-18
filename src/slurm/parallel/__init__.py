@@ -15,7 +15,7 @@ See ``unified_design_parallel_tasks.md`` at the repo root for the full design.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 from ..errors import TopologyError
 from .types import (
@@ -231,6 +231,7 @@ def parallel(
     reservation: Optional[str] = None,
     network: Optional[str] = None,
     grace_period_seconds: int = 10,
+    after: object = None,
     **named_peers: PeerInput,
 ):
     """Submit a single Slurm allocation running N peer tasks concurrently.
@@ -249,6 +250,12 @@ def parallel(
         network: ``#SBATCH --network=...`` default.
         grace_period_seconds: Window between SIGTERM and SIGKILL during
             shutdown. Default 10.
+        after: Optional upstream Job / ArrayJob / ParallelJob (or a list
+            thereof). When provided, Slurm only schedules this allocation
+            once every upstream job has completed successfully — every
+            hetjob component carries ``#SBATCH --dependency=afterok:...``.
+            Equivalent to calling ``.after(...)`` on the returned handle
+            but avoids the cancel-and-resubmit round-trip.
         **named_peers: Peer declarations keyed by name. The keyword becomes
             the peer's ``name``, overriding any ``name=`` on the ``Peer``.
             Enables idiomatic result access: ``job["inference"]``.
@@ -304,4 +311,34 @@ def parallel(
     from .._parallel_submission import submit_parallel_spec
 
     cluster = _resolve_cluster("parallel")
-    return submit_parallel_spec(cluster, spec)
+
+    dependency_ids: Optional[List[str]] = None
+    if after is not None:
+        # Import lazily to avoid a circular import at module load time.
+        from ..array_job import ArrayJob
+        from ..job import Job
+        from ..parallel_job import ParallelJob
+
+        deps_list: List[object]
+        if isinstance(after, (list, tuple)):
+            deps_list = list(after)
+        else:
+            deps_list = [after]
+
+        dependency_ids = []
+        for dep in deps_list:
+            if isinstance(dep, ParallelJob):
+                dependency_ids.append(dep.job_id)
+            elif isinstance(dep, ArrayJob):
+                if not dep._submitted:
+                    dep._submit()
+                dependency_ids.extend(j.id for j in dep._jobs)
+            elif isinstance(dep, Job):
+                dependency_ids.append(dep.id)
+            else:
+                raise TypeError(
+                    "parallel(after=...) expects Job, ArrayJob, or "
+                    f"ParallelJob; got {type(dep).__name__}"
+                )
+
+    return submit_parallel_spec(cluster, spec, dependency_ids=dependency_ids)
