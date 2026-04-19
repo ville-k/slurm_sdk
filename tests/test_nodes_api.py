@@ -121,6 +121,61 @@ def test_node_group_by_hostname(tmp_path):
     assert group.by_hostname("missing-host") is None
 
 
+def test_node_group_derives_peers_from_live_peer_entries(tmp_path):
+    path = tmp_path / "registry.json"
+    registry = _registry_with_nodes()
+    registry["nodes"]["gpu-01"]["peers"] = ["stale-peer"]
+    registry["nodes"]["gpu-02"]["peers"] = ["stale-peer"]
+    registry["nodes"]["cpu-01"]["peers"] = ["stale-peer"]
+    registry["peers"] = {
+        "learner": [
+            {
+                "name": "learner",
+                "pool": "gpu",
+                "replica_index": 0,
+                "replica_count": 1,
+                "hostname": "gpu-01",
+                "hostnames": ["gpu-01"],
+            }
+        ],
+        "metrics": [
+            {
+                "name": "metrics",
+                "pool": "gpu",
+                "replica_index": 0,
+                "replica_count": 2,
+                "hostname": "gpu-01",
+                "hostnames": ["gpu-01"],
+            },
+            {
+                "name": "metrics",
+                "pool": "gpu",
+                "replica_index": 1,
+                "replica_count": 2,
+                "hostname": "gpu-01",
+                "hostnames": ["gpu-01"],
+            },
+        ],
+        "sim": [
+            {
+                "name": "sim",
+                "pool": "cpu",
+                "replica_index": 0,
+                "replica_count": 1,
+                "hostname": "cpu-03",
+                "hostnames": ["cpu-03"],
+            }
+        ],
+    }
+    write_registry(path, registry)
+
+    group = load_node_group(path)
+    assert group.by_hostname("gpu-01").peers == ("learner", "metrics")
+    assert group.by_hostname("gpu-02").peers == ()
+    assert group.by_hostname("cpu-01").peers == ()
+    assert group.by_hostname("cpu-03").peers == ("sim",)
+
+
 def test_node_group_in_pool_iterator(tmp_path):
     path = tmp_path / "registry.json"
     write_registry(path, _registry_with_nodes())

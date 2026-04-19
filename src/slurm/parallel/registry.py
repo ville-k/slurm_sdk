@@ -8,6 +8,15 @@ real hostname and ``SLURM_STEP_ID`` via :func:`update_peer_hostinfo`
 at startup. The supervisor then updates peer entries as peers start /
 fail / finish. User-facing APIs like ``ctx.peers`` read the same file.
 
+Ownership is split intentionally:
+
+- peer entries own runtime placement and lifecycle state (hostname,
+  step id, ports, restart counts, outcomes, user metadata)
+- node entries own allocation inventory (hostname, pool, ordinal, label)
+- discovery surfaces derive cross-links such as ``ctx.node.peers`` and
+  ``PeerInfo.node_label`` on read instead of trusting duplicated cached
+  fields in the raw JSON
+
 Concurrency model: atomic writes via ``tmp + os.replace`` so readers
 always see a consistent file, plus an ``fcntl.flock`` on a sibling
 ``<registry>.lock`` held across every read-modify-write so concurrent
@@ -391,10 +400,11 @@ def update_peer_hostinfo(
     under srun. It is ``None`` in local-mode (no srun involved) and for
     tests.
 
-    As a side effect, also refreshes the node registry so
-    ``ctx.node.peers`` reflects the live placement. Nodes the bootstrap
-    did not know about (unpinned peers landing anywhere Slurm picks) get
-    appended; peer membership lists are kept in declaration order.
+    As a side effect, also refreshes the node registry's cached
+    ``nodes[*].peers`` list for debugging / backward compatibility.
+    User-facing discovery derives node membership from the peer section
+    on read, but keeping the cache reasonably current makes the raw file
+    easier to inspect and preserves compatibility with older tooling.
     """
     with _with_registry_lock(path):
         registry = read_registry(path)

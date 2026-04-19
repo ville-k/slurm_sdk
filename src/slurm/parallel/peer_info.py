@@ -10,6 +10,9 @@ Design notes:
 - **Snapshots, not live views.** Construction copies the relevant registry
   entries into immutable containers. Call :meth:`PeerGroup.refresh` to pick
   up updates — readers never hold open handles, and never mutate the file.
+- **Node labels follow the node inventory.** ``PeerInfo.node_label`` is
+  resolved from the node section by hostname when available, so stale
+  cached labels in peer entries do not leak into discovery views.
 - **Mappings are read-only.** ``ports`` and ``metadata`` ship as
   :class:`types.MappingProxyType` over private dicts, so callers cannot
   mutate shared state by accident.
@@ -53,7 +56,9 @@ class PeerInfo:
             ``hostnames[0]``).
         hostnames: Every host the replica's step spans.
         node_label: Pool-local label assigned to this replica's node, if
-            any.
+            any. Discovery resolves it from the node inventory when the
+            hostname is known, falling back to the stored peer entry only
+            when no matching node entry exists.
         step_id: Slurm step id (``<jobid>.<stepid>``) once the peer has
             started — ``None`` during the pending window.
         ports: Declared ports; populated by Phase 9 port reservation. For
@@ -338,15 +343,40 @@ def _load_groups_from_path(path: Path) -> Mapping[str, PeerGroup]:
         return {}
 
     peers_section = registry.get("peers") or {}
+    node_labels_by_hostname = _node_labels_by_hostname(registry)
     out: dict[str, PeerGroup] = {}
     for name, entries in peers_section.items():
-        infos = tuple(PeerInfo.from_entry(entry) for entry in entries)
+        infos = []
+        for entry in entries:
+            materialized = dict(entry)
+            hostname = str(materialized.get("hostname") or "")
+            if hostname in node_labels_by_hostname:
+                materialized["node_label"] = node_labels_by_hostname[hostname]
+            infos.append(PeerInfo.from_entry(materialized))
+        infos = tuple(infos)
         # Sort by replica_index so indexing is stable regardless of JSON
         # key order (older Python versions preserved insertion order, but
         # future merge semantics should not rely on it).
         infos = tuple(sorted(infos, key=lambda i: i.replica_index))
         out[str(name)] = PeerGroup(name=str(name), _replicas=infos, _path=path)
     return out
+
+
+def _node_labels_by_hostname(registry: Mapping[str, Any]) -> dict[str, Optional[str]]:
+    """Return the authoritative node label for each known hostname."""
+    nodes_section = registry.get("nodes")
+    if not isinstance(nodes_section, Mapping):
+        return {}
+
+    labels: dict[str, Optional[str]] = {}
+    for entry in nodes_section.values():
+        if not isinstance(entry, Mapping):
+            continue
+        hostname = str(entry.get("hostname") or "")
+        if hostname == "":
+            continue
+        labels[hostname] = entry.get("label")
+    return labels
 
 
 __all__ = [

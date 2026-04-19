@@ -200,6 +200,18 @@ atomicity, and every read-modify-write takes an `fcntl.flock` on
 `<registry>.lock` so concurrent `announce()` calls from different peers
 can't overwrite each other's fields.
 
+The registry has two authoritative sections:
+
+- `peers` owns runtime placement and state: hostname, step id, ports,
+  metadata, restart counts, outcomes.
+- `nodes` owns allocation inventory: hostname, pool, ordinal, label.
+
+Discovery derives cross-links on read. `ctx.node.peers` is rebuilt from
+the peer entries' current hostnames, and `PeerInfo.node_label` is looked
+up from the node inventory by hostname. The legacy `nodes[*].peers` list
+is still written for compatibility and for debugging the raw file, but
+it is informational rather than authoritative.
+
 A minimal registry for a two-peer job looks roughly like:
 
 ```json
@@ -209,7 +221,7 @@ A minimal registry for a two-peer job looks roughly like:
     "metrics": [{"state": "ready", "hostname": "gpu-07", "step_id": "12345.1", ...}]
   },
   "nodes": {
-    "gpu-07": {"pool": "default", "peers": ["train", "metrics"]}
+    "gpu-07": {"pool": "default", "label": "head", "ordinal": 0, "peers": ["train", "metrics"]}
   }
 }
 ```
