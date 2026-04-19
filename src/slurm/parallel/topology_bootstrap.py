@@ -80,10 +80,22 @@ def build_registry_skeleton(
     ``peer.replica_count`` entries in the registry list (one per replica
     index); singleton peers get exactly one.
 
-    Per-replica node spread is round-robin by replica index across the pool's
-    hostnames when no explicit pin applies — this keeps unpinned peers
-    deterministic while pinned peers (via ``peer_pins``) land exactly where
-    the Phase 8 placement resolver says.
+    Hostname population rule:
+
+    - Peers listed in ``peer_pins`` (Phase 8 placement resolver output)
+      get their pinned hostnames written into the registry here — the
+      SDK emits ``srun --nodelist=<host>`` for them so the pin is
+      authoritative.
+    - Peers NOT in ``peer_pins`` (unpinned — Slurm chooses the node at
+      step-launch time) get ``hostname=""`` and stay in
+      :data:`STATE_PENDING`. The peer's own runner publishes the real
+      hostname via :func:`update_peer_hostinfo` as soon as it starts.
+
+    The earlier behaviour — round-robin ``replica_index mod len(hosts)``
+    assignment — is intentionally gone: it was speculation, not ground
+    truth. Callers that relied on the seeded value saw bootstrap's guess
+    instead of the actual placement, which is worse than
+    ``state=pending`` + ``wait_all(keys=["hostname"])``.
 
     Args:
         plan: Parsed supervisor plan.
@@ -151,10 +163,13 @@ def build_registry_skeleton(
                 # replica set colocates with a singleton peer that owns one
                 # host.
                 pinned = pin[0]
-            elif peer_hostnames:
-                # Round-robin placement: replica i picks host i mod len(hosts).
-                pinned = peer_hostnames[replica_index % len(peer_hostnames)]
             else:
+                # Unpinned: Slurm will choose the node at step-launch
+                # time. Leave hostname empty — the peer's own runner
+                # publishes the actual hostname via
+                # :func:`update_peer_hostinfo` once it knows where it
+                # landed. Callers that need the value must
+                # ``wait_all(keys=["hostname"])``.
                 pinned = ""
             label = _label_for(peer.pool, pinned) if pinned else None
             entries.append(
@@ -180,20 +195,15 @@ def build_registry_skeleton(
         peers_out[peer.name] = entries
 
     nodes_out: dict = {}
-    # Track which peers each node carries so service discovery can enumerate
-    # them once the registry matures.
-    peers_by_component: Dict[int, List[str]] = {}
-    for peer in plan.peers:
-        comp_index = pool_to_component.get(peer.pool, 0)
-        peers_by_component.setdefault(comp_index, []).append(peer.name)
-
-    # Global ordinal counter across all components so every hostname key stays
-    # unique even when two components share the same hostname (rare but
-    # possible with overlapping partitions).
+    # ``peers`` membership for each node is populated at runtime by
+    # :func:`update_peer_hostinfo` — it's the first process that knows
+    # which peer actually landed on which hostname. Bootstrap only
+    # emits the nodes it can name (hostname, pool, ordinal, label) so
+    # ``ctx.nodes[ordinal]`` and ``ctx.nodes["<label>"]`` work even
+    # before any peer publishes.
     global_ordinal = 0
     for comp in components:
         hosts = component_hosts.get(comp.index, ())
-        comp_peers = peers_by_component.get(comp.index, [])
         labels = pool_node_labels.get(comp.pool, ())
         for pool_ordinal, hostname in enumerate(hosts):
             key = hostname or f"_unresolved_{global_ordinal}"
@@ -207,7 +217,7 @@ def build_registry_skeleton(
                 # reconstructible by walking components in order.
                 "ordinal": pool_ordinal,
                 "label": label,
-                "peers": list(comp_peers),
+                "peers": [],
                 "component_index": comp.index,
             }
             global_ordinal += 1

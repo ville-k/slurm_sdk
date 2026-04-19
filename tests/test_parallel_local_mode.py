@@ -48,6 +48,18 @@ def _return_replica_marker(worker_id: int) -> str:
     return f"replica-{worker_id}"
 
 
+@task(time="00:01:00", mem="128M", cpus_per_task=1)
+def _return_hostname_and_step_id() -> dict:
+    """Return what the runner's hostinfo publish would have recorded."""
+    import os
+    import socket
+
+    return {
+        "hostname": socket.gethostname(),
+        "step_id": os.environ.get("SLURM_STEP_ID"),
+    }
+
+
 @pytest.fixture(autouse=True)
 def _force_local_parallel(monkeypatch):
     """Force the bypass path regardless of sbatch availability."""
@@ -118,6 +130,39 @@ def test_replica_set_each_writes_own_result_file(local_cluster, tmp_path):
             f"replica {idx}'s pickle missing at {result_path!r}; per-replica "
             "output-file rewrite likely regressed"
         )
+
+
+def test_runner_publishes_hostname_and_step_id_to_registry(local_cluster, tmp_path):
+    """After a peer runs, the registry entry carries the real hostname.
+
+    Bootstrap seeds unpinned peers with ``hostname=""``; the runner's
+    ``_publish_initial_hostinfo`` call updates it to
+    ``socket.gethostname()`` at startup. Regression coverage for the
+    pre-fix state where ``ctx.peers[name].first.hostname`` returned
+    bootstrap's speculation instead of the actual placement.
+    """
+    import json
+    import socket
+
+    with local_cluster:
+        job = parallel(
+            Peer(_return_hostname_and_step_id, name="solo"),
+        )
+        assert job.wait(timeout=60)
+        job.get_results()  # proves it ran
+
+    # Locate the registry file the local-mode supervisor wrote.
+    registry_files = list(tmp_path.rglob("registry.json"))
+    assert registry_files, "registry.json was not written"
+    registry = json.loads(registry_files[0].read_text())
+
+    entry = registry["peers"]["solo"][0]
+    # Hostname is the actual host the runner landed on — no speculation.
+    assert entry["hostname"] == socket.gethostname()
+    # Runtime publish also bumped the node section: the real hostname
+    # is present, and ``solo`` is listed under its peers.
+    assert entry["hostname"] in registry["nodes"]
+    assert "solo" in registry["nodes"][entry["hostname"]]["peers"]
 
 
 def test_two_peer_leader_sidecar_local(local_cluster):

@@ -135,9 +135,11 @@ def test_build_registry_skeleton_seeds_per_component_hostnames():
         per_component_hostnames=per_component,
     )
 
-    # Each peer's hostnames match their component's hostname slice.
+    # Each peer knows the full hostname slice of its component (for
+    # ordinal lookups); its own ``hostname`` stays empty until the
+    # runner publishes the actual value — bootstrap no longer round-robins.
     assert skeleton["peers"]["learner"][0]["hostnames"] == ["gpu-01"]
-    assert skeleton["peers"]["learner"][0]["hostname"] == "gpu-01"
+    assert skeleton["peers"]["learner"][0]["hostname"] == ""
     assert skeleton["peers"]["learner"][0]["component_index"] == 0
 
     sim_entries = skeleton["peers"]["sim"]
@@ -145,29 +147,28 @@ def test_build_registry_skeleton_seeds_per_component_hostnames():
     assert all(
         e["hostnames"] == ["cpu-01", "cpu-02", "cpu-03", "cpu-04"] for e in sim_entries
     )
-    # Round-robin per replica index across the component's hostnames.
-    assert [e["hostname"] for e in sim_entries] == [
-        "cpu-01",
-        "cpu-02",
-        "cpu-03",
-        "cpu-04",
-    ]
+    assert all(e["hostname"] == "" for e in sim_entries)
     assert all(e["component_index"] == 1 for e in sim_entries)
 
     assert skeleton["peers"]["collector"][0]["hostnames"] == ["aux-01"]
+    assert skeleton["peers"]["collector"][0]["hostname"] == ""
     assert skeleton["peers"]["collector"][0]["component_index"] == 2
 
-    # Nodes map carries per-component pool attribution.
+    # Nodes map carries per-component pool attribution; ``peers``
+    # membership starts empty — runners register themselves at startup.
     assert skeleton["nodes"]["gpu-01"]["pool"] == "gpu"
     assert skeleton["nodes"]["cpu-01"]["pool"] == "cpu"
     assert skeleton["nodes"]["aux-01"]["pool"] == "aux"
-    # Each node records only peers from its component.
-    assert skeleton["nodes"]["gpu-01"]["peers"] == ["learner"]
-    assert skeleton["nodes"]["aux-01"]["peers"] == ["collector"]
+    assert skeleton["nodes"]["gpu-01"]["peers"] == []
+    assert skeleton["nodes"]["aux-01"]["peers"] == []
 
 
-def test_build_registry_skeleton_round_robin_wraps():
-    """Replica count > component hostnames wraps round-robin."""
+def test_build_registry_skeleton_unpinned_replicas_stay_pending():
+    """Replica count > component hostnames — every replica stays empty.
+
+    Bootstrap no longer fabricates a round-robin placement; each
+    replica's runner publishes the real hostname at startup.
+    """
     plan = Plan(
         peers=[
             PlanPeer(
@@ -190,9 +191,13 @@ def test_build_registry_skeleton_round_robin_wraps():
         hostnames=("cpu-01", "cpu-02"),
         per_component_hostnames={0: ("cpu-01", "cpu-02")},
     )
-    # 5 replicas over 2 hosts — wraps: 01, 02, 01, 02, 01.
     hosts = [e["hostname"] for e in skeleton["peers"]["worker"]]
-    assert hosts == ["cpu-01", "cpu-02", "cpu-01", "cpu-02", "cpu-01"]
+    assert hosts == ["", "", "", "", ""]
+    # The full component hostname list is still recorded so ordinal
+    # lookups via ``ctx.nodes[<ordinal>]`` work before runners publish.
+    assert all(
+        e["hostnames"] == ["cpu-01", "cpu-02"] for e in skeleton["peers"]["worker"]
+    )
 
 
 def test_bootstrap_main_writes_hetjob_registry(tmp_path, monkeypatch):
@@ -210,13 +215,18 @@ def test_bootstrap_main_writes_hetjob_registry(tmp_path, monkeypatch):
     assert rc == 0
 
     registry = read_registry(tmp_path / "registry.json")
-    # Learner sees only the GPU hostnames.
+    # Learner sees only the GPU hostnames (slice), but its own hostname
+    # is empty until the runner publishes.
     assert registry["peers"]["learner"][0]["hostnames"] == ["gpu-01"]
-    # Sim peer (2 replicas over 2 hosts) gets both CPU hostnames.
-    sim_hosts = {e["hostname"] for e in registry["peers"]["sim"]}
-    assert sim_hosts == {"cpu-01", "cpu-02"}
-    # Collector in aux.
+    assert registry["peers"]["learner"][0]["hostname"] == ""
+    # Sim peer (2 replicas) has the full component's hostname list but
+    # no per-replica pin.
+    for entry in registry["peers"]["sim"]:
+        assert entry["hostnames"] == ["cpu-01", "cpu-02"]
+        assert entry["hostname"] == ""
+    # Collector in aux — unpinned, pending.
     assert registry["peers"]["collector"][0]["hostnames"] == ["aux-01"]
+    assert registry["peers"]["collector"][0]["hostname"] == ""
 
 
 def _unused() -> Optional[int]:
