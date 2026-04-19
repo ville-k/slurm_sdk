@@ -1,14 +1,19 @@
 """Peer registry — the runtime directory of who landed where.
 
-The registry lives at ``$JOB_DIR/registry.json``. The bootstrap writes the
-skeleton (peers marked ``pending``, hostnames pre-resolved) before any peer
-runs. The supervisor updates peer entries as peers start / fail / finish.
-User-facing APIs like ``ctx.peers`` (Phase 7) read the same file.
+The registry lives at ``$JOB_DIR/registry.json``. Bootstrap writes the
+skeleton before any peer runs: pool layout, component indices, node
+labels, and the hostname of every *pinned* peer. Unpinned peers carry
+``hostname=""`` and ``state="pending"`` — their runner publishes the
+real hostname and ``SLURM_STEP_ID`` via :func:`update_peer_hostinfo`
+at startup. The supervisor then updates peer entries as peers start /
+fail / finish. User-facing APIs like ``ctx.peers`` read the same file.
 
-Concurrency model: atomic writes via ``tmp + os.replace`` so readers always
-see a consistent file. Readers are lock-free — they just re-read the JSON
-each time. A full file rewrite is fine at the sizes expected (dozens of
-peers at most); the complexity of incremental updates is not worth it.
+Concurrency model: atomic writes via ``tmp + os.replace`` so readers
+always see a consistent file, plus an ``fcntl.flock`` on a sibling
+``<registry>.lock`` held across every read-modify-write so concurrent
+announces / ports updates / supervisor state changes never overwrite
+each other's fields. Readers are lock-free — the atomic rename
+guarantees they see either the full old file or the full new one.
 """
 
 from __future__ import annotations

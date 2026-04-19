@@ -91,9 +91,14 @@ def aggregator(ctx: JobContext) -> list[str]:
     return connections
 ```
 
-A replica's `state` is `"ready"` after the runner has bound its ports and
-the user function is running. `ready_only()` skips replicas still in
-`pending` and replicas that already `failed`.
+A replica's `state` flips to `"ready"` only when the replica itself
+calls `ctx.announce(ready=True)` — the runner publishes hostname, step
+id, and ports at startup but leaves `state="pending"` so readiness
+remains the replica's own promise ("I have finished setup, you can
+dial me"). `ready_only()` skips replicas still in `pending` and
+replicas that already `failed`. Callers that need to block until a
+specific field lands — even without a `ready` signal — can use
+`ctx.peers["simulator"].wait_all(keys=["hostname"])`.
 
 Call `ctx.peers["simulator"].refresh()` between iterations to pick up
 peers that came up after your first read — `PeerGroup` holds a snapshot,

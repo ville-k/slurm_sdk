@@ -1,17 +1,26 @@
 """Allocation-time bootstrap for ``parallel(...)`` submissions.
 
-Runs once on the batch allocation's head node, before the supervisor. Its
-responsibilities in Phase 3 are minimal:
+Runs once on the batch allocation's head node, before the supervisor:
 
 1. Read ``$JOB_DIR/plan.json``.
-2. Resolve the allocation's hostnames from ``SLURM_JOB_NODELIST`` (via
-   ``scontrol show hostnames`` when available; an in-process expander
-   handles the common cases in tests and scontrol-less environments).
-3. Write a registry skeleton to ``$JOB_DIR/registry.json`` with every peer
-   marked ``pending`` and pre-seeded with hostnames.
+2. Resolve the allocation's hostnames from ``SLURM_JOB_NODELIST`` (and
+   the per-component ``SLURM_JOB_NODELIST_HET_GROUP_<N>`` vars for
+   hetjobs) via ``scontrol show hostnames`` when available; an
+   in-process expander handles the common cases in tests and
+   scontrol-less environments.
+3. Run the Phase 8 placement resolver over the spec's ``on_node`` /
+   ``on_nodes`` / ``colocate_with`` directives to produce a
+   peer→hostname pin map.
+4. Write a registry skeleton to ``$JOB_DIR/registry.json``. *Pinned*
+   peers get their resolved hostname written up front. *Unpinned*
+   peers — the ones Slurm chooses the node for at ``srun`` time —
+   stay with ``hostname=""`` and ``state="pending"`` until their own
+   runner publishes via :func:`update_peer_hostinfo` at startup.
 
-Placement resolution (``on_node`` / ``colocate_with``), replica
-pinning, and hetjob multi-component parsing arrive in Phase 6 / 8.
+The nodes section is seeded with per-pool hostname, ordinal, and label
+metadata but leaves each node's ``peers`` list empty — runners
+register themselves at startup so the membership reflects actual
+placement, not bootstrap's guesses.
 """
 
 from __future__ import annotations
