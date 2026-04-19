@@ -776,16 +776,60 @@ def run_supervisor(
                     new_count,
                     peer.max_restarts,
                 )
-                # Restart semantics: in local mode we restart replica 0 only
-                # (the runner's restart counter is peer-wide, not replica-wide).
-                # Real-Slurm path restarts the whole step.
+                # Restart semantics match Slurm's atomic-step behaviour:
+                # ``srun --ntasks=N`` is one step, so a non-zero exit from
+                # any task restarts the whole step. Slurm mode gets this
+                # for free — ``launch_fn(peer)`` re-submits the single
+                # step. Local mode launches one subprocess per replica, so
+                # we explicitly terminate any still-live siblings of the
+                # failing replica before spawning a fresh set of N.
                 if local_mode:
-                    new_proc = _launch_one(peer, 0)
+                    launches = max(1, peer.replica_count)
+                    if launches > 1:
+                        # Collect live siblings (same peer name) and
+                        # terminate them with the same SIGTERM-grace-
+                        # SIGKILL cascade used for external shutdowns.
+                        sibling_pids = [
+                            pid
+                            for pid, other in peer_by_pid.items()
+                            if other.name == peer.name
+                        ]
+                        siblings: Dict[int, subprocess.Popen] = {}
+                        for sib_pid in sibling_pids:
+                            sib_proc = processes.pop(sib_pid, None)
+                            peer_by_pid.pop(sib_pid, None)
+                            if sib_proc is not None:
+                                siblings[sib_pid] = sib_proc
+                        if siblings:
+                            _terminate_local_processes(
+                                siblings, use_process_groups=True
+                            )
+                            deadline = time.time() + max(1, plan.grace_period_seconds)
+                            while siblings and time.time() < deadline:
+                                for pid in list(siblings):
+                                    if siblings[pid].poll() is not None:
+                                        del siblings[pid]
+                                time.sleep(0.05)
+                            if siblings:
+                                _kill_local_processes(siblings, use_process_groups=True)
+                                for proc in siblings.values():
+                                    try:
+                                        proc.wait(timeout=2)
+                                    except subprocess.TimeoutExpired:
+                                        pass
+                        for replica_index in range(launches):
+                            new_proc = _launch_one(peer, replica_index)
+                            processes[new_proc.pid] = new_proc
+                            peer_by_pid[new_proc.pid] = peer
+                    else:
+                        new_proc = _launch_one(peer, 0)
+                        processes[new_proc.pid] = new_proc
+                        peer_by_pid[new_proc.pid] = peer
                 else:
                     assert launch_fn is not None
                     new_proc = launch_fn(peer)
-                processes[new_proc.pid] = new_proc
-                peer_by_pid[new_proc.pid] = peer
+                    processes[new_proc.pid] = new_proc
+                    peer_by_pid[new_proc.pid] = peer
                 continue
 
             if action == "continue":
