@@ -208,6 +208,43 @@ def test_ctx_node_returns_info_for_current_host(tmp_path, monkeypatch):
     assert node.pool == "cpu"
 
 
+def test_ctx_node_prefers_step_nodelist_over_hostname_env(tmp_path):
+    from slurm.runtime import build_job_context
+
+    path = tmp_path / "registry.json"
+    write_registry(path, _registry_with_nodes())
+    env = {
+        "SLURM_SDK_REGISTRY_PATH": str(path),
+        "SLURM_SDK_PEER_POOL": "cpu",
+        "SLURM_STEP_NODELIST": "cpu-[01-03]",
+        "SLURM_NODEID": "1",
+        "HOSTNAME": "gpu-01",
+    }
+    ctx = build_job_context(env=env)
+    node = ctx.node
+    assert node is not None
+    assert node.hostname == "cpu-02"
+
+
+def test_ctx_node_falls_back_to_socket_hostname(tmp_path, monkeypatch):
+    from slurm.runtime import build_job_context
+
+    path = tmp_path / "registry.json"
+    write_registry(path, _registry_with_nodes())
+    monkeypatch.delenv("HOSTNAME", raising=False)
+    import socket
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "cpu-03")
+    env = {
+        "SLURM_SDK_REGISTRY_PATH": str(path),
+        "SLURM_SDK_PEER_POOL": "cpu",
+    }
+    ctx = build_job_context(env=env)
+    node = ctx.node
+    assert node is not None
+    assert node.hostname == "cpu-03"
+
+
 def test_ctx_node_none_when_host_not_in_registry(tmp_path, monkeypatch):
     from slurm.runtime import build_job_context
 

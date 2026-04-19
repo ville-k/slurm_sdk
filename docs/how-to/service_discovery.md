@@ -25,11 +25,14 @@ startup, each peer's runner publishes its actual hostname and
 `SLURM_STEP_ID` to its own entry — unpinned peers show up with
 `hostname=""` until this publish completes, so callers that need the
 hostname should either gate on it via `wait_all(keys=["hostname"])` or
-rely on the `"ready"` signal the peer itself announces. Ports declared
-via `@task(ports=...)` are published at the same time. Mid-run
-announcements from user code merge atomically into the calling peer's
-`metadata` under a file lock — concurrent `announce()` calls from
-different peers never overwrite each other's fields.
+rely on the `"ready"` signal the peer itself announces. `wait_all`
+treats `hostname`, `step_id`, `node_label`, and `ports` as top-level
+runtime fields; any other key name is checked against announced
+`metadata`. Ports declared via `@task(ports=...)` are published at the
+same time. Mid-run announcements from user code merge atomically into
+the calling peer's `metadata` under a file lock — concurrent
+`announce()` calls from different peers never overwrite each other's
+fields.
 
 ## Find another peer and connect
 
@@ -97,8 +100,10 @@ id, and ports at startup but leaves `state="pending"` so readiness
 remains the replica's own promise ("I have finished setup, you can
 dial me"). `ready_only()` skips replicas still in `pending` and
 replicas that already `failed`. Callers that need to block until a
-specific field lands — even without a `ready` signal — can use
-`ctx.peers["simulator"].wait_all(keys=["hostname"])`.
+specific runtime field lands — even without a `ready` signal — can use
+`ctx.peers["simulator"].wait_all(keys=["hostname"])`. The same top-level
+field behavior works for `step_id`, `node_label`, and `ports`; other
+keys still wait on `metadata`.
 
 Call `ctx.peers["simulator"].refresh()` between iterations to pick up
 peers that came up after your first read — `PeerGroup` holds a snapshot,
