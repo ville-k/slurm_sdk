@@ -256,15 +256,32 @@ def _backend_will_bypass_sbatch(cluster: "Cluster") -> bool:
     """Return ``True`` when :meth:`LocalBackend._should_bypass_sbatch` would fire.
 
     Used by the submission pipeline to decide whether to run the Phase 12
-    local-host capacity check. We inspect the cluster's backend type and
-    check for the sbatch binary directly — cheaper than rendering a script
-    and asking the backend afterward.
+    local-host capacity check. The check must only run when the cluster's
+    backend is an actual :class:`LocalBackend` that will launch subprocesses
+    here — not when a test or integration harness has installed a fake /
+    recording backend that short-circuits ``submit_job``. We therefore
+    verify both the cluster's declared backend type *and* the concrete
+    backend instance type, then confirm ``sbatch`` really isn't on the
+    PATH so the check is silent in environments that have Slurm installed.
     """
     import shutil as _shutil
 
     backend_type = getattr(cluster, "backend_type", "") or ""
     if backend_type.lower() != "local":
         return False
+
+    # Only a real LocalBackend will execute the rendered script; tests
+    # substitute their own backend class on cluster.backend and never run
+    # subprocesses. Importing here (not at module top) avoids a circular
+    # import between _parallel_submission and api.local.
+    try:
+        from .api.local import LocalBackend
+    except ImportError:  # pragma: no cover - defensive
+        return False
+    backend = getattr(cluster, "backend", None)
+    if not isinstance(backend, LocalBackend):
+        return False
+
     if os.environ.get("SLURM_SDK_FORCE_LOCAL_PARALLEL", "").lower() in (
         "1",
         "true",
