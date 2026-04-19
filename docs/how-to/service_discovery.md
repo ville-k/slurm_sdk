@@ -11,17 +11,25 @@ coordination server.
 
 ## Solution
 
-Every peer in a `parallel(...)` allocation has access to a shared,
-append-only registry through `JobContext`:
+Every peer in a `parallel(...)` allocation has access to a shared registry
+through `JobContext`:
 
 - `ctx.peers[name]` — all replicas of a named peer as a `PeerGroup`.
 - `ctx.nodes[label_or_ordinal]` — nodes in the allocation as a `NodeGroup`.
 - `ctx.my_ports` — any ports reserved for this peer (see below).
 - `ctx.announce(**fields)` — publish metadata to the registry atomically.
 
-The registry is seeded during bootstrap (hostnames, node labels, step ids)
-and updated at runtime by `announce()` calls. All peers see the same view
-after a `refresh()` — no shared config, no extra services.
+**How the registry gets populated.** Bootstrap seeds the skeleton (pool
+layout, node labels, pinned-peer hostnames) before any peer runs. At
+startup, each peer's runner publishes its actual hostname and
+`SLURM_STEP_ID` to its own entry — unpinned peers show up with
+`hostname=""` until this publish completes, so callers that need the
+hostname should either gate on it via `wait_all(keys=["hostname"])` or
+rely on the `"ready"` signal the peer itself announces. Ports declared
+via `@task(ports=...)` are published at the same time. Mid-run
+announcements from user code merge atomically into the calling peer's
+`metadata` under a file lock — concurrent `announce()` calls from
+different peers never overwrite each other's fields.
 
 ## Find another peer and connect
 

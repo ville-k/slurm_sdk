@@ -80,8 +80,12 @@ directives into concrete hostnames:
 - Pairs `Pool.node_labels[i]` with `hostnames[i]` in allocation order so
   `on_node="head"` becomes `--nodelist=compute-07`.
 - Topologically sorts the `colocate_with` graph and detects cycles.
-- Writes `$JOB_DIR/registry.json` with one entry per peer replica, every
-  hostname and pool filled in, `state="pending"`.
+- Writes `$JOB_DIR/registry.json` with one entry per peer replica. Pool,
+  component, and hostname list are recorded up front; pinned peers get
+  their hostname written, unpinned peers stay with `hostname=""` and
+  `state="pending"`. Each peer's runner publishes its actual hostname
+  and `SLURM_STEP_ID` at startup (see "What the registry actually
+  contains" below).
 - Serialises per-peer argument pickles so the runner can deserialise
   positional and keyword args when the step starts.
 - Writes `$JOB_DIR/plan.json` — a static snapshot of every `srun` command
@@ -186,11 +190,15 @@ process group.
 
 ## What the registry actually contains
 
-`$JOB_DIR/registry.json` is the system of record for the allocation. The
-bootstrap seeds it, the runner updates each peer's entry on launch and
-completion, and user code reads it through `ctx.peers` / `ctx.nodes`. The
-file is written atomically (`write_tmp + rename`) so readers never see a
-half-written document even during high-frequency `announce()` calls.
+`$JOB_DIR/registry.json` is the system of record for the allocation.
+Bootstrap seeds the skeleton; each peer's runner publishes its actual
+hostname, step id, and declared ports at startup (via
+`update_peer_hostinfo` / `update_peer_ports`); the supervisor writes
+terminal outcomes; user code reads the whole thing through `ctx.peers` /
+`ctx.nodes`. Every write goes through `write_tmp + rename` for
+atomicity, and every read-modify-write takes an `fcntl.flock` on
+`<registry>.lock` so concurrent `announce()` calls from different peers
+can't overwrite each other's fields.
 
 A minimal registry for a two-peer job looks roughly like:
 
