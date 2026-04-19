@@ -400,6 +400,67 @@ def test_capacity_fits_exactly():
     assert err is None
 
 
+def test_pool_memory_overflow_reported():
+    """A peer declaring mem=64G pinned to a pool with mem_per_node=1G must fail."""
+    top = Topology(pools={"small": Pool(nodes=1, mem_per_node="1G")})
+    with _expect_topology_error("memory overflow", "'_train'"):
+        # _train is declared with mem="16G" (see fixtures above); pool
+        # only has 1G per node. 16 GiB > 1 GiB triggers the check.
+        parallel(
+            Peer(_train.partial(cfg={"lr": 0.001}), pool="small"),
+            topology=top,
+        )
+
+
+def test_pool_memory_fits_exactly():
+    top = Topology(pools={"ok": Pool(nodes=1, cpus_per_node=4, mem_per_node="16G")})
+    err = _run_parallel(
+        Peer(_train.partial(cfg={"lr": 0.001}), pool="ok"),
+        topology=top,
+    )
+    assert err is None
+
+
+def test_pool_memory_sum_across_peers_overflows():
+    """Two peers each declaring mem=16G overflow a 16G pool."""
+    top = Topology(
+        pools={"squeeze": Pool(nodes=1, cpus_per_node=32, mem_per_node="16G")}
+    )
+    with _expect_topology_error("memory overflow"):
+        parallel(
+            Peer(_train.partial(cfg={"a": 1}), pool="squeeze", name="a"),
+            Peer(_train.partial(cfg={"b": 2}), pool="squeeze", name="b"),
+            topology=top,
+        )
+
+
+def test_pool_memory_unknown_claims_not_checked():
+    """Pool declares memory but no peer does → no overflow."""
+
+    @task()  # no mem declared
+    def _nop():
+        pass
+
+    top = Topology(pools={"main": Pool(nodes=1, mem_per_node="1G")})
+    err = _run_parallel(
+        Peer(_nop, pool="main"),
+        topology=top,
+    )
+    assert err is None
+
+
+def test_implicit_topology_aggregates_memory():
+    """``parallel(...)`` without ``topology=`` sums peer mem into the default pool.
+
+    Before P2-1 this was documented but not implemented — the implicit
+    pool summed only CPUs and GPUs. Regression guard.
+    """
+    spec = _build(_train.partial(cfg={"x": 1}), _monitor)
+    pool = spec.topology.pools[spec.topology.default_pool or "default"]
+    # _train is mem="16G"; _monitor is mem="4G". Sum: 20 GiB = 20480 MiB.
+    assert pool.mem_per_node == f"{(16 + 4) * 1024}M"
+
+
 # ---------------------------------------------------------------------------
 # announce
 # ---------------------------------------------------------------------------
