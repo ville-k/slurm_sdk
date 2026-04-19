@@ -361,6 +361,80 @@ def load_node_group(
     return _load_nodes_from_path(Path(registry_path), current_pool)
 
 
+def update_peer_hostinfo(
+    path: "str | Path",
+    peer_name: str,
+    replica_index: int,
+    *,
+    hostname: str,
+    step_id: Optional[str] = None,
+) -> dict:
+    """Record the peer's runtime-discovered hostname and Slurm step id.
+
+    Bootstrap seeds each peer entry with ``hostname=""`` (pending) for
+    unpinned peers — it cannot know which node Slurm will pick until the
+    ``srun`` step actually launches. The runner calls this helper at
+    startup, right after resolving any declared ports, so service
+    discovery (``ctx.peers[...].first.hostname``, ``ctx.node``) returns
+    the *actual* host rather than bootstrap's speculation.
+
+    For pinned peers this is still called — it's a no-op observationally
+    since bootstrap's seed already matches — which keeps the publish
+    path uniform regardless of whether the peer was pinned.
+
+    ``step_id`` comes from ``SLURM_STEP_ID`` when the runner is launched
+    under srun. It is ``None`` in local-mode (no srun involved) and for
+    tests.
+
+    As a side effect, also refreshes the node registry so
+    ``ctx.node.peers`` reflects the live placement. Nodes the bootstrap
+    did not know about (unpinned peers landing anywhere Slurm picks) get
+    appended; peer membership lists are kept in declaration order.
+    """
+    with _with_registry_lock(path):
+        registry = read_registry(path)
+        peers = registry.setdefault("peers", {})
+        entries = peers.get(peer_name)
+        if not entries:
+            raise KeyError(
+                f"Peer {peer_name!r} not found in registry (known: "
+                f"{sorted(peers.keys())})"
+            )
+        if replica_index < 0 or replica_index >= len(entries):
+            raise IndexError(
+                f"replica_index {replica_index} out of range for peer "
+                f"{peer_name!r} (have {len(entries)} entries)"
+            )
+        entry = dict(entries[replica_index])
+        # Skip the write if nothing actually changed — saves a rewrite
+        # when a pinned peer's hostname already matches the runner's.
+        changed = False
+        if entry.get("hostname") != hostname:
+            entry["hostname"] = hostname
+            changed = True
+        if step_id is not None and entry.get("step_id") != step_id:
+            entry["step_id"] = step_id
+            changed = True
+        if changed:
+            entries[replica_index] = entry
+            # Also refresh the nodes section so ``ctx.nodes`` / ``ctx.node``
+            # reflect the actual host once the runner knows where it is.
+            nodes = registry.setdefault("nodes", {})
+            node_entry = dict(nodes.get(hostname) or {})
+            node_entry.setdefault("hostname", hostname)
+            node_entry.setdefault("pool", entry.get("pool", ""))
+            node_entry.setdefault("component_index", entry.get("component_index", 0))
+            node_entry.setdefault("ordinal", len(nodes))
+            node_entry.setdefault("label", entry.get("node_label"))
+            existing_peers = list(node_entry.get("peers") or ())
+            if peer_name not in existing_peers:
+                existing_peers.append(peer_name)
+            node_entry["peers"] = existing_peers
+            nodes[hostname] = node_entry
+            write_registry(path, registry)
+    return registry
+
+
 def announce_peer_metadata(
     path: "str | Path",
     peer_name: str,
@@ -522,6 +596,7 @@ __all__ = [
     "peers_from_registry",
     "nodes_from_registry",
     "update_peer_entry",
+    "update_peer_hostinfo",
     "update_peer_ports",
     "announce_peer_metadata",
     "load_peer_groups",

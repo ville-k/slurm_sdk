@@ -81,6 +81,43 @@ def _publish_initial_ports(job_context: JobContext, ports: dict) -> None:
         logger.debug("Could not publish initial ports: %s", exc)
 
 
+def _publish_initial_hostinfo(job_context: JobContext) -> None:
+    """Record the peer's actual hostname + step id in the registry.
+
+    Bootstrap seeds every peer entry with empty ``hostname`` / ``step_id``
+    because it runs *before* Slurm picks which node each unpinned srun
+    step lands on. The runner is the first process that knows the answer
+    (it's running on the chosen node), so we publish as soon as the
+    runner has a registry path and a peer identity.
+
+    For pinned peers the values are already correct after bootstrap;
+    :func:`update_peer_hostinfo` elides the write in that case.
+
+    Under local-mode (no srun) ``SLURM_STEP_ID`` is absent and the
+    helper stores ``None`` — still useful since the hostname publish is
+    what ``ctx.peers[...].first.hostname`` depends on.
+    """
+    if job_context.peer_name is None or job_context._registry_path is None:
+        return
+    import socket
+
+    hostname = socket.gethostname()
+    step_id = os.environ.get("SLURM_STEP_ID") or None
+    try:
+        from slurm.parallel.registry import update_peer_hostinfo
+
+        replica = job_context.replica_index or 0
+        update_peer_hostinfo(
+            job_context._registry_path,
+            job_context.peer_name,
+            replica,
+            hostname=hostname,
+            step_id=step_id,
+        )
+    except (FileNotFoundError, KeyError, IndexError, OSError) as exc:
+        logger.debug("Could not publish initial hostinfo: %s", exc)
+
+
 def get_job_id_from_env() -> Optional[str]:
     """Get the job ID from environment variables.
 
@@ -306,6 +343,11 @@ def main():
         job_context._my_ports.update(resolved_ports)
         # Record in the registry so peers discover each other's ports.
         _publish_initial_ports(job_context, resolved_ports)
+
+    # Publish the peer's actual hostname + step id. Bootstrap cannot know
+    # these for unpinned peers until the ``srun`` step lands somewhere;
+    # this runner invocation is the first process that does.
+    _publish_initial_hostinfo(job_context)
     job_id = get_job_id_from_env()
     job_dir = args.job_dir or os.environ.get("JOB_DIR")
     stdout_path = args.stdout_path or os.environ.get("SLURM_STDOUT")
