@@ -39,6 +39,7 @@ from .initialization import (
     log_startup_info,
     parse_args,
     resolve_peer_ports,
+    resolve_replica_output_file,
     restore_sys_path,
 )
 from .callbacks import run_callbacks
@@ -270,6 +271,11 @@ def main():
     """
     # Parse command-line arguments
     args = parse_args()
+
+    # Replica dispatch: per-task rewrite of ``--output-file`` so each replica
+    # writes to its own pickle. See ``apply_replica_output_suffix`` for the
+    # mechanics; in singleton / non-peer runs this is a no-op.
+    args.output_file = resolve_replica_output_file(args)
 
     # Configure logging
     configure_logging(args.loglevel)
