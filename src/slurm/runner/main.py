@@ -28,6 +28,7 @@ from slurm.runtime import (
     _function_wants_job_context,
     current_job_context,
     install_shutdown_handler,
+    resolve_current_hostname,
 )
 from slurm.workflow import WorkflowContext
 
@@ -99,9 +100,10 @@ def _publish_initial_hostinfo(job_context: JobContext) -> None:
     """
     if job_context.peer_name is None or job_context._registry_path is None:
         return
-    import socket
 
-    hostname = socket.gethostname()
+    hostname = resolve_current_hostname(job_context)
+    if hostname is None:
+        return
     step_id = os.environ.get("SLURM_STEP_ID") or None
     try:
         from slurm.parallel.registry import update_peer_hostinfo

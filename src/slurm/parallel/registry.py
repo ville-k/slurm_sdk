@@ -411,6 +411,7 @@ def update_peer_hostinfo(
                 f"{peer_name!r} (have {len(entries)} entries)"
             )
         entry = dict(entries[replica_index])
+        previous_hostname = str(entry.get("hostname") or "")
         # Skip the write if nothing actually changed — saves a rewrite
         # when a pinned peer's hostname already matches the runner's.
         changed = False
@@ -421,11 +422,26 @@ def update_peer_hostinfo(
             entry["step_id"] = step_id
             changed = True
         if changed:
+            nodes = registry.setdefault("nodes", {})
+            destination_node = dict(nodes.get(hostname) or {})
+            destination_label = destination_node.get("label")
+            if entry.get("node_label") != destination_label:
+                entry["node_label"] = destination_label
             entries[replica_index] = entry
+
             # Also refresh the nodes section so ``ctx.nodes`` / ``ctx.node``
             # reflect the actual host once the runner knows where it is.
-            nodes = registry.setdefault("nodes", {})
-            node_entry = dict(nodes.get(hostname) or {})
+            if previous_hostname and previous_hostname != hostname:
+                previous_node = dict(nodes.get(previous_hostname) or {})
+                if previous_node:
+                    previous_node["peers"] = [
+                        name
+                        for name in list(previous_node.get("peers") or ())
+                        if name != peer_name
+                    ]
+                    nodes[previous_hostname] = previous_node
+
+            node_entry = destination_node
             node_entry.setdefault("hostname", hostname)
             node_entry.setdefault("pool", entry.get("pool", ""))
             node_entry.setdefault("component_index", entry.get("component_index", 0))

@@ -17,6 +17,7 @@ from slurm.parallel.registry import (
     STATE_PENDING,
     announce_peer_metadata,
     load_peer_groups,
+    update_peer_hostinfo,
     write_registry,
 )
 
@@ -98,6 +99,118 @@ def test_wait_all_with_keys_waits_for_metadata(tmp_path):
     t.join(timeout=5.0)
 
     assert all("endpoint" in r.metadata for r in group)
+
+
+def test_wait_all_with_hostname_field_waits_for_runtime_publish(tmp_path):
+    path = tmp_path / "registry.json"
+    write_registry(
+        path,
+        {
+            "peers": {
+                "worker": [
+                    {
+                        "name": "worker",
+                        "pool": "default",
+                        "replica_index": 0,
+                        "replica_count": 2,
+                        "hostname": "",
+                        "hostnames": [],
+                        "metadata": {},
+                        "ports": {},
+                        "state": STATE_PENDING,
+                        "restart_count": 0,
+                        "component_index": 0,
+                        "step_id": None,
+                    },
+                    {
+                        "name": "worker",
+                        "pool": "default",
+                        "replica_index": 1,
+                        "replica_count": 2,
+                        "hostname": "",
+                        "hostnames": [],
+                        "metadata": {},
+                        "ports": {},
+                        "state": STATE_PENDING,
+                        "restart_count": 0,
+                        "component_index": 0,
+                        "step_id": None,
+                    },
+                ]
+            },
+            "nodes": {},
+        },
+    )
+    group = load_peer_groups(path)["worker"]
+
+    def publisher():
+        time.sleep(0.05)
+        update_peer_hostinfo(path, "worker", 0, hostname="host-0", step_id=None)
+        time.sleep(0.05)
+        update_peer_hostinfo(path, "worker", 1, hostname="host-1", step_id=None)
+
+    t = threading.Thread(target=publisher)
+    t.start()
+    group.wait_all(keys=["hostname"], timeout=5.0)
+    t.join(timeout=5.0)
+
+    assert [replica.hostname for replica in group] == ["host-0", "host-1"]
+
+
+def test_wait_all_with_step_id_field_waits_for_runtime_publish(tmp_path):
+    path = tmp_path / "registry.json"
+    write_registry(
+        path,
+        {
+            "peers": {
+                "worker": [
+                    {
+                        "name": "worker",
+                        "pool": "default",
+                        "replica_index": 0,
+                        "replica_count": 2,
+                        "hostname": "host-0",
+                        "hostnames": ["host-0"],
+                        "metadata": {},
+                        "ports": {},
+                        "state": STATE_PENDING,
+                        "restart_count": 0,
+                        "component_index": 0,
+                        "step_id": None,
+                    },
+                    {
+                        "name": "worker",
+                        "pool": "default",
+                        "replica_index": 1,
+                        "replica_count": 2,
+                        "hostname": "host-1",
+                        "hostnames": ["host-1"],
+                        "metadata": {},
+                        "ports": {},
+                        "state": STATE_PENDING,
+                        "restart_count": 0,
+                        "component_index": 0,
+                        "step_id": None,
+                    },
+                ]
+            },
+            "nodes": {},
+        },
+    )
+    group = load_peer_groups(path)["worker"]
+
+    def publisher():
+        time.sleep(0.05)
+        update_peer_hostinfo(path, "worker", 0, hostname="host-0", step_id="10")
+        time.sleep(0.05)
+        update_peer_hostinfo(path, "worker", 1, hostname="host-1", step_id="11")
+
+    t = threading.Thread(target=publisher)
+    t.start()
+    group.wait_all(keys=["step_id"], timeout=5.0)
+    t.join(timeout=5.0)
+
+    assert [replica.step_id for replica in group] == ["10", "11"]
 
 
 def test_wait_all_times_out_cleanly(tmp_path):

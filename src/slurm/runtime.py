@@ -103,6 +103,44 @@ def _reserve_ephemeral_port() -> int:
     return int(port)
 
 
+def resolve_current_hostname(
+    job_context: "JobContext",
+    *,
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """Resolve the hostname this process should use for node discovery.
+
+    Hostname resolution follows the runtime-discovery precedence documented
+    for parallel peers:
+
+    1. ``job_context.hostnames[job_context.node_rank]`` when the Slurm env
+       exposed a concrete nodelist and the node rank points inside it.
+    2. ``HOSTNAME`` from the process environment.
+    3. :func:`socket.gethostname` as the final local fallback.
+
+    The helper is shared by the runner's initial host publication path and
+    :attr:`JobContext.node` so both surfaces agree on the hostname key used
+    inside ``registry.json``.
+    """
+    if (
+        job_context.node_rank is not None
+        and 0 <= job_context.node_rank < len(job_context.hostnames)
+    ):
+        hostname = job_context.hostnames[job_context.node_rank]
+        if hostname:
+            return hostname
+
+    env_map = env or os.environ
+    hostname = env_map.get("HOSTNAME")
+    if hostname:
+        return hostname
+
+    import socket
+
+    fallback = socket.gethostname()
+    return fallback or None
+
+
 @dataclass(frozen=True)
 class JobContext:
     """Runtime metadata exposed to task functions.
@@ -311,18 +349,21 @@ class JobContext:
     def node(self) -> "Optional[NodeInfo]":
         """The :class:`~slurm.parallel.node_info.NodeInfo` for this process's host.
 
-        Looks up the peer's hostname (either the ``HOSTNAME`` env var or
-        :func:`socket.gethostname`) against :attr:`nodes`. Returns ``None``
-        when the current process isn't running under a parallel allocation
-        or the hostname isn't in the registry (e.g. tests that don't mock
-        the full topology).
+        Uses :func:`resolve_current_hostname` to look up the current process
+        in :attr:`nodes`. This keeps ``ctx.node`` aligned with the runner's
+        registry publication path: step nodelist / node rank wins, then
+        ``HOSTNAME``, then :func:`socket.gethostname`.
+
+        Returns ``None`` when the current process isn't running under a
+        parallel allocation or the resolved hostname isn't in the registry
+        (e.g. tests that don't mock the full topology).
         """
         group = self.nodes
         if len(group) == 0:
             return None
-        import socket
-
-        hostname = os.environ.get("HOSTNAME") or socket.gethostname()
+        hostname = resolve_current_hostname(self)
+        if hostname is None:
+            return None
         return group.by_hostname(hostname)
 
     def announce(self, *, ready: bool = False, **fields: Any) -> None:

@@ -15,6 +15,7 @@ from slurm.parallel.registry import (
     nodes_from_registry,
     peers_from_registry,
     read_registry,
+    update_peer_hostinfo,
     write_registry,
 )
 
@@ -151,6 +152,70 @@ def test_node_label_preserved(tmp_path):
     write_registry(path, registry)
     nodes = nodes_from_registry(read_registry(path))
     assert nodes["gpu-01"].label == "head"
+
+
+def test_update_peer_hostinfo_relocation_removes_old_node_membership(tmp_path):
+    path = tmp_path / "registry.json"
+    write_registry(
+        path,
+        {
+            "peers": {
+                "worker": [
+                    PeerRegistryEntry(
+                        name="worker",
+                        pool="default",
+                        hostnames=["node-a", "node-b"],
+                    ).to_dict()
+                ]
+            },
+            "nodes": {
+                "node-a": NodeRegistryEntry(
+                    hostname="node-a", pool="default", ordinal=0, label="a", peers=[]
+                ).to_dict(),
+                "node-b": NodeRegistryEntry(
+                    hostname="node-b", pool="default", ordinal=1, label="b", peers=[]
+                ).to_dict(),
+            },
+        },
+    )
+
+    update_peer_hostinfo(path, "worker", 0, hostname="node-a", step_id="1")
+    update_peer_hostinfo(path, "worker", 0, hostname="node-b", step_id="2")
+
+    registry = read_registry(path)
+    assert registry["nodes"]["node-a"]["peers"] == []
+    assert registry["nodes"]["node-b"]["peers"] == ["worker"]
+
+
+def test_update_peer_hostinfo_backfills_peer_node_label(tmp_path):
+    path = tmp_path / "registry.json"
+    write_registry(
+        path,
+        {
+            "peers": {
+                "worker": [
+                    PeerRegistryEntry(
+                        name="worker",
+                        pool="gpu",
+                        hostnames=["gpu-01", "gpu-02"],
+                    ).to_dict()
+                ]
+            },
+            "nodes": {
+                "gpu-01": NodeRegistryEntry(
+                    hostname="gpu-01", pool="gpu", ordinal=0, label="head", peers=[]
+                ).to_dict(),
+                "gpu-02": NodeRegistryEntry(
+                    hostname="gpu-02", pool="gpu", ordinal=1, label="worker", peers=[]
+                ).to_dict(),
+            },
+        },
+    )
+
+    update_peer_hostinfo(path, "worker", 0, hostname="gpu-02", step_id="7")
+
+    registry = read_registry(path)
+    assert registry["peers"]["worker"][0]["node_label"] == "worker"
 
 
 def _unused_import_guard():

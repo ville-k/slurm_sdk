@@ -32,6 +32,7 @@ logger = logging.getLogger("slurm.parallel.peer_info")
 
 
 _PeerState = Literal["pending", "ready", "failed"]
+_TOP_LEVEL_WAIT_FIELDS = frozenset({"hostname", "step_id", "node_label", "ports"})
 
 
 @dataclass(frozen=True)
@@ -192,17 +193,27 @@ class PeerGroup:
         """Block until every replica has announced the requested ``keys``.
 
         When ``keys`` is ``None``, waits for every replica's ``state`` to
-        reach ``"ready"``. When provided, waits until every replica's
-        ``metadata`` contains every name in ``keys`` (values can be
-        anything; presence is the signal).
+        reach ``"ready"``. When provided, each key is interpreted as either:
+
+        - one of the supported top-level runtime fields
+          (``hostname``, ``step_id``, ``node_label``, ``ports``), or
+        - a user-announced metadata key
+
+        For the top-level fields, the wait succeeds once the field is
+        populated (non-empty string, non-``None``, or non-empty mapping).
+        Metadata keys preserve the existing semantics: presence in
+        ``metadata`` is the signal, regardless of the value.
 
         Polling starts at 50ms and doubles up to 1s. A DEBUG log fires
         every ~3 seconds of waiting so hung waits are diagnosable without
         attaching a debugger.
 
         Args:
-            keys: Metadata keys every replica must have announced. ``None``
-                means wait for ``state == "ready"`` instead.
+            keys: Field names every replica must have published. ``None``
+                means wait for ``state == "ready"`` instead. Supported
+                top-level runtime fields are ``hostname``, ``step_id``,
+                ``node_label``, and ``ports``; any other key is matched
+                against the replica's ``metadata`` mapping.
             timeout: Seconds before raising :class:`TimeoutError`. ``None``
                 waits forever.
 
@@ -265,7 +276,10 @@ def _group_condition_met(group: PeerGroup, keys: Optional[Sequence[str]]) -> boo
     if keys is None:
         return all(r.state == "ready" for r in group._replicas)
     key_list = list(keys)
-    return all(all(k in r.metadata for k in key_list) for r in group._replicas)
+    return all(
+        all(_replica_field_is_populated(replica, key) for key in key_list)
+        for replica in group._replicas
+    )
 
 
 def _describe_pending(group: PeerGroup, keys: Optional[Sequence[str]]) -> str:
@@ -276,10 +290,29 @@ def _describe_pending(group: PeerGroup, keys: Optional[Sequence[str]]) -> str:
             if r.state != "ready":
                 missing.append(f"{r.name}[{r.replica_index}]={r.state}")
         else:
-            absent = [k for k in keys if k not in r.metadata]
+            absent = [k for k in keys if not _replica_field_is_populated(r, k)]
             if absent:
                 missing.append(f"{r.name}[{r.replica_index}] missing {absent}")
     return ", ".join(missing) if missing else "<none>"
+
+
+def _replica_field_is_populated(replica: PeerInfo, key: str) -> bool:
+    """Return True when ``key`` has landed for ``replica``.
+
+    Supported top-level runtime fields are intentionally narrow so
+    ``wait_all(keys=[...])`` cannot silently treat unrelated registry
+    internals (for example ``state``) as populated merely because the field
+    exists. Everything else keeps the established metadata-key semantics.
+    """
+    if key in _TOP_LEVEL_WAIT_FIELDS:
+        if key == "hostname":
+            return replica.hostname != ""
+        if key == "step_id":
+            return replica.step_id is not None
+        if key == "node_label":
+            return replica.node_label is not None
+        return bool(replica.ports)
+    return key in replica.metadata
 
 
 def _load_groups_from_path(path: Path) -> Mapping[str, PeerGroup]:
