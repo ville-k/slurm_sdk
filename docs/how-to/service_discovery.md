@@ -32,7 +32,10 @@ runtime fields; any other key name is checked against announced
 same time. Mid-run announcements from user code merge atomically into
 the calling peer's `metadata` under a file lock — concurrent
 `announce()` calls from different peers never overwrite each other's
-fields.
+fields. Discovery treats peer entries as the source of truth for runtime
+placement/state and node entries as the source of truth for allocation
+inventory; cross-links such as `ctx.node.peers` and `PeerInfo.node_label`
+are derived on read rather than trusted from duplicated cached fields.
 
 ## Find another peer and connect
 
@@ -132,7 +135,9 @@ def trainer(ctx: JobContext) -> None:
 - **`ctx.nodes.in_pool(name)`** iterates every node in a named pool.
 - **`ctx.node`** is the `NodeInfo` for *this* process's host. Its
   `peers` field lists every peer that landed on the same node — handy
-  for "one metrics agent per node" patterns.
+  for "one metrics agent per node" patterns. That membership is derived
+  from the live peer entries, so stale `nodes[*].peers` caches do not
+  leak into discovery.
 
 ## Bidirectional handshake
 

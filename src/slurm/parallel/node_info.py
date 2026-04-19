@@ -10,6 +10,9 @@ each node. The types mirror :class:`~slurm.parallel.peer_info.PeerInfo` /
 - Frozen dataclasses so accidental mutation can't corrupt shared state.
 - Indexed access is flexible — integer ordinals resolve within the
   current peer's pool, string keys resolve by label across every pool.
+- Cross-links are derived on read — :attr:`NodeInfo.peers` comes from the
+  peer section's runtime placement, not from the raw ``nodes[*].peers``
+  cache stored in ``registry.json`` for debugging / compatibility.
 """
 
 from __future__ import annotations
@@ -36,7 +39,8 @@ class NodeInfo:
         ordinal: 0-based position within the pool (stable across
             invocations given a stable allocation).
         peers: Names of peers that landed on this node. Derived from the
-            registry's ``peers`` section at load time.
+            registry's peer-placement section at load time; the raw
+            ``nodes[*].peers`` field is treated as informational only.
         component_index: Hetjob component index — matches the pool's
             component in multi-pool submissions.
     """
@@ -171,8 +175,47 @@ def _load_nodes_from_path(path: Path, current_pool: Optional[str] = None) -> Nod
         return NodeGroup(_nodes=(), _path=path, current_pool=current_pool)
 
     nodes_section = registry.get("nodes") or {}
-    infos = tuple(NodeInfo.from_entry(entry) for entry in nodes_section.values())
+    derive_node_peers = "peers" in registry
+    peer_membership = _derive_node_peer_membership(registry) if derive_node_peers else {}
+    infos = []
+    for entry in nodes_section.values():
+        materialized = dict(entry)
+        hostname = str(materialized.get("hostname", ""))
+        if derive_node_peers:
+            materialized["peers"] = list(peer_membership.get(hostname, ()))
+        infos.append(NodeInfo.from_entry(materialized))
     # Sort by (component_index, ordinal) so iteration and ordinal lookup
     # semantics stay stable regardless of JSON key order.
     infos = tuple(sorted(infos, key=lambda n: (n.component_index, n.ordinal)))
     return NodeGroup(_nodes=infos, _path=path, current_pool=current_pool)
+
+
+def _derive_node_peer_membership(registry: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
+    """Return ``hostname -> peer names`` derived from peer runtime placement.
+
+    The registry keeps a ``nodes[*].peers`` list for compatibility and for
+    debugging the raw file, but user-facing discovery should treat the peer
+    section as authoritative because it is the source that runners and the
+    supervisor update directly. Membership is therefore recomputed on load,
+    preserving peer declaration order and de-duplicating repeated replicas of
+    the same peer on one host.
+    """
+    peers_section = registry.get("peers")
+    if not isinstance(peers_section, Mapping):
+        return {}
+
+    membership: dict[str, list[str]] = {}
+    for declared_name, entries in peers_section.items():
+        if not isinstance(entries, (list, tuple)):
+            continue
+        for raw_entry in entries:
+            if not isinstance(raw_entry, Mapping):
+                continue
+            hostname = str(raw_entry.get("hostname") or "")
+            if hostname == "":
+                continue
+            peer_name = str(raw_entry.get("name", declared_name))
+            host_members = membership.setdefault(hostname, [])
+            if peer_name not in host_members:
+                host_members.append(peer_name)
+    return {hostname: tuple(names) for hostname, names in membership.items()}
