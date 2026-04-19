@@ -14,8 +14,10 @@ from slurm._serialization import dumps_pickled
 from slurm.runner.initialization import (
     RunnerArgs,
     _load_peer_replica_arguments,
+    apply_replica_output_suffix,
     load_task_arguments,
     parse_args,
+    resolve_replica_output_file,
 )
 
 
@@ -168,3 +170,78 @@ def test_replica_loader_missing_file_raises(tmp_path, monkeypatch):
     )
     with pytest.raises(FileNotFoundError):
         _load_peer_replica_arguments(args, str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# apply_replica_output_suffix / resolve_replica_output_file — per-replica
+# result-file rewriting so N replicas do not race onto one pickle.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_replica_output_suffix_canonical_filename():
+    out = apply_replica_output_suffix("slurm_job_foo_result.pkl", 3)
+    assert out == "slurm_job_foo_3_result.pkl"
+
+
+def test_apply_replica_output_suffix_preserves_parent_dir():
+    out = apply_replica_output_suffix("/jobs/foo/slurm_job_abc_result.pkl", 7)
+    assert out == "/jobs/foo/slurm_job_abc_7_result.pkl"
+
+
+def test_apply_replica_output_suffix_non_canonical_falls_back():
+    # Weird extension — caller accepts an appended index segment.
+    out = apply_replica_output_suffix("weird.output", 5)
+    assert out == "weird.output.5"
+
+
+def test_resolve_replica_output_file_noop_for_non_replica():
+    args = RunnerArgs(
+        module="m",
+        function="f",
+        output_file="slurm_job_solo_result.pkl",
+        callbacks_file="c",
+        step="peer:solo",
+    )
+    assert resolve_replica_output_file(args) == "slurm_job_solo_result.pkl"
+
+
+def test_resolve_replica_output_file_uses_procid(monkeypatch):
+    monkeypatch.setenv("SLURM_PROCID", "2")
+    args = RunnerArgs(
+        module="m",
+        function="f",
+        output_file="slurm_job_peer_result.pkl",
+        callbacks_file="c",
+        step="peer:peer:by-taskid",
+    )
+    assert resolve_replica_output_file(args) == "slurm_job_peer_2_result.pkl"
+
+
+def test_resolve_replica_output_file_default_procid_zero(monkeypatch):
+    monkeypatch.delenv("SLURM_PROCID", raising=False)
+    args = RunnerArgs(
+        module="m",
+        function="f",
+        output_file="slurm_job_peer_result.pkl",
+        callbacks_file="c",
+        step="peer:peer:by-taskid",
+    )
+    # No PROCID → default to 0 so the runner still picks a valid pickle path
+    # even when invoked outside Slurm (tests, local-mode).
+    assert resolve_replica_output_file(args) == "slurm_job_peer_0_result.pkl"
+
+
+def test_resolve_replica_output_file_distinct_across_replicas(monkeypatch):
+    args = RunnerArgs(
+        module="m",
+        function="f",
+        output_file="slurm_job_peer_result.pkl",
+        callbacks_file="c",
+        step="peer:peer:by-taskid",
+    )
+    seen = set()
+    for procid in range(4):
+        monkeypatch.setenv("SLURM_PROCID", str(procid))
+        seen.add(resolve_replica_output_file(args))
+    # Four distinct per-replica result files — no collisions.
+    assert len(seen) == 4

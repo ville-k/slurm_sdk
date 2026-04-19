@@ -41,6 +41,13 @@ def _return_answer() -> int:
     return 42
 
 
+@task(time="00:01:00", mem="128M", cpus_per_task=1)
+def _return_replica_marker(worker_id: int) -> str:
+    """Return a string unique to this replica so per-replica result files
+    can be distinguished by content alone."""
+    return f"replica-{worker_id}"
+
+
 @pytest.fixture(autouse=True)
 def _force_local_parallel(monkeypatch):
     """Force the bypass path regardless of sbatch availability."""
@@ -76,6 +83,41 @@ def test_three_peer_parallel_runs_without_slurm(local_cluster):
         "beta": "peer:beta",
         "gamma": "peer:gamma",
     }
+
+
+def test_replica_set_each_writes_own_result_file(local_cluster, tmp_path):
+    """A 3-replica peer produces 3 distinct results with no file collisions.
+
+    Regression test for the pre-fix state where every replica's runner
+    invocation received the same ``--output-file`` and all three races
+    onto one pickle. Now each replica rewrites the path to include its
+    ``SLURM_PROCID`` so ``job["<name>"].get_results()`` retrieves three
+    distinct values in replica-index order.
+    """
+    with local_cluster:
+        job = parallel(
+            Peer.replicas(
+                _return_replica_marker,
+                count=3,
+                args=[{"worker_id": i} for i in range(3)],
+                name="workers",
+            ),
+        )
+        assert job.wait(timeout=60)
+        results = job.get_results()
+
+    assert results["workers"] == ["replica-0", "replica-1", "replica-2"]
+
+    # And the per-replica pickle files actually exist on disk — the
+    # rewrite must land at the paths the client-side Jobs read from.
+    worker_jobs = job["workers"]
+    for idx in range(3):
+        replica_job = worker_jobs[idx]
+        result_path = replica_job.result_path
+        assert os.path.exists(result_path), (
+            f"replica {idx}'s pickle missing at {result_path!r}; per-replica "
+            "output-file rewrite likely regressed"
+        )
 
 
 def test_two_peer_leader_sidecar_local(local_cluster):

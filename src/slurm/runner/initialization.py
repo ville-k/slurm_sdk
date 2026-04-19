@@ -101,6 +101,53 @@ class RunnerArgs:
         return len(parts) == 3 and parts[2] == "by-taskid"
 
 
+_REPLICA_RESULT_MARKER = "_result.pkl"
+
+
+def apply_replica_output_suffix(output_file: str, replica_index: int) -> str:
+    """Rewrite ``output_file`` to include the replica index.
+
+    In ``:by-taskid`` mode, every replica in an ``srun --ntasks=N`` step
+    runs this same runner binary with the same ``--output-file`` arg. If
+    we did not rewrite the filename per replica, all N tasks would race
+    onto the same pickle and ``ParallelJob``'s per-replica ``Job`` handles
+    (built in ``_parallel_submission.py`` as ``<peer_pre_id>_<idx>``) would
+    read garbage — or, worse, read whatever the last replica to finish
+    happened to write.
+
+    The transform inserts ``_<replica_index>`` immediately before the
+    canonical ``_result.pkl`` suffix so the emitted filename matches what
+    :meth:`Job._result_filename` expects.
+
+    ``slurm_job_foo_result.pkl`` + ``replica=3`` → ``slurm_job_foo_3_result.pkl``
+
+    Non-canonical filenames (shouldn't happen in practice but we guard
+    against them) get the index appended as a trailing segment so nothing
+    silently collides.
+    """
+    if not output_file.endswith(_REPLICA_RESULT_MARKER):
+        return f"{output_file}.{replica_index}"
+    base = output_file[: -len(_REPLICA_RESULT_MARKER)]
+    return f"{base}_{replica_index}{_REPLICA_RESULT_MARKER}"
+
+
+def resolve_replica_output_file(args: "RunnerArgs") -> str:
+    """Return the runner's per-replica ``output_file`` for replica steps.
+
+    Callers outside ``:by-taskid`` mode get ``args.output_file`` unchanged.
+    Replica dispatch reads ``SLURM_PROCID`` (set by Slurm per task) and
+    rewrites the path so each replica writes to its own pickle.
+    """
+    if not args.is_replica_peer_step:
+        return args.output_file
+    procid_raw = os.environ.get("SLURM_PROCID", "0")
+    try:
+        procid = int(procid_raw)
+    except ValueError:
+        procid = 0
+    return apply_replica_output_suffix(args.output_file, procid)
+
+
 def create_argument_parser() -> argparse.ArgumentParser:
     """Create the argument parser for the runner script.
 

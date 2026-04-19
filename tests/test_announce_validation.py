@@ -275,9 +275,7 @@ def test_announce_concurrent_writers_same_replica_no_loss(tmp_path):
         except Exception as exc:  # pragma: no cover - race failure path
             errors.append(exc)
 
-    threads = [
-        threading.Thread(target=writer, args=(i,)) for i in range(writers)
-    ]
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(writers)]
     for t in threads:
         t.start()
     for t in threads:
@@ -285,11 +283,11 @@ def test_announce_concurrent_writers_same_replica_no_loss(tmp_path):
 
     assert not errors, f"writer errors: {errors!r}"
     meta = read_registry(path)["peers"]["worker"][0]["metadata"]
-    expected_keys = {f"w{idx}_i{i}" for idx in range(writers) for i in range(iterations)}
+    expected_keys = {
+        f"w{idx}_i{i}" for idx in range(writers) for i in range(iterations)
+    }
     missing = expected_keys - set(meta.keys())
-    assert not missing, (
-        f"{len(missing)} lost updates: sample={sorted(missing)[:5]!r}"
-    )
+    assert not missing, f"{len(missing)} lost updates: sample={sorted(missing)[:5]!r}"
 
 
 def test_announce_serial_merge_semantics(tmp_path):

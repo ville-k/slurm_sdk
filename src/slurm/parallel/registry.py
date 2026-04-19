@@ -40,13 +40,23 @@ logger = logging.getLogger("slurm.parallel.registry")
 # Linux-only in production, macOS covers development). Windows is not a
 # supported SDK platform; the context manager degrades to a no-op there so
 # imports do not break.
-try:
-    import fcntl as _fcntl  # type: ignore[import-not-found]
+def _load_fcntl() -> tuple[Any, bool]:
+    """Import ``fcntl`` lazily and return it typed as :class:`Any`.
 
-    _HAS_FCNTL = True
-except ImportError:  # pragma: no cover - non-POSIX platforms
-    _fcntl = None  # type: ignore[assignment]
-    _HAS_FCNTL = False
+    Returning through a function — rather than binding a module-level name
+    inside a ``try``/``except`` — keeps the static type as ``Any`` so
+    downstream attribute access (``flock``, ``LOCK_EX`` etc.) doesn't get
+    narrowed to a ``None`` branch on platforms without fcntl.
+    """
+    try:
+        import fcntl as module  # noqa: F401
+
+        return module, True
+    except ImportError:  # pragma: no cover - non-POSIX platforms
+        return None, False
+
+
+_fcntl, _HAS_FCNTL = _load_fcntl()
 
 
 @contextlib.contextmanager
