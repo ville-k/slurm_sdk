@@ -185,19 +185,12 @@ def test_announce_targets_own_replica_only(tmp_path):
 
 
 def test_announce_survives_concurrent_writers(tmp_path):
-    """Many threads announcing simultaneously — no crashes, no torn files.
+    """Many threads announcing simultaneously — zero lost updates.
 
-    Registry writes are tmp+rename (atomic at the filesystem level), but
-    the read-modify-write cycle inside :func:`announce_peer_metadata` is
-    intentionally lock-free — concurrent writers targeting the same
-    replica can lose each other's updates. Inside a single peer process
-    announces are serialized, so that's acceptable.
-
-    This test pins the guarantees that DO hold:
-
-    - Writers never crash with FileNotFoundError or torn JSON.
-    - Readers always parse valid JSON.
-    - The final registry has the expected schema.
+    Each mutator acquires a file-level advisory lock around the read →
+    mutate → write sequence so concurrent writers cannot overwrite each
+    other's fields. Every announce lands in the final registry and the
+    reader never sees a torn JSON.
     """
     path = _registry(tmp_path, replicas=4)
     writers = 4
@@ -234,17 +227,69 @@ def test_announce_survives_concurrent_writers(tmp_path):
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=10.0)
+        t.join(timeout=30.0)
     done.set()
     reader_thread.join(timeout=5.0)
 
     assert not errors, f"writer errors: {errors!r}"
-    # Final state has all four replicas; metadata is a dict (content may
-    # vary based on interleaving).
+
+    # Every writer targeted its own replica index, so every (idx, i) pair
+    # must have landed in that replica's metadata — no lost updates.
     entries = read_registry(path)["peers"]["worker"]
-    assert len(entries) == 4
-    for e in entries:
-        assert isinstance(e["metadata"], dict)
+    assert len(entries) == writers
+    for idx, entry in enumerate(entries):
+        meta = entry["metadata"]
+        for i in range(iterations):
+            key = f"key_{idx}_{i}"
+            assert key in meta, (
+                f"writer {idx}'s update key={key!r} missing from replica "
+                f"{idx}'s metadata (got keys={sorted(meta.keys())!r}) — "
+                "file-lock regression"
+            )
+            assert meta[key] == i
+
+
+def test_announce_concurrent_writers_same_replica_no_loss(tmp_path):
+    """Multiple threads announcing into the *same* replica — every update lands.
+
+    This is the stricter guarantee the file lock provides: even when
+    writers target the same replica_index, no writer's fields get
+    clobbered by a racing writer. Every (writer, iteration) key pair
+    shows up in the final metadata.
+    """
+    path = _registry(tmp_path, replicas=1)
+    writers = 4
+    iterations = 20
+
+    errors: list[Exception] = []
+
+    def writer(idx: int):
+        try:
+            for i in range(iterations):
+                announce_peer_metadata(
+                    path,
+                    "worker",
+                    0,
+                    fields={f"w{idx}_i{i}": i},
+                )
+        except Exception as exc:  # pragma: no cover - race failure path
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=writer, args=(i,)) for i in range(writers)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30.0)
+
+    assert not errors, f"writer errors: {errors!r}"
+    meta = read_registry(path)["peers"]["worker"][0]["metadata"]
+    expected_keys = {f"w{idx}_i{i}" for idx in range(writers) for i in range(iterations)}
+    missing = expected_keys - set(meta.keys())
+    assert not missing, (
+        f"{len(missing)} lost updates: sample={sorted(missing)[:5]!r}"
+    )
 
 
 def test_announce_serial_merge_semantics(tmp_path):
