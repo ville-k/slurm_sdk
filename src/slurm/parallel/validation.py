@@ -327,21 +327,41 @@ def _check_capacity(spec: _ParallelSpec, problems: list[str]) -> None:
                     f"{pool.gpus_per_node} per node. Peers contributing: "
                     + _describe_peer_claims(peers, "gpus")
                 )
+        pool_mem_mib = _parse_mem_to_mib(pool.mem_per_node)
+        if pool_mem_mib is not None and demand["mem_mib"] is not None:
+            if demand["mem_mib"] > pool_mem_mib:
+                problems.append(
+                    f"Pool {pool_name!r} memory overflow: demand "
+                    f"{demand['mem_mib']} MiB per node > capacity "
+                    f"{pool_mem_mib} MiB per node "
+                    f"({pool.mem_per_node!r}). Peers contributing: "
+                    + _describe_peer_claims(peers, "mem")
+                )
 
 
 def _compute_per_node_demand(
     peers: list[Peer], pool_nodes: int
 ) -> dict[str, int | None]:
-    """Sum per-node task demand for a group of peers sharing a pool."""
+    """Sum per-node task demand for a group of peers sharing a pool.
+
+    Each axis (cpus / gpus / memory in MiB) sums ``per_task_claim ×
+    replicas_on_a_node`` across the peer group. A ``None`` return for an
+    axis means "no peer declared a claim on this axis" — the caller skips
+    that axis so partially-declared topologies don't trip on spurious
+    zeros.
+    """
     total_cpus = 0
     total_gpus = 0
+    total_mem_mib = 0
     any_cpu_known = False
     any_gpu_known = False
+    any_mem_known = False
 
     for peer in peers:
         sbatch = _task_sbatch_options(peer)
         cpus_per_task = sbatch.get("cpus_per_task")
         gpus_per_task = sbatch.get("gpus_per_task")
+        mem_per_task = _parse_mem_to_mib(sbatch.get("mem"))
 
         # How many replicas live on one node worst-case?
         if peer.tasks_per_node is not None:
@@ -358,10 +378,14 @@ def _compute_per_node_demand(
         if gpus_per_task is not None:
             total_gpus += gpus_per_task * per_node
             any_gpu_known = True
+        if mem_per_task is not None:
+            total_mem_mib += mem_per_task * per_node
+            any_mem_known = True
 
     return {
         "cpus": total_cpus if any_cpu_known else None,
         "gpus": total_gpus if any_gpu_known else None,
+        "mem_mib": total_mem_mib if any_mem_known else None,
     }
 
 
@@ -376,7 +400,7 @@ def _task_sbatch_options(peer: Peer) -> dict:
 
 def _describe_peer_claims(peers: list[Peer], resource: str) -> str:
     """Human-friendly summary of which peers contribute a resource claim."""
-    key_map = {"cpus": "cpus_per_task", "gpus": "gpus_per_task"}
+    key_map = {"cpus": "cpus_per_task", "gpus": "gpus_per_task", "mem": "mem"}
     key = key_map[resource]
     parts: list[str] = []
     for peer in peers:

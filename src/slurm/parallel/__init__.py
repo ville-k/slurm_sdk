@@ -110,16 +110,20 @@ def _infer_default_topology(peers: tuple[Peer, ...]) -> Topology:
 
     Used when the caller passed ``topology=None``. The implicit pool is named
     ``"default"`` and sized generously: ``nodes=1`` (most common case),
-    with per-node CPU/GPU/mem computed as the sum of peer claims. This is
-    intentionally loose — users who need tight resource control provide an
-    explicit ``Topology``.
+    with per-node CPU/GPU/memory computed as the sum of peer claims. This
+    is intentionally loose — users who need tight resource control provide
+    an explicit ``Topology``. Axes where no peer declared a claim are left
+    unset so the validator skips them cleanly.
     """
     from ..task import BoundTask
+    from .validation import _parse_mem_to_mib
 
     total_cpus = 0
     any_cpu = False
     total_gpus = 0
     any_gpu = False
+    total_mem_mib = 0
+    any_mem = False
 
     for peer in peers:
         sbatch = {}
@@ -134,11 +138,18 @@ def _infer_default_topology(peers: tuple[Peer, ...]) -> Topology:
         if gpt is not None:
             total_gpus += gpt * peer.count
             any_gpu = True
+        mem_mib = _parse_mem_to_mib(sbatch.get("mem"))
+        if mem_mib is not None:
+            total_mem_mib += mem_mib * peer.count
+            any_mem = True
+
+    mem_per_node = f"{total_mem_mib}M" if any_mem else None
 
     pool = Pool(
         nodes=1,
         cpus_per_node=total_cpus if any_cpu else None,
         gpus_per_node=total_gpus if any_gpu else None,
+        mem_per_node=mem_per_node,
     )
     return Topology(pools={"default": pool}, default_pool="default")
 
