@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess  # nosec B404 - used to probe optional tooling (nvidia-smi)
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from ..errors import TopologyError
@@ -36,6 +37,65 @@ from .types import Peer, Pool, _ParallelSpec
 __all__ = ["validate_spec", "validate_local_capacity", "_RESERVED_ANNOUNCE_KEYS"]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ResourceVector:
+    """Internal CPU/GPU/memory vector used by topology and local checks."""
+
+    cpus: Optional[int] = None
+    gpus: Optional[int] = None
+    mem_mib: Optional[int] = None
+
+    @classmethod
+    def from_sbatch_options(cls, sbatch: dict[str, Any]) -> "_ResourceVector":
+        """Return the per-task resource claims declared on a task."""
+        cpus = sbatch.get("cpus_per_task")
+        gpus = sbatch.get("gpus_per_task")
+        return cls(
+            cpus=int(cpus) if cpus is not None else None,
+            gpus=int(gpus) if gpus is not None else None,
+            mem_mib=_parse_mem_to_mib(sbatch.get("mem")),
+        )
+
+    @classmethod
+    def from_pool(cls, pool: Pool) -> "_ResourceVector":
+        """Return the per-node capacity declared on a pool."""
+        return cls(
+            cpus=int(pool.cpus_per_node) if pool.cpus_per_node is not None else None,
+            gpus=int(pool.gpus_per_node) if pool.gpus_per_node is not None else None,
+            mem_mib=_parse_mem_to_mib(pool.mem_per_node),
+        )
+
+    def scaled(self, factor: int) -> "_ResourceVector":
+        """Scale every known axis by ``factor``."""
+        return _ResourceVector(
+            cpus=self.cpus * factor if self.cpus is not None else None,
+            gpus=self.gpus * factor if self.gpus is not None else None,
+            mem_mib=self.mem_mib * factor if self.mem_mib is not None else None,
+        )
+
+    def add(self, other: "_ResourceVector") -> "_ResourceVector":
+        """Add two vectors, preserving ``None`` for wholly-unknown axes."""
+        return _ResourceVector(
+            cpus=_sum_known_axis(self.cpus, other.cpus),
+            gpus=_sum_known_axis(self.gpus, other.gpus),
+            mem_mib=_sum_known_axis(self.mem_mib, other.mem_mib),
+        )
+
+    @property
+    def mem_per_node(self) -> Optional[str]:
+        """Return the memory axis in Slurm's ``mem_per_node`` string format."""
+        if self.mem_mib is None:
+            return None
+        return f"{self.mem_mib}M"
+
+
+def _sum_known_axis(lhs: Optional[int], rhs: Optional[int]) -> Optional[int]:
+    """Add two resource values while preserving ``None`` as 'unknown'."""
+    if lhs is None and rhs is None:
+        return None
+    return (lhs or 0) + (rhs or 0)
 
 
 def validate_spec(spec: _ParallelSpec) -> None:
@@ -283,6 +343,7 @@ def _check_capacity(spec: _ParallelSpec, problems: list[str]) -> None:
     for pool_name, peers in peers_by_pool.items():
         pool = pools[pool_name]
         demand = _compute_per_node_demand(peers, pool.nodes)
+        capacity = _ResourceVector.from_pool(pool)
 
         # Wrong-pool GPU peer check: a GPU-requesting peer pinned to a pool
         # with no GPUs is almost always a mistake (e.g. peer sent to a CPU
@@ -311,37 +372,34 @@ def _check_capacity(spec: _ParallelSpec, problems: list[str]) -> None:
                         f"pinned to the wrong pool.{hint}"
                     )
 
-        if pool.cpus_per_node is not None and demand["cpus"] is not None:
-            if demand["cpus"] > pool.cpus_per_node:
+        if capacity.cpus is not None and demand.cpus is not None:
+            if demand.cpus > capacity.cpus:
                 problems.append(
                     f"Pool {pool_name!r} CPU overflow: demand "
-                    f"{demand['cpus']} per node > capacity "
-                    f"{pool.cpus_per_node} per node. Peers contributing: "
+                    f"{demand.cpus} per node > capacity "
+                    f"{capacity.cpus} per node. Peers contributing: "
                     + _describe_peer_claims(peers, "cpus")
                 )
-        if pool.gpus_per_node is not None and demand["gpus"] is not None:
-            if demand["gpus"] > pool.gpus_per_node:
+        if capacity.gpus is not None and demand.gpus is not None:
+            if demand.gpus > capacity.gpus:
                 problems.append(
                     f"Pool {pool_name!r} GPU overflow: demand "
-                    f"{demand['gpus']} per node > capacity "
-                    f"{pool.gpus_per_node} per node. Peers contributing: "
+                    f"{demand.gpus} per node > capacity "
+                    f"{capacity.gpus} per node. Peers contributing: "
                     + _describe_peer_claims(peers, "gpus")
                 )
-        pool_mem_mib = _parse_mem_to_mib(pool.mem_per_node)
-        if pool_mem_mib is not None and demand["mem_mib"] is not None:
-            if demand["mem_mib"] > pool_mem_mib:
+        if capacity.mem_mib is not None and demand.mem_mib is not None:
+            if demand.mem_mib > capacity.mem_mib:
                 problems.append(
                     f"Pool {pool_name!r} memory overflow: demand "
-                    f"{demand['mem_mib']} MiB per node > capacity "
-                    f"{pool_mem_mib} MiB per node "
+                    f"{demand.mem_mib} MiB per node > capacity "
+                    f"{capacity.mem_mib} MiB per node "
                     f"({pool.mem_per_node!r}). Peers contributing: "
                     + _describe_peer_claims(peers, "mem")
                 )
 
 
-def _compute_per_node_demand(
-    peers: list[Peer], pool_nodes: int
-) -> dict[str, int | None]:
+def _compute_per_node_demand(peers: list[Peer], pool_nodes: int) -> _ResourceVector:
     """Sum per-node task demand for a group of peers sharing a pool.
 
     Each axis (cpus / gpus / memory in MiB) sums ``per_task_claim ×
@@ -350,43 +408,26 @@ def _compute_per_node_demand(
     that axis so partially-declared topologies don't trip on spurious
     zeros.
     """
-    total_cpus = 0
-    total_gpus = 0
-    total_mem_mib = 0
-    any_cpu_known = False
-    any_gpu_known = False
-    any_mem_known = False
-
+    demand = _ResourceVector()
     for peer in peers:
-        sbatch = _task_sbatch_options(peer)
-        cpus_per_task = sbatch.get("cpus_per_task")
-        gpus_per_task = sbatch.get("gpus_per_task")
-        mem_per_task = _parse_mem_to_mib(sbatch.get("mem"))
+        per_node = _replicas_per_node(peer, pool_nodes)
+        demand = demand.add(_peer_resource_claim(peer).scaled(per_node))
 
-        # How many replicas live on one node worst-case?
-        if peer.tasks_per_node is not None:
-            per_node = peer.tasks_per_node
-        elif peer.count <= pool_nodes:
-            per_node = 1  # spread across all nodes
-        else:
-            # Pack densely — ceil(count / nodes)
-            per_node = -(-peer.count // pool_nodes)  # ceil division
+    return demand
 
-        if cpus_per_task is not None:
-            total_cpus += cpus_per_task * per_node
-            any_cpu_known = True
-        if gpus_per_task is not None:
-            total_gpus += gpus_per_task * per_node
-            any_gpu_known = True
-        if mem_per_task is not None:
-            total_mem_mib += mem_per_task * per_node
-            any_mem_known = True
 
-    return {
-        "cpus": total_cpus if any_cpu_known else None,
-        "gpus": total_gpus if any_gpu_known else None,
-        "mem_mib": total_mem_mib if any_mem_known else None,
-    }
+def _peer_resource_claim(peer: Peer) -> _ResourceVector:
+    """Return one peer replica's declared CPU/GPU/memory claims."""
+    return _ResourceVector.from_sbatch_options(_task_sbatch_options(peer))
+
+
+def _replicas_per_node(peer: Peer, pool_nodes: int) -> int:
+    """Return the densest per-node packing the validator should assume."""
+    if peer.tasks_per_node is not None:
+        return peer.tasks_per_node
+    if peer.count <= pool_nodes:
+        return 1
+    return -(-peer.count // pool_nodes)
 
 
 def _task_sbatch_options(peer: Peer) -> dict:
@@ -553,7 +594,7 @@ def _parse_mem_to_mib(value: Any) -> Optional[int]:
     return int(num * factor)
 
 
-def _aggregate_local_demand(spec: _ParallelSpec) -> Dict[str, Optional[int]]:
+def _aggregate_local_demand(spec: _ParallelSpec) -> _ResourceVector:
     """Sum per-task claims across every peer for local capacity checking.
 
     Local mode launches every peer on one host, so the total host-wide
@@ -561,35 +602,10 @@ def _aggregate_local_demand(spec: _ParallelSpec) -> Dict[str, Optional[int]]:
     for GPUs / memory). Unknown claims map to ``0`` — ``None`` return
     signals "nothing claimed; skip this axis entirely" for clean output.
     """
-    total_cpus = 0
-    total_gpus = 0
-    total_mem_mib = 0
-    any_cpu = False
-    any_gpu = False
-    any_mem = False
-
+    demand = _ResourceVector()
     for peer in spec.peers:
-        sbatch = _task_sbatch_options(peer)
-        count = max(1, peer.count)
-        cpt = sbatch.get("cpus_per_task")
-        if cpt is not None:
-            total_cpus += int(cpt) * count
-            any_cpu = True
-        gpt = sbatch.get("gpus_per_task")
-        if gpt is not None:
-            total_gpus += int(gpt) * count
-            any_gpu = True
-        mem = sbatch.get("mem")
-        mem_mib = _parse_mem_to_mib(mem)
-        if mem_mib is not None:
-            total_mem_mib += mem_mib * count
-            any_mem = True
-
-    return {
-        "cpus": total_cpus if any_cpu else None,
-        "gpus": total_gpus if any_gpu else None,
-        "mem_mib": total_mem_mib if any_mem else None,
-    }
+        demand = demand.add(_peer_resource_claim(peer).scaled(max(1, peer.count)))
+    return demand
 
 
 def validate_local_capacity(spec: _ParallelSpec) -> None:
@@ -613,39 +629,39 @@ def validate_local_capacity(spec: _ParallelSpec) -> None:
     problems: list[str] = []
 
     cpus_available = os.cpu_count()
-    if demand["cpus"] is not None and cpus_available:
-        if demand["cpus"] > cpus_available:
+    if demand.cpus is not None and cpus_available:
+        if demand.cpus > cpus_available:
             problems.append(
                 f"local host has {cpus_available} CPU(s), parallel() "
-                f"requires {demand['cpus']} — scale down or use a real cluster."
+                f"requires {demand.cpus} — scale down or use a real cluster."
             )
 
     mem_available = _detect_local_memory_mib()
-    if demand["mem_mib"] is not None and mem_available is not None:
-        if demand["mem_mib"] > mem_available:
+    if demand.mem_mib is not None and mem_available is not None:
+        if demand.mem_mib > mem_available:
             problems.append(
                 f"local host has {mem_available} MiB of RAM, parallel() "
-                f"requires {demand['mem_mib']} MiB — scale down or use a real cluster."
+                f"requires {demand.mem_mib} MiB — scale down or use a real cluster."
             )
-    elif demand["mem_mib"] is not None and mem_available is None:
+    elif demand.mem_mib is not None and mem_available is None:
         logger.debug(
             "Local-mode memory capacity unknown; skipping memory check "
             "(demand was %d MiB).",
-            demand["mem_mib"],
+            demand.mem_mib,
         )
 
     gpus_available = _detect_local_gpus()
-    if demand["gpus"] is not None and gpus_available is not None:
-        if demand["gpus"] > gpus_available:
+    if demand.gpus is not None and gpus_available is not None:
+        if demand.gpus > gpus_available:
             problems.append(
                 f"local host has {gpus_available} GPU(s), parallel() "
-                f"requires {demand['gpus']} — scale down or use a real cluster."
+                f"requires {demand.gpus} — scale down or use a real cluster."
             )
-    elif demand["gpus"] is not None and gpus_available is None:
+    elif demand.gpus is not None and gpus_available is None:
         logger.debug(
             "Local-mode GPU capacity unknown (no nvidia-smi / CUDA_VISIBLE_DEVICES); "
             "skipping GPU check (demand was %d).",
-            demand["gpus"],
+            demand.gpus,
         )
 
     if problems:

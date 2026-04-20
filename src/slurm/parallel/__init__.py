@@ -115,41 +115,17 @@ def _infer_default_topology(peers: tuple[Peer, ...]) -> Topology:
     an explicit ``Topology``. Axes where no peer declared a claim are left
     unset so the validator skips them cleanly.
     """
-    from ..task import BoundTask
-    from .validation import _parse_mem_to_mib
+    from .validation import _ResourceVector, _peer_resource_claim
 
-    total_cpus = 0
-    any_cpu = False
-    total_gpus = 0
-    any_gpu = False
-    total_mem_mib = 0
-    any_mem = False
-
+    total_claim = _ResourceVector()
     for peer in peers:
-        sbatch = {}
-        if isinstance(peer.task, BoundTask):
-            sbatch = peer.task.task.sbatch_options
-
-        cpt = sbatch.get("cpus_per_task")
-        if cpt is not None:
-            total_cpus += cpt * peer.count
-            any_cpu = True
-        gpt = sbatch.get("gpus_per_task")
-        if gpt is not None:
-            total_gpus += gpt * peer.count
-            any_gpu = True
-        mem_mib = _parse_mem_to_mib(sbatch.get("mem"))
-        if mem_mib is not None:
-            total_mem_mib += mem_mib * peer.count
-            any_mem = True
-
-    mem_per_node = f"{total_mem_mib}M" if any_mem else None
+        total_claim = total_claim.add(_peer_resource_claim(peer).scaled(peer.count))
 
     pool = Pool(
         nodes=1,
-        cpus_per_node=total_cpus if any_cpu else None,
-        gpus_per_node=total_gpus if any_gpu else None,
-        mem_per_node=mem_per_node,
+        cpus_per_node=total_claim.cpus,
+        gpus_per_node=total_claim.gpus,
+        mem_per_node=total_claim.mem_per_node,
     )
     return Topology(pools={"default": pool}, default_pool="default")
 
