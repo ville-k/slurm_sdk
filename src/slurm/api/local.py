@@ -206,25 +206,18 @@ class LocalBackend(BackendBase):
         os.makedirs(target_job_dir, exist_ok=True)
         logger.debug("Ensured target job directory exists: %s", target_job_dir)
 
-        # Write script to persistent location in job directory
-        script_filename = f"slurm_job_{pre_submission_id}_script.sh"
-        persistent_script_path = os.path.join(target_job_dir, script_filename)
+        persistent_script_path = self._persist_script(
+            script,
+            target_job_dir=target_job_dir,
+            filename=f"slurm_job_{pre_submission_id}_script.sh",
+        )
 
-        logger.debug("Writing script to job directory: %s", persistent_script_path)
-        with open(persistent_script_path, "w", newline="\n") as f:
-            f.write(script)
-        # nosec B103 - permissions are configurable, default 0o750 is more restrictive
-        os.chmod(persistent_script_path, self.script_permissions)
-
-        # Detect a parallel(...) rendered script and bypass sbatch when
-        # Slurm is not installed. The sentinel is the supervisor entrypoint
-        # the renderer embeds near the bottom of every parallel script.
         if self._should_bypass_sbatch(script):
-            return self._submit_parallel_locally(
-                script=script,
-                target_job_dir=target_job_dir,
-                pre_submission_id=pre_submission_id,
-                array_spec=array_spec,
+            raise RuntimeError(
+                "Parallel local-mode bypass now requires the prepared "
+                "submission path. submit_parallel_spec(...) should call "
+                "LocalBackend.submit_prepared_parallel_job(...) instead of "
+                "routing through submit_job(...)."
             )
 
         try:
@@ -279,6 +272,22 @@ class LocalBackend(BackendBase):
                 logger.warning("Failed to clean up script file: %s", cleanup_error)
             raise
 
+    def _persist_script(
+        self,
+        script: str,
+        *,
+        target_job_dir: str,
+        filename: str,
+    ) -> str:
+        """Write a script to ``target_job_dir`` and return its full path."""
+        persistent_script_path = os.path.join(target_job_dir, filename)
+        logger.debug("Writing script to job directory: %s", persistent_script_path)
+        with open(persistent_script_path, "w", newline="\n") as f:
+            f.write(script)
+        # nosec B103 - permissions are configurable, default 0o750 is more restrictive
+        os.chmod(persistent_script_path, self.script_permissions)
+        return persistent_script_path
+
     # -----------------------------------------------------------------
     # Local parallel-mode helpers (bypass sbatch when Slurm is absent)
     # -----------------------------------------------------------------
@@ -305,58 +314,46 @@ class LocalBackend(BackendBase):
             return True
         return shutil.which("sbatch") is None
 
-    def _submit_parallel_locally(
+    def submit_prepared_parallel_job(
         self,
         *,
+        prepared_submission: Any,
         script: str,
         target_job_dir: str,
         pre_submission_id: str,
-        array_spec: Optional[str],
     ) -> str:
-        """Run the Python bootstrap + supervisor directly, no Slurm involved.
+        """Run a prepared parallel submission locally without ``sbatch``.
 
-        Writes the plan.json + registry skeleton by reading the plan heredoc
-        out of the rendered script via the bootstrap entrypoint, then spawns
-        ``python -m slurm.parallel.topology_supervisor --local-mode`` in the
-        background. The synthetic job id is the supervisor's PID — unique
-        per host and sufficient for :meth:`get_job_status` dispatch.
+        The caller provides the prepared artifact bundle so local mode does
+        not need to infer side effects by mutating the rendered batch script.
+        The backend writes a dedicated prep script, runs it to materialize the
+        shared inputs, then launches bootstrap and the supervisor directly.
         """
-        if array_spec:
-            raise RuntimeError(
-                "Parallel jobs cannot be combined with --array (native SLURM "
-                "array submission). Use Peer.replicas(...) for multi-replica "
-                "peers inside a parallel() call."
-            )
+        from ..parallel.rendering import render_parallel_local_prep_script
 
-        # Materialise plan.json + registry.json by running the rendered
-        # script up to the supervisor invocation. The script's tail exec's
-        # the supervisor, which we replace with a direct Python invocation
-        # here; the script's head (heredocs, env exports) produces all the
-        # side effects the supervisor needs (plan.json, per-peer arg
-        # pickles, callbacks.pkl).
-        #
-        # We do this by running ``bash -x <script>`` up until it hits the
-        # supervisor exec — too brittle. Cleaner: strip the supervisor tail
-        # ourselves and run the prefix to do the heredoc materialisation,
-        # then spawn the supervisor directly.
-        heredoc_script = self._strip_supervisor_tail(script)
-        heredoc_sh_path = os.path.join(
-            target_job_dir, f"slurm_job_{pre_submission_id}_local_prep.sh"
+        os.makedirs(target_job_dir, exist_ok=True)
+        self._persist_script(
+            script,
+            target_job_dir=target_job_dir,
+            filename=f"slurm_job_{pre_submission_id}_script.sh",
         )
-        with open(heredoc_sh_path, "w", newline="\n") as fh:
-            fh.write(heredoc_script)
-        os.chmod(heredoc_sh_path, self.script_permissions)
+        prep_script = render_parallel_local_prep_script(prepared_submission)
+        prep_script_path = self._persist_script(
+            prep_script,
+            target_job_dir=target_job_dir,
+            filename=f"slurm_job_{pre_submission_id}_local_prep.sh",
+        )
 
         env = os.environ.copy()
+        env.update(self.env)
+        env.update(dict(prepared_submission.environment_exports))
+        env.update(dict(prepared_submission.python_runtime_exports))
         env["JOB_DIR"] = target_job_dir
         env["PY_EXEC_RESOLVED"] = sys.executable
         env["PYTHONUNBUFFERED"] = "1"
 
-        # Run the prep script: heredocs materialise plan.json, arg pickles,
-        # callbacks.pkl. We intentionally drop stderr/stdout through so any
-        # prep failure surfaces in the host terminal / test output.
-        prep_result = subprocess.run(  # nosec B603 - running our own rendered script
-            ["/bin/bash", heredoc_sh_path],
+        prep_result = subprocess.run(  # nosec B603 - running our own generated prep script
+            ["/bin/bash", prep_script_path],
             cwd=target_job_dir,
             env=env,
             capture_output=True,
@@ -369,21 +366,34 @@ class LocalBackend(BackendBase):
                 f"stderr: {prep_result.stderr}"
             )
 
-        # Stdout/stderr for the batch step — mirror the Slurm path so
-        # Job.tail() can read the supervisor's log output.
         stdout_path = os.path.join(target_job_dir, f"slurm_{pre_submission_id}.out")
         stderr_path = os.path.join(target_job_dir, f"slurm_{pre_submission_id}.err")
-        # Ensure the files exist so tailing threads don't error out on
-        # first poll. subprocess opens them for append below.
-        for path in (stdout_path, stderr_path):
-            if not os.path.exists(path):
-                with open(path, "a"):
-                    pass
+        self._ensure_local_parallel_output_files(stdout_path, stderr_path)
+        self._append_text_if_present(stdout_path, prep_result.stdout)
+        self._append_text_if_present(stderr_path, prep_result.stderr)
 
-        # Spawn the supervisor in local mode. Use ``start_new_session=True``
-        # so the supervisor owns its process group — a SIGTERM to the
-        # supervisor cascades to its peer children through the supervisor's
-        # own process-group handling.
+        bootstrap_result = subprocess.run(  # nosec B603 - trusted SDK module invocation
+            [
+                sys.executable,
+                "-m",
+                "slurm.parallel.topology_bootstrap",
+                "--job-dir",
+                target_job_dir,
+            ],
+            cwd=target_job_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self._append_text_if_present(stdout_path, bootstrap_result.stdout)
+        self._append_text_if_present(stderr_path, bootstrap_result.stderr)
+        if bootstrap_result.returncode != 0:
+            raise RuntimeError(
+                "Local-mode parallel bootstrap failed with exit code "
+                f"{bootstrap_result.returncode}:\nstdout: {bootstrap_result.stdout}\n"
+                f"stderr: {bootstrap_result.stderr}"
+            )
+
         stdout_fh = open(stdout_path, "ab")
         stderr_fh = open(stderr_path, "ab")
         try:
@@ -420,40 +430,27 @@ class LocalBackend(BackendBase):
             }
 
         logger.info(
-            "Parallel job launched locally (no sbatch) as PID %s in %s",
+            "Parallel job launched locally (dedicated prep path) as PID %s in %s",
             job_id,
             target_job_dir,
         )
         return job_id
 
-    def _strip_supervisor_tail(self, script: str) -> str:
-        """Remove the ``exec ... topology_supervisor`` line from the script.
+    def _ensure_local_parallel_output_files(
+        self, stdout_path: str, stderr_path: str
+    ) -> None:
+        """Create the local-mode log files eagerly for tailing/polling."""
+        for path in (stdout_path, stderr_path):
+            if not os.path.exists(path):
+                with open(path, "a"):
+                    pass
 
-        Everything else in the rendered script — sbatch directives (ignored
-        by bash), env exports, heredocs, packaging setup — runs fine under a
-        plain ``bash`` invocation. The supervisor tail is what we want to
-        control ourselves in local mode.
-        """
-        lines = script.splitlines()
-        kept: list[str] = []
-        for line in lines:
-            # Match both the "exec" variant (Slurm path) and the plain
-            # invocation we might add later.
-            if self._PARALLEL_SCRIPT_SENTINEL in line and (
-                "exec " in line
-                or "python -m slurm.parallel.topology_supervisor" in line
-            ):
-                continue
-            # Also skip the bootstrap invocation — the supervisor handles
-            # registry skeleton creation itself on first run by reading
-            # plan.json. Actually the bootstrap does more (hostname
-            # resolution, placement pins) that we still want, but in local
-            # mode nodelists are empty so the bootstrap would write a
-            # degenerate registry. We let it run anyway — it's fast and
-            # correct for the no-Slurm path (hostnames become empty strings
-            # which downstream code handles).
-            kept.append(line)
-        return "\n".join(kept) + "\n"
+    def _append_text_if_present(self, path: str, text: str) -> None:
+        """Append captured text to ``path`` when there is anything to write."""
+        if not text:
+            return
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(text)
 
     def _local_job_info(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Return the bookkeeping dict for a locally-launched parallel job."""

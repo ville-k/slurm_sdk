@@ -6,7 +6,7 @@ import base64
 import logging
 import pickle
 from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, Tuple, Callable, List, Optional, TYPE_CHECKING, Mapping
 
 from ._serialization import dumps_pickled
 from .task import WorkflowTask, _NamedCallable
@@ -181,24 +181,44 @@ def _emit_environment_exports(
     cluster: Optional["Cluster"],
 ) -> List[str]:
     """Emit shell export lines for JOB_DIR, Slurmfile path, packaging config, etc."""
-    import json
-
     lines: List[str] = []
     lines.append(f'echo "Target Job Directory (from Python): {target_job_dir}"')
-    lines.append(f"export JOB_DIR={shlex.quote(target_job_dir)}")
-    lines.append("export SLURM_JOBS_DIR=$(dirname $(dirname $JOB_DIR))")
+    lines.extend(_emit_export_assignments(_build_environment_exports_map(
+        target_job_dir,
+        task_func,
+        packaging_strategy,
+        cluster,
+    )))
+    return lines
+
+
+def _emit_export_assignments(exports: Mapping[str, str]) -> List[str]:
+    """Render shell ``export`` lines for ``exports`` in insertion order."""
+    return [f"export {key}={shlex.quote(value)}" for key, value in exports.items()]
+
+
+def _build_environment_exports_map(
+    target_job_dir: str,
+    task_func: _NamedCallable,
+    packaging_strategy: PackagingStrategy,
+    cluster: Optional["Cluster"],
+) -> Dict[str, str]:
+    """Build the environment variables shared by rendered and local submissions."""
+    import json
+
+    exports: Dict[str, str] = {
+        "JOB_DIR": target_job_dir,
+        "SLURM_JOBS_DIR": os.path.dirname(os.path.dirname(target_job_dir)),
+    }
 
     if cluster is not None:
         slurmfile_path = cluster.slurmfile_path
         env_name = cluster.env_name
         is_workflow = isinstance(task_func, WorkflowTask)
         if is_workflow or slurmfile_path:
-            remote_slurmfile_path = f"{target_job_dir}/Slurmfile.toml"
-            lines.append(
-                f"export SLURM_SDK_SLURMFILE={shlex.quote(remote_slurmfile_path)}"
-            )
+            exports["SLURM_SDK_SLURMFILE"] = f"{target_job_dir}/Slurmfile.toml"
         if env_name:
-            lines.append(f"export SLURM_SDK_ENV={shlex.quote(env_name)}")
+            exports["SLURM_SDK_ENV"] = env_name
 
     if packaging_strategy is not None:
         packaging_config = getattr(packaging_strategy, "config", {})
@@ -217,17 +237,19 @@ def _emit_environment_exports(
                 config_to_export["push"] = False
 
             config_json = json.dumps(config_to_export)
-            config_b64 = base64.b64encode(config_json.encode()).decode()
-            lines.append(f"export SLURM_SDK_PACKAGING_CONFIG={shlex.quote(config_b64)}")
+            exports["SLURM_SDK_PACKAGING_CONFIG"] = base64.b64encode(
+                config_json.encode()
+            ).decode()
 
     if cluster is not None:
         prebuilt_images = cluster._prebuilt_dependency_images
         if prebuilt_images:
             images_json = json.dumps(prebuilt_images)
-            images_b64 = base64.b64encode(images_json.encode()).decode()
-            lines.append(f"export SLURM_SDK_PREBUILT_IMAGES={shlex.quote(images_b64)}")
+            exports["SLURM_SDK_PREBUILT_IMAGES"] = base64.b64encode(
+                images_json.encode()
+            ).decode()
 
-    return lines
+    return exports
 
 
 def _emit_packaging_setup(
