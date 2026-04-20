@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from .job import Job
     from .packaging.base import PackagingStrategy
     from .parallel.types import Peer, _ParallelSpec
-    from .parallel_job import ParallelJob
+    from .parallel_job import ParallelJob, _ParallelPeerHandle
 
 logger = logging.getLogger(__name__)
 
@@ -330,7 +330,7 @@ def submit_parallel_spec(
         :class:`ParallelJob` aggregating one :class:`Job` per peer.
     """
     from .job import Job
-    from .parallel_job import ParallelJob
+    from .parallel_job import ParallelJob, _ParallelPeerHandle
 
     # When the backend is local and Slurm is not installed (developer
     # workstation), validate that the host can physically accommodate the
@@ -486,8 +486,7 @@ def submit_parallel_spec(
     # :class:`CompletedContext` events. The representative poller fires
     # exactly once for the whole allocation (Phase 11 contract).
     representative_name = representative_peer.resolved_name
-    peer_jobs: Dict[str, "Job"] = {}
-    peer_replica_jobs: Dict[str, List["Job"]] = {}
+    peer_handles: Dict[str, _ParallelPeerHandle] = {}
     for peer in spec.peers:
         if not isinstance(peer.task, BoundTask):
             raise RuntimeError(
@@ -549,11 +548,14 @@ def submit_parallel_spec(
                     on_completed=on_completed,
                 )
                 replica_jobs.append(job)
-            peer_replica_jobs[peer.resolved_name] = replica_jobs
             # The leader / representative Job for the peer's aggregate
             # surface is replica 0 — used anywhere the legacy
             # ``peer_jobs[name]`` path returned a singleton.
-            peer_jobs[peer.resolved_name] = replica_jobs[0]
+            peer_handles[peer.resolved_name] = _ParallelPeerHandle(
+                name=peer.resolved_name,
+                representative_job=replica_jobs[0],
+                replica_jobs=tuple(replica_jobs),
+            )
         else:
             peer_pre_id = peer_pre_submission_id(pre_submission_id, peer.resolved_name)
             peer_args = tuple(peer.task.args)
@@ -579,15 +581,18 @@ def submit_parallel_spec(
                 backend=cluster.backend,
                 on_completed=on_completed,
             )
-            peer_jobs[peer.resolved_name] = job
+            peer_handles[peer.resolved_name] = _ParallelPeerHandle(
+                name=peer.resolved_name,
+                representative_job=job,
+            )
 
     parallel_job = ParallelJob(
         cluster=cluster,
         job_id=base_job_id,
-        peer_jobs=peer_jobs,
+        peer_jobs=None,
         spec=spec,
         target_job_dir=target_job_dir,
-        peer_replica_jobs=peer_replica_jobs,
+        peer_handles=peer_handles,
     )
 
     # Emit end-of-submit callback using the representative peer's Job so
@@ -595,7 +600,7 @@ def submit_parallel_spec(
     # A ParallelJob emits exactly one :class:`SubmitEndContext` for the
     # whole allocation (Phase 11 contract).
     submit_end_ctx = SubmitEndContext(
-        job=peer_jobs[representative_peer.resolved_name],
+        job=peer_handles[representative_peer.resolved_name].representative_job,
         job_id=str(base_job_id),
         pre_submission_id=pre_submission_id,
         target_job_dir=target_job_dir,
@@ -613,7 +618,9 @@ def submit_parallel_spec(
     # allocation. Per-peer callback consumers that need richer detail still
     # have access to ``parallel_job.peer_outcomes()`` and
     # ``parallel_job.snapshot()``.
-    cluster._maybe_start_job_poller(peer_jobs[representative_peer.resolved_name])
+    cluster._maybe_start_job_poller(
+        peer_handles[representative_peer.resolved_name].representative_job
+    )
 
     return parallel_job
 

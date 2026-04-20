@@ -24,7 +24,7 @@ from slurm.parallel.registry import (
     write_registry,
 )
 from slurm.parallel.validation import validate_spec
-from slurm.parallel_job import ParallelJob
+from slurm.parallel_job import ParallelJob, ReplicaGroup, _ParallelPeerHandle
 from slurm.task import SlurmTask
 
 
@@ -196,6 +196,37 @@ def test_snapshot_replica_peer_returns_list_of_snapshots() -> None:
     assert len(snap["worker"]) == 3
     for entry in snap["worker"]:
         assert isinstance(entry, JobSnapshot)
+
+
+def test_parallel_job_peer_handles_preserve_legacy_surface() -> None:
+    spec = _mixed_spec()
+    leader_job = _SnapshotJob(state="COMPLETED", result="leader")
+    replica_jobs = [_SnapshotJob(state="COMPLETED", result=i) for i in range(3)]
+    job = ParallelJob(
+        cluster=None,  # type: ignore[arg-type]
+        job_id="42",
+        peer_jobs=None,
+        spec=spec,
+        peer_handles={
+            "leader": _ParallelPeerHandle(
+                name="leader",
+                representative_job=leader_job,
+            ),
+            "worker": _ParallelPeerHandle(
+                name="worker",
+                representative_job=replica_jobs[0],
+                replica_jobs=tuple(replica_jobs),
+            ),
+        },
+    )
+
+    assert job.peer_jobs == {"leader": leader_job, "worker": replica_jobs[0]}
+    assert list(job) == [leader_job, replica_jobs[0]]
+    assert job["leader"] is leader_job
+    group = job["worker"]
+    assert isinstance(group, ReplicaGroup)
+    assert group.replica_jobs == replica_jobs
+    assert job["worker", 2] is replica_jobs[2]
 
 
 def test_snapshot_forwards_tail_lines_to_per_peer_job() -> None:
