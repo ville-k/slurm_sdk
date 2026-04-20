@@ -165,6 +165,33 @@ class ReplicaGroup:
         return f"ReplicaGroup(peer={self.peer_name!r}, count={len(self._jobs)})"
 
 
+@dataclass(frozen=True)
+class _ParallelPeerHandle:
+    """Internal owner of one peer's representative and replica jobs."""
+
+    name: str
+    representative_job: "Job"
+    replica_jobs: Tuple["Job", ...] = ()
+
+    @property
+    def is_replica_set(self) -> bool:
+        return len(self.replica_jobs) > 0
+
+    @property
+    def ordered_jobs(self) -> Tuple["Job", ...]:
+        if self.replica_jobs:
+            return self.replica_jobs
+        return (self.representative_job,)
+
+    def replica_group(self) -> ReplicaGroup:
+        if not self.replica_jobs:
+            raise TypeError(
+                f"Peer {self.name!r} is not a replica set — use job[{self.name!r}] "
+                "without a replica index."
+            )
+        return ReplicaGroup(self.name, list(self.replica_jobs))
+
+
 class ParallelJob:
     """Aggregate handle for a submitted ``parallel(...)`` allocation.
 
@@ -198,27 +225,45 @@ class ParallelJob:
         self,
         cluster: "Cluster",
         job_id: str,
-        peer_jobs: Dict[str, "Job"],
+        peer_jobs: Optional[Dict[str, "Job"]],
         spec: "_ParallelSpec",
         target_job_dir: Optional[str] = None,
         peer_replica_jobs: Optional[Dict[str, List["Job"]]] = None,
+        peer_handles: Optional[Dict[str, _ParallelPeerHandle]] = None,
     ) -> None:
-        if not peer_jobs:
+        handles = self._coerce_peer_handles(peer_jobs, peer_replica_jobs, peer_handles)
+        if not handles:
             raise ValueError("ParallelJob requires at least one peer job")
         self.cluster = cluster
         self._job_id = job_id
-        self._peer_jobs: Dict[str, "Job"] = dict(peer_jobs)
+        self._peer_handles: Dict[str, _ParallelPeerHandle] = handles
         self._spec = spec
         # Snapshot the target job dir so ``peer_outcomes`` can find
         # ``registry.json`` even if the per-peer Jobs get re-parented later.
         self._target_job_dir = target_job_dir
-        # ``peer_replica_jobs`` holds the full per-replica Job list for every
-        # replica peer; ``peer_jobs[name]`` only tracks the representative
-        # (replica 0) Job to keep the legacy surface working. Singleton peers
-        # never appear here.
-        self._peer_replica_jobs: Dict[str, List["Job"]] = {
-            name: list(jobs) for name, jobs in (peer_replica_jobs or {}).items()
-        }
+
+    @staticmethod
+    def _coerce_peer_handles(
+        peer_jobs: Optional[Dict[str, "Job"]],
+        peer_replica_jobs: Optional[Dict[str, List["Job"]]],
+        peer_handles: Optional[Dict[str, _ParallelPeerHandle]],
+    ) -> Dict[str, _ParallelPeerHandle]:
+        """Normalise constructor inputs into the authoritative handle map."""
+        if peer_handles is not None:
+            return dict(peer_handles)
+
+        if not peer_jobs:
+            return {}
+
+        replica_map = {name: tuple(jobs) for name, jobs in (peer_replica_jobs or {}).items()}
+        handles: Dict[str, _ParallelPeerHandle] = {}
+        for name, representative_job in peer_jobs.items():
+            handles[name] = _ParallelPeerHandle(
+                name=name,
+                representative_job=representative_job,
+                replica_jobs=replica_map.get(name, ()),
+            )
+        return handles
 
     @property
     def job_id(self) -> str:
@@ -228,16 +273,18 @@ class ParallelJob:
     @property
     def peer_jobs(self) -> Dict[str, "Job"]:
         """Read-only mapping from peer name to per-peer :class:`Job`."""
-        return dict(self._peer_jobs)
+        return {
+            name: handle.representative_job for name, handle in self._peer_handles.items()
+        }
 
     def __iter__(self):
-        return iter(self._peer_jobs.values())
+        return iter(handle.representative_job for handle in self._peer_handles.values())
 
     def __len__(self) -> int:
-        return len(self._peer_jobs)
+        return len(self._peer_handles)
 
     def __contains__(self, name: object) -> bool:
-        return name in self._peer_jobs
+        return name in self._peer_handles
 
     def __getitem__(
         self, key: Union[str, Tuple[str, int]]
@@ -266,17 +313,18 @@ class ParallelJob:
                     f"replica_index); got {key!r}"
                 )
             name, idx = key
-            if name not in self._peer_replica_jobs:
-                if name in self._peer_jobs:
-                    raise TypeError(
-                        f"Peer {name!r} is not a replica set — use "
-                        f'job["{name}"] without an index.'
-                    )
-                available = ", ".join(sorted(self._peer_jobs.keys()))
+            handle = self._peer_handles.get(name)
+            if handle is None:
+                available = ", ".join(sorted(self._peer_handles.keys()))
                 raise KeyError(
                     f"ParallelJob has no peer {name!r}. Available peers: {available}"
                 )
-            jobs = self._peer_replica_jobs[name]
+            if not handle.is_replica_set:
+                raise TypeError(
+                    f"Peer {name!r} is not a replica set — use "
+                    f'job["{name}"] without an index.'
+                )
+            jobs = handle.replica_jobs
             if idx < 0 or idx >= len(jobs):
                 raise KeyError(
                     f"Replica index {idx} out of range for peer {name!r} "
@@ -286,15 +334,15 @@ class ParallelJob:
 
         # Plain string key — singleton Job or ReplicaGroup.
         name = key
-        if name in self._peer_replica_jobs:
-            return ReplicaGroup(name, self._peer_replica_jobs[name])
-        try:
-            return self._peer_jobs[name]
-        except KeyError as exc:
-            available = ", ".join(sorted(self._peer_jobs.keys()))
+        handle = self._peer_handles.get(name)
+        if handle is None:
+            available = ", ".join(sorted(self._peer_handles.keys()))
             raise KeyError(
                 f"ParallelJob has no peer {name!r}. Available peers: {available}"
-            ) from exc
+            )
+        if handle.is_replica_set:
+            return handle.replica_group()
+        return handle.representative_job
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """Block until every peer (and replica) has reached a terminal state.
@@ -310,14 +358,8 @@ class ParallelJob:
             ``True`` if every peer/replica reached a terminal state,
             ``False`` on timeout.
         """
-        for name, job in self._peer_jobs.items():
-            if name in self._peer_replica_jobs:
-                # Replica peers — waiting on replica 0 is enough (same job
-                # id) but iterate for symmetry and timeout aggregation.
-                for rjob in self._peer_replica_jobs[name]:
-                    if not rjob.wait(timeout=timeout):
-                        return False
-            else:
+        for handle in self._peer_handles.values():
+            for job in handle.ordered_jobs:
                 if not job.wait(timeout=timeout):
                     return False
         return True
@@ -332,7 +374,7 @@ class ParallelJob:
         if self._target_job_dir:
             return os.path.join(self._target_job_dir, "registry.json")
         # Fall back to the first peer's job directory.
-        first_job = next(iter(self._peer_jobs.values()))
+        first_job = next(handle.representative_job for handle in self._peer_handles.values())
         tdir = getattr(first_job, "_target_job_dir", None) or getattr(
             first_job, "target_job_dir", None
         )
@@ -432,7 +474,8 @@ class ParallelJob:
         for peer in self._spec.peers:
             peer_name = peer.resolved_name
             if peer.is_replica_set:
-                replica_jobs = self._peer_replica_jobs.get(peer_name, [])
+                handle = self._peer_handles.get(peer_name)
+                replica_jobs = list(handle.replica_jobs) if handle is not None else []
                 replica_results: List[Any] = []
                 for replica_index in range(peer.count):
                     outcome = outcomes.get(f"{peer_name}[{replica_index}]")
@@ -454,7 +497,7 @@ class ParallelJob:
                     )
                 results[peer_name] = replica_results
             else:
-                job = self._peer_jobs[peer_name]
+                job = self._peer_handles[peer_name].representative_job
                 outcome = outcomes.get(peer_name)
                 results[peer_name] = self._collect_singleton_result(
                     peer, job, outcome, has_registry_data, timeout, failures
@@ -576,12 +619,13 @@ class ParallelJob:
         for peer in self._spec.peers:
             name = peer.resolved_name
             if peer.is_replica_set:
-                replica_jobs = self._peer_replica_jobs.get(name, [])
+                handle = self._peer_handles.get(name)
+                replica_jobs = list(handle.replica_jobs) if handle is not None else []
                 out[name] = [
                     job.snapshot(tail_lines=tail_lines) for job in replica_jobs
                 ]
             else:
-                job = self._peer_jobs[name]
+                job = self._peer_handles[name].representative_job
                 out[name] = job.snapshot(tail_lines=tail_lines)
         return out
 
@@ -627,7 +671,7 @@ class ParallelJob:
                 f"Leader peer {leader.resolved_name!r} is declared as a "
                 "replica set. A leader should be a singleton peer."
             )
-        return self._peer_jobs[leader.resolved_name].get_result()
+        return self._peer_handles[leader.resolved_name].representative_job.get_result()
 
     def after(self, *deps: "Job | ArrayJob | ParallelJob") -> "ParallelJob":
         """Return a new :class:`ParallelJob` that waits for *deps* first.
@@ -719,9 +763,11 @@ class ParallelJob:
         failure.
         """
         # All peers share one job id; just call cancel on the first Job.
-        first_job = next(iter(self._peer_jobs.values()))
+        first_job = next(
+            handle.representative_job for handle in self._peer_handles.values()
+        )
         return first_job.cancel()
 
     def __repr__(self) -> str:
-        peers = ", ".join(sorted(self._peer_jobs.keys()))
+        peers = ", ".join(sorted(self._peer_handles.keys()))
         return f"ParallelJob(job_id={self._job_id!r}, peers=[{peers}])"
