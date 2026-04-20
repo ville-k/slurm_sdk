@@ -183,9 +183,9 @@ def server(ctx: JobContext) -> None:
 ```
 
 The reservation is published to the registry before the function returns,
-so peers that `wait_all(keys=["admin"])` see the port as soon as it is
-bound. The decorator form (`@task(ports={...})`) is preferred when you
-know the names up front — it runs before user code.
+so peers that `wait_all(keys=["ports"])` see the updated port mapping as
+soon as it is bound. The decorator form (`@task(ports={...})`) is
+preferred when you know the names up front — it runs before user code.
 
 ## Reserved keys in `announce`
 

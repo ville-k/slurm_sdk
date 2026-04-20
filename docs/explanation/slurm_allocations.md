@@ -228,7 +228,9 @@ A minimal registry for a two-peer job looks roughly like:
 
 Readers cache the deserialised snapshot. `ctx.peers["train"].refresh()` re-
 reads the file on demand — useful when waiting for a peer that hasn't
-announced yet. `PeerGroup.wait_all(...)` encapsulates the poll loop.
+announced yet. `PeerGroup.wait_all(...)` encapsulates the poll loop:
+`hostname`, `step_id`, `node_label`, and `ports` are treated as top-level
+runtime fields, while any other key name waits on announced `metadata`.
 
 ## How local mode fakes all of this
 

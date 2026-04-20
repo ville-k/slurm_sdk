@@ -16,6 +16,7 @@ import os
 
 import pytest
 
+from slurm.parallel import validation as parallel_validation
 from slurm import Peer, parallel, task
 from slurm.api.local import LocalBackend
 from slurm.cluster import Cluster
@@ -315,6 +316,57 @@ def test_local_capacity_accepts_small_job():
     spec = _ParallelSpec(peers=(peer,), topology=topology)
 
     # Does not raise.
+    validate_local_capacity(spec)
+
+
+def test_local_capacity_rejects_memory_overflow(monkeypatch):
+    """Memory demand above detected host RAM raises ``TopologyError``."""
+
+    @task(cpus_per_task=1, mem="4G")
+    def _memory_hog() -> None:
+        pass
+
+    monkeypatch.setattr(parallel_validation, "_detect_local_memory_mib", lambda: 512)
+
+    peer = _Peer(task=_memory_hog, name="memory_hog", pool="default")
+    topology = Topology(pools={"default": Pool(nodes=1)})
+    spec = _ParallelSpec(peers=(peer,), topology=topology)
+
+    with pytest.raises(TopologyError, match="MiB of RAM"):
+        validate_local_capacity(spec)
+
+
+def test_local_capacity_rejects_gpu_overflow(monkeypatch):
+    """GPU demand above detected host GPUs raises ``TopologyError``."""
+
+    @task(cpus_per_task=1, mem="1M", gpus_per_task=2)
+    def _gpu_hog() -> None:
+        pass
+
+    monkeypatch.setattr(parallel_validation, "_detect_local_gpus", lambda: 1)
+
+    peer = _Peer(task=_gpu_hog, name="gpu_hog", pool="default")
+    topology = Topology(pools={"default": Pool(nodes=1)})
+    spec = _ParallelSpec(peers=(peer,), topology=topology)
+
+    with pytest.raises(TopologyError, match="GPU"):
+        validate_local_capacity(spec)
+
+
+def test_local_capacity_accepts_gpu_and_memory_fit(monkeypatch):
+    """Detected memory and GPU capacity let a small job pass."""
+
+    @task(cpus_per_task=1, mem="512M", gpus_per_task=1)
+    def _small_accelerated() -> None:
+        pass
+
+    monkeypatch.setattr(parallel_validation, "_detect_local_memory_mib", lambda: 4096)
+    monkeypatch.setattr(parallel_validation, "_detect_local_gpus", lambda: 2)
+
+    peer = _Peer(task=_small_accelerated, name="small_accelerated", pool="default")
+    topology = Topology(pools={"default": Pool(nodes=1)})
+    spec = _ParallelSpec(peers=(peer,), topology=topology)
+
     validate_local_capacity(spec)
 
 

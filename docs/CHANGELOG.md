@@ -16,13 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an explanation page covering hetjob mechanics and the supervisor
   lifecycle
 - Local-mode parity for `parallel(...)` — run multi-peer allocations on a
-  developer workstation without Slurm installed. `LocalBackend.submit_job`
-  detects parallel-rendered scripts via a supervisor sentinel and, when
-  `sbatch` is absent (or `SLURM_SDK_FORCE_LOCAL_PARALLEL=1`), invokes the
-  Python supervisor directly via `subprocess.Popen`. Peers launch without
-  `srun`; per-peer `SLURM_PROCID` / `SLURM_NTASKS` / `SLURM_JOB_ID` are
-  synthesized so `JobContext` stays coherent. Shutdown uses process-group
-  `SIGTERM` / `SIGKILL` with the same grace window semantics as Slurm mode
+  developer workstation without Slurm installed. When `sbatch` is absent
+  (or `SLURM_SDK_FORCE_LOCAL_PARALLEL=1`), the SDK now takes a dedicated
+  local prep path that materialises the same `plan.json`, callback payload,
+  and per-peer argument artifacts as the Slurm flow, runs bootstrap
+  directly, and launches the Python supervisor via `subprocess.Popen`.
+  Peers launch without `srun`; per-peer `SLURM_PROCID` / `SLURM_NTASKS` /
+  `SLURM_JOB_ID` are synthesized so `JobContext` stays coherent. Shutdown
+  uses process-group `SIGTERM` / `SIGKILL` with the same grace window
+  semantics as Slurm mode
 - Local-host capacity validation — when the backend is `local` and Slurm
   is not present, `parallel(...)` checks aggregate per-peer CPU, memory
   (`/proc/meminfo`, `psutil`, `sysctl` on macOS) and GPU
@@ -136,7 +138,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declared ports, announced metadata, and lifecycle state; iteration, indexing,
   `first`, `hostnames`, `ready_only()`, `refresh()`, and `wait_all(keys=..., timeout=...)` are available. A blocking `wait_all()` polls the registry with
   exponential backoff (50 ms → 1 s cap) and raises `TimeoutError` with a list
-  of laggard replicas on expiry
+  of laggard replicas on expiry. `wait_all()` now also understands the
+  top-level runtime fields `hostname`, `step_id`, `node_label`, and `ports`;
+  any other key name still waits on announced `metadata`
 
 - `ctx.announce(ready=True, **fields)` publishes runtime metadata to the peer
   registry via an atomic tmp-and-rename write. Announced fields merge into the
@@ -162,7 +166,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The allocation bootstrap resolves per-component nodelists via
   `SLURM_JOB_NODELIST_HET_GROUP_<N>` and seeds each peer's registry entry
-  with hostnames from its own pool
+  with pool membership plus any placement pins. Pinned peers get concrete
+  hostnames immediately; unpinned peers stay pending until their runner
+  publishes the observed hostname and step id at startup
+
+- Discovery now treats peer entries as authoritative for runtime placement
+  and node entries as authoritative for allocation inventory. `ctx.node.peers`
+  and `PeerInfo.node_label` are derived on read from those sources, so stale
+  cached cross-links in `registry.json` no longer leak into the public
+  discovery surface
 
 - The supervisor now cancels every hetjob component on shutdown — `scancel`
   receives `<jobid>`, `<jobid>+1`, `<jobid>+2`, ... in one call so Slurm tears
@@ -221,6 +233,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ParallelJob.get_results()` now raises `CompositeJobError` aggregating
   every fatal peer's `PeerFailureError` when any peer's outcome is `"fatal"`
   or `"not_started"`
+
+- `ParallelJob` now stores internal peer/replica handles instead of separate
+  bookkeeping tables for representative jobs and replica jobs. Public access
+  patterns stay the same: `peer_jobs`, `job["name"]`, `job["name", i]`,
+  `wait()`, `snapshot()`, `peer_outcomes()`, and `get_results()` are
+  unchanged
+
+- CPU, GPU, and memory accounting for implicit topology inference, per-pool
+  validation, and local-capacity validation now share one internal resource
+  model. Memory checks stay MiB-based end to end, and local-mode tests now
+  cover CPU, GPU, and memory accept/reject cases explicitly
 
 - `parallel(...)` entry point now submits single-pool allocations end-to-end.
   Each peer runs as its own `srun` step inside one `sbatch` job, with

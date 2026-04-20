@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Mapping, Optional, Tuple
+from typing import Iterator, Mapping, Optional, Tuple, cast
 
 logger = logging.getLogger("slurm.parallel.node_info")
 
@@ -211,10 +211,11 @@ def _derive_node_peer_membership(registry: Mapping[str, object]) -> dict[str, tu
         for raw_entry in entries:
             if not isinstance(raw_entry, Mapping):
                 continue
-            hostname = str(raw_entry.get("hostname") or "")
+            entry = cast(Mapping[str, object], raw_entry)
+            hostname = str(entry.get("hostname") or "")
             if hostname == "":
                 continue
-            peer_name = str(raw_entry.get("name", declared_name))
+            peer_name = str(entry.get("name", declared_name))
             host_members = membership.setdefault(hostname, [])
             if peer_name not in host_members:
                 host_members.append(peer_name)
