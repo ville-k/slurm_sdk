@@ -233,12 +233,16 @@ announced yet. `PeerGroup.wait_all(...)` encapsulates the poll loop.
 ## How local mode fakes all of this
 
 When `Cluster(backend_type="local")` runs a `parallel(...)` submission on a
-workstation without `sbatch` in the `PATH`, the batch script is still
-generated, but the supervisor is invoked directly via `subprocess.Popen`
-instead of `sbatch`. Peers launch as plain child processes — no `srun`,
-no step ids — but the supervisor state machine, the registry, the
-failure policies, and `ctx.peers` all behave identically. `scancel` is
-replaced by sending `SIGTERM` to the process group.
+workstation without `sbatch` in the `PATH`, the SDK now takes a dedicated
+prep path instead of trying to execute part of the rendered batch script.
+It still renders the full script for inspection, but local mode separately
+materialises the shared artifacts (`plan.json`, callbacks pickle, per-peer
+arg pickles), runs packaging setup, invokes the bootstrap directly, and
+then launches the supervisor via `subprocess.Popen`. Peers launch as plain
+child processes — no `srun`, no step ids — but the supervisor state
+machine, the registry, the failure policies, and `ctx.peers` all behave
+identically. `scancel` is replaced by sending `SIGTERM` to the process
+group.
 
 This lets the cosmos-rl example run end-to-end on a laptop (with
 scaled-down `count=` values) before you commit a 24-hour allocation on a

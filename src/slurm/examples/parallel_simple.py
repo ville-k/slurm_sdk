@@ -1,10 +1,11 @@
 """Minimal ``parallel(...)`` smoke example — runs without Slurm installed.
 
-This example demonstrates Phase 12's local-mode bypass: a 2-peer
-``parallel(...)`` submission executed by the Python supervisor directly,
-with peers launched as plain subprocesses (no ``srun``). It mirrors
-``hello_world.py`` in structure but exercises the parallel code path
-without needing a real SLURM cluster.
+This example demonstrates the local-mode parallel prep path: a 2-peer
+``parallel(...)`` submission whose artifacts are prepared locally before
+the Python bootstrap and supervisor launch directly, with peers started as
+plain subprocesses (no ``srun``). It mirrors ``hello_world.py`` in
+structure but exercises the parallel code path without needing a real
+SLURM cluster.
 
 Run it with::
 

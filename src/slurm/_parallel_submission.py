@@ -29,6 +29,7 @@ from .callbacks import SubmitBeginContext, SubmitEndContext
 from .errors import SubmissionError
 from .packaging.inherit import InheritPackagingStrategy
 from .parallel.rendering import (
+    prepare_parallel_submission,
     peer_pre_submission_id,
     render_parallel_script,
 )
@@ -335,7 +336,8 @@ def submit_parallel_spec(
     # workstation), validate that the host can physically accommodate the
     # job before we render anything — a clear error here beats a confusing
     # OOM / CPU-thrash failure deep inside the supervisor.
-    if _backend_will_bypass_sbatch(cluster):
+    local_bypass = _backend_will_bypass_sbatch(cluster)
+    if local_bypass:
         from .parallel.validation import validate_local_capacity
 
         validate_local_capacity(spec)
@@ -384,6 +386,17 @@ def submit_parallel_spec(
         if peer.is_replica_set:
             replica_items[peer.resolved_name] = _resolve_replica_items(peer)
 
+    prepared_submission = prepare_parallel_submission(
+        spec=spec,
+        packaging_strategy=packaging_strategy,
+        target_job_dir=target_job_dir,
+        pre_submission_id=pre_submission_id,
+        cluster=cluster,
+        callbacks=cluster.callbacks,
+        replica_items=replica_items,
+        peer_packaging_strategies=peer_packaging_strategies,
+    )
+
     # Dependency string propagates to every hetjob component so Slurm only
     # schedules the allocation once every upstream job has succeeded.
     sbatch_overrides: Dict[str, Any] = {}
@@ -401,6 +414,7 @@ def submit_parallel_spec(
         callbacks=cluster.callbacks,
         replica_items=replica_items,
         peer_packaging_strategies=peer_packaging_strategies,
+        prepared_submission=prepared_submission,
     )
     logger.debug(
         "[%s] --- RENDERED PARALLEL SCRIPT ---\n%s\n[%s] --- END RENDERED SCRIPT ---",
@@ -412,13 +426,29 @@ def submit_parallel_spec(
     submit_account = effective_sbatch_options.get("account")
     submit_partition = effective_sbatch_options.get("partition")
     try:
-        job_submission_result = cluster.backend.submit_job(
-            script,
-            target_job_dir=target_job_dir,
-            pre_submission_id=pre_submission_id,
-            account=submit_account,
-            partition=submit_partition,
-        )
+        if local_bypass:
+            from .api.local import LocalBackend
+
+            backend = cluster.backend
+            if not isinstance(backend, LocalBackend):
+                raise SubmissionError(
+                    "Local parallel bypass was selected but the cluster backend "
+                    f"is {type(backend).__name__}, not LocalBackend."
+                )
+            job_submission_result = backend.submit_prepared_parallel_job(
+                prepared_submission=prepared_submission,
+                script=script,
+                target_job_dir=target_job_dir,
+                pre_submission_id=pre_submission_id,
+            )
+        else:
+            job_submission_result = cluster.backend.submit_job(
+                script,
+                target_job_dir=target_job_dir,
+                pre_submission_id=pre_submission_id,
+                account=submit_account,
+                partition=submit_partition,
+            )
     except Exception as exc:
         raise SubmissionError(
             f"Failed to submit parallel job via backend "

@@ -199,6 +199,42 @@ def test_local_mode_shutdown_is_clean(local_cluster):
         assert proc.poll() is not None, "supervisor process not terminal"
 
 
+def test_local_parallel_submission_uses_dedicated_backend_path(
+    local_cluster, monkeypatch
+):
+    """parallel(...) should bypass ``submit_job`` on the local backend."""
+    backend = local_cluster.backend
+
+    def _fail_submit_job(*args, **kwargs):
+        raise AssertionError("submit_job() should not handle local parallel bypass")
+
+    monkeypatch.setattr(backend, "submit_job", _fail_submit_job)
+
+    with local_cluster:
+        job = parallel(Peer(_return_answer, name="solo"))
+        assert job.wait(timeout=60)
+        assert job.get_results()["solo"] == 42
+
+
+def test_local_parallel_prep_materializes_artifacts(local_cluster):
+    """The dedicated prep path writes plan/callback/arg artifacts before launch."""
+    with local_cluster:
+        job = parallel(Peer(_return_answer, name="solo"))
+        assert job.wait(timeout=60)
+        assert job.get_results()["solo"] == 42
+
+    job_dir = job["solo"].target_job_dir
+    assert job_dir is not None
+    expected_files = [
+        f"{job_dir}/plan.json",
+        f"{job_dir}/peer_solo_args.pkl",
+        f"{job_dir}/peer_solo_kwargs.pkl",
+        f"{job_dir}/slurm_job_{job['solo'].pre_submission_id.rsplit('_peer_', 1)[0]}_callbacks.pkl",
+    ]
+    for path in expected_files:
+        assert os.path.exists(path), f"missing local parallel prep artifact: {path}"
+
+
 def test_extract_runner_argv_strips_srun_prefix():
     """Unit-level check on the srun→runner extractor."""
     line = (

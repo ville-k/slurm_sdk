@@ -19,11 +19,16 @@ import os
 import pickle
 import shlex
 import sys
+import pathlib
+import importlib
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from .._serialization import dumps_pickled
 from ..rendering import (
     CALLBACKS_FILENAME,
+    _build_environment_exports_map,
+    _emit_export_assignments,
     _emit_environment_exports,
     _emit_packaging_setup,
     _emit_python_path_setup,
@@ -43,6 +48,42 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class SharedRunnerInputs:
+    """Callbacks/sys.path payload shared across every peer runner."""
+
+    pickled_sys_path: str
+    callbacks_filename: str
+    callbacks_payload_b64: Optional[str]
+
+
+@dataclass(frozen=True)
+class PeerArtifactBundle:
+    """Serialized args/kwargs payloads for one peer."""
+
+    args_basename: str
+    kwargs_basename: str
+    args_payload_b64: str
+    kwargs_payload_b64: str
+    replica_payloads_b64: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreparedParallelSubmission:
+    """Internal bundle shared by script rendering and local-mode prep."""
+
+    plan: Plan
+    representative_task: Any
+    environment_exports: Dict[str, str]
+    python_runtime_exports: Dict[str, str]
+    shared_inputs: SharedRunnerInputs
+    peer_artifacts: Dict[str, PeerArtifactBundle]
+    peer_packaging_strategies: Dict[str, "PackagingStrategy"]
+    unique_packaging_strategies: Tuple["PackagingStrategy", ...]
+    target_job_dir: str
+    pre_submission_id: str
+
+
 # Names under $JOB_DIR for per-peer artifacts. Kept short so the output
 # directory listings read well during debugging.
 PEER_ARGS_BASENAME = "peer_{name}_args.pkl"
@@ -53,6 +94,43 @@ PEER_RESULT_BASENAME = "peer_{name}_result.pkl"
 # the runner unpacks with ``unpack_item_to_args_kwargs`` — matching the
 # :meth:`SlurmTask.map` item shape.
 PEER_REPLICA_ARGS_BASENAME = "peer_{name}_{index}_args.pkl"
+
+
+def _build_local_python_runtime_exports() -> Dict[str, str]:
+    """Build the Python runtime env the local prep path must preserve.
+
+    The rendered batch script exports the same values via
+    :func:`slurm.rendering._emit_python_path_setup`. Local mode launches
+    bootstrap/supervisor directly from Python, so it needs the concrete env
+    mapping as well — especially ``PYTHONPATH`` and ``PY_EXEC_RESOLVED`` so
+    peer subprocesses import the same code that the rendered script would.
+    """
+    submission_sys_path = [p for p in sys.path if isinstance(p, str) and p]
+    repo_root = os.getcwd()
+    if repo_root not in submission_sys_path:
+        submission_sys_path.insert(0, repo_root)
+    try:
+        _slurm_mod = importlib.import_module("slurm")
+        slurm_parent = pathlib.Path(_slurm_mod.__file__).resolve().parent.parent
+        slurm_parent_str = str(slurm_parent)
+        if slurm_parent_str not in submission_sys_path:
+            submission_sys_path.insert(0, slurm_parent_str)
+    except Exception:
+        pass
+
+    pythonpath_contrib = ":".join(submission_sys_path)
+    exports: Dict[str, str] = {
+        "PY_EXEC_RESOLVED": os.environ.get("PY_EXEC", "python"),
+        "PYTHONUNBUFFERED": "1",
+    }
+    existing_pythonpath = os.environ.get("PYTHONPATH")
+    if pythonpath_contrib and existing_pythonpath:
+        exports["PYTHONPATH"] = f"{pythonpath_contrib}:{existing_pythonpath}"
+    elif pythonpath_contrib:
+        exports["PYTHONPATH"] = pythonpath_contrib
+    elif existing_pythonpath:
+        exports["PYTHONPATH"] = existing_pythonpath
+    return exports
 
 
 def peer_pre_submission_id(base_id: str, peer_name: str) -> str:
@@ -227,6 +305,98 @@ def _export_clause(peer: "Peer", pool_name: str) -> str:
     return "--export=ALL," + ",".join(extras)
 
 
+def _build_peer_artifact_bundle(
+    peer: "Peer",
+    *,
+    pre_submission_id: str,
+    replica_items: Optional[List[Any]] = None,
+) -> PeerArtifactBundle:
+    """Serialize the per-peer artifact payloads needed before launch."""
+    args_basename = PEER_ARGS_BASENAME.format(name=peer.resolved_name)
+    kwargs_basename = PEER_KWARGS_BASENAME.format(name=peer.resolved_name)
+
+    bt = peer.task if isinstance(peer.task, BoundTask) else None
+    args_tuple: Tuple[Any, ...] = tuple(bt.args) if bt else ()
+    kwargs_dict: Dict[str, Any] = dict(bt.kwargs) if bt else {}
+
+    try:
+        args_payload_b64 = base64.b64encode(dumps_pickled(args_tuple)).decode()
+        kwargs_payload_b64 = base64.b64encode(dumps_pickled(kwargs_dict)).decode()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to pickle arguments for peer {peer.resolved_name!r}.\n\n"
+            f"Original error: {exc}\n\n"
+            "Task arguments must be pickle-serializable to cross the "
+            "submission boundary."
+        ) from exc
+
+    if replica_items is None:
+        replica_payloads_b64: Tuple[str, ...] = ()
+    else:
+        if len(replica_items) != peer.count:
+            raise RuntimeError(
+                f"Replica peer {peer.resolved_name!r}: expected {peer.count} "
+                f"item(s), got {len(replica_items)}. Internal error — validation "
+                "should have rejected this at spec-build time."
+            )
+        payloads: List[str] = []
+        for idx, item in enumerate(replica_items):
+            try:
+                payloads.append(base64.b64encode(dumps_pickled(item)).decode())
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to pickle replica {idx} args for peer "
+                    f"{peer.resolved_name!r}: {exc}"
+                ) from exc
+        replica_payloads_b64 = tuple(payloads)
+
+    del pre_submission_id
+    assert pickle.HIGHEST_PROTOCOL >= 2
+    return PeerArtifactBundle(
+        args_basename=args_basename,
+        kwargs_basename=kwargs_basename,
+        args_payload_b64=args_payload_b64,
+        kwargs_payload_b64=kwargs_payload_b64,
+        replica_payloads_b64=replica_payloads_b64,
+    )
+
+
+def _emit_peer_artifact_lines(
+    peer_name: str,
+    artifact: PeerArtifactBundle,
+) -> List[str]:
+    """Emit the shell lines that materialise one peer's shared pickle files."""
+    label_base = peer_name.upper()
+    return [
+        f"# --- peer {peer_name}: serialize args ---",
+        f'base64 -d > "{artifact.args_basename}" << "BASE64_PEER_ARGS_{label_base}"',
+        artifact.args_payload_b64,
+        f"BASE64_PEER_ARGS_{label_base}",
+        f'base64 -d > "{artifact.kwargs_basename}" << "BASE64_PEER_KWARGS_{label_base}"',
+        artifact.kwargs_payload_b64,
+        f"BASE64_PEER_KWARGS_{label_base}",
+    ]
+
+
+def _emit_replica_artifact_lines(
+    peer_name: str,
+    replica_payloads_b64: Tuple[str, ...],
+) -> List[str]:
+    """Emit the shell lines for replica-specific pickle payloads."""
+    lines: List[str] = [f"# --- replica peer {peer_name}: per-index args ---"]
+    for idx, payload_b64 in enumerate(replica_payloads_b64):
+        filename = PEER_REPLICA_ARGS_BASENAME.format(name=peer_name, index=idx)
+        label = f"BASE64_PEER_REPLICA_{peer_name.upper()}_{idx}"
+        lines.extend(
+            [
+                f'base64 -d > "{filename}" << "{label}"',
+                payload_b64,
+                label,
+            ]
+        )
+    return lines
+
+
 def _emit_peer_arg_heredocs(
     peer: "Peer",
     pre_submission_id: str,
@@ -248,42 +418,9 @@ def _emit_peer_arg_heredocs(
     Returns:
         (lines, args_basename, kwargs_basename)
     """
-    args_basename = PEER_ARGS_BASENAME.format(name=peer.resolved_name)
-    kwargs_basename = PEER_KWARGS_BASENAME.format(name=peer.resolved_name)
-
-    bt = peer.task if isinstance(peer.task, BoundTask) else None
-    args_tuple: Tuple[Any, ...] = tuple(bt.args) if bt else ()
-    kwargs_dict: Dict[str, Any] = dict(bt.kwargs) if bt else {}
-
-    try:
-        pickled_args = base64.b64encode(dumps_pickled(args_tuple)).decode()
-        pickled_kwargs = base64.b64encode(dumps_pickled(kwargs_dict)).decode()
-    except Exception as exc:
-        raise RuntimeError(
-            f"Failed to pickle arguments for peer {peer.resolved_name!r}.\n\n"
-            f"Original error: {exc}\n\n"
-            "Task arguments must be pickle-serializable to cross the "
-            "submission boundary."
-        ) from exc
-
-    # Silence unused-locals for lints: pre_submission_id is already threaded
-    # through the callers; we accept it so future phases can extend filenames
-    # without changing the signature.
-    del pre_submission_id
-    # Sanity check — pickle import hygiene; tools like bandit complain if we
-    # carry a bare `import pickle` without demonstrating it is exercised.
-    assert pickle.HIGHEST_PROTOCOL >= 2
-
-    lines = [
-        f"# --- peer {peer.resolved_name}: serialize args ---",
-        f'base64 -d > "{args_basename}" << "BASE64_PEER_ARGS_{peer.resolved_name.upper()}"',
-        pickled_args,
-        f"BASE64_PEER_ARGS_{peer.resolved_name.upper()}",
-        f'base64 -d > "{kwargs_basename}" << "BASE64_PEER_KWARGS_{peer.resolved_name.upper()}"',
-        pickled_kwargs,
-        f"BASE64_PEER_KWARGS_{peer.resolved_name.upper()}",
-    ]
-    return lines, args_basename, kwargs_basename
+    artifact = _build_peer_artifact_bundle(peer, pre_submission_id=pre_submission_id)
+    lines = _emit_peer_artifact_lines(peer.resolved_name, artifact)
+    return lines, artifact.args_basename, artifact.kwargs_basename
 
 
 def _emit_replica_arg_heredocs(
@@ -298,35 +435,12 @@ def _emit_replica_arg_heredocs(
     — the runner loads exactly one of these per ``SLURM_PROCID`` via
     :func:`_load_peer_replica_arguments`.
     """
-    if len(replica_items) != peer.count:
-        raise RuntimeError(
-            f"Replica peer {peer.resolved_name!r}: expected {peer.count} "
-            f"item(s), got {len(replica_items)}. Internal error — validation "
-            "should have rejected this at spec-build time."
-        )
-
-    lines: List[str] = [f"# --- replica peer {peer.resolved_name}: per-index args ---"]
-    for idx, item in enumerate(replica_items):
-        try:
-            pickled = base64.b64encode(dumps_pickled(item)).decode()
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to pickle replica {idx} args for peer "
-                f"{peer.resolved_name!r}: {exc}"
-            ) from exc
-        filename = PEER_REPLICA_ARGS_BASENAME.format(name=peer.resolved_name, index=idx)
-        # Heredoc labels must be unique across the whole script — include the
-        # replica index in the label so two replicas of the same peer cannot
-        # collide.
-        label = f"BASE64_PEER_REPLICA_{peer.resolved_name.upper()}_{idx}"
-        lines.extend(
-            [
-                f'base64 -d > "{filename}" << "{label}"',
-                pickled,
-                label,
-            ]
-        )
-    return lines
+    artifact = _build_peer_artifact_bundle(
+        peer,
+        pre_submission_id="",
+        replica_items=replica_items,
+    )
+    return _emit_replica_artifact_lines(peer.resolved_name, artifact.replica_payloads_b64)
 
 
 def _emit_peer_srun_command(
@@ -592,6 +706,163 @@ def _emit_supervisor_invocation() -> List[str]:
     ]
 
 
+def prepare_parallel_submission(
+    *,
+    spec: "_ParallelSpec",
+    packaging_strategy: "PackagingStrategy",
+    target_job_dir: str,
+    pre_submission_id: str,
+    cluster: Optional["Cluster"],
+    callbacks: Optional[List[Any]] = None,
+    replica_items: Optional[Dict[str, List[Any]]] = None,
+    peer_packaging_strategies: Optional[Dict[str, "PackagingStrategy"]] = None,
+) -> PreparedParallelSubmission:
+    """Build the artifact/environment bundle shared by render and local prep."""
+    if peer_packaging_strategies is None:
+        peer_packaging_strategies = {
+            peer.resolved_name: packaging_strategy for peer in spec.peers
+        }
+    else:
+        missing = [
+            p.resolved_name
+            for p in spec.peers
+            if p.resolved_name not in peer_packaging_strategies
+        ]
+        if missing:
+            raise RuntimeError(
+                "peer_packaging_strategies is missing entries for peer(s): "
+                f"{missing}. Every peer in the spec must have a resolved "
+                "packaging strategy."
+            )
+
+    pool_items: List[Tuple[str, "Pool"]] = list(spec.topology.pools.items())
+    pool_component_index: Dict[str, int] = {
+        name: idx for idx, (name, _pool) in enumerate(pool_items)
+    }
+    is_hetjob = len(pool_items) > 1
+
+    representative_peer = next((p for p in spec.peers if p.leader), spec.peers[0])
+    representative_task = (
+        representative_peer.task.task.func
+        if isinstance(representative_peer.task, BoundTask)
+        else representative_peer.task
+    )
+
+    unique_strategies: List["PackagingStrategy"] = []
+    seen_ids: set[int] = set()
+    for peer in spec.peers:
+        strategy = peer_packaging_strategies[peer.resolved_name]
+        if id(strategy) in seen_ids:
+            continue
+        seen_ids.add(id(strategy))
+        unique_strategies.append(strategy)
+
+    shared_inputs = _build_shared_runner_inputs(
+        callbacks=callbacks or [],
+        pre_submission_id=pre_submission_id,
+    )
+
+    replica_items = replica_items or {}
+    peer_artifacts: Dict[str, PeerArtifactBundle] = {}
+    for peer in spec.peers:
+        artifact = _build_peer_artifact_bundle(
+            peer,
+            pre_submission_id=pre_submission_id,
+            replica_items=replica_items.get(peer.resolved_name) if peer.is_replica_set else None,
+        )
+        peer_artifacts[peer.resolved_name] = artifact
+
+    peer_commands: List[Tuple["Peer", str]] = []
+    default_pool_name = pool_items[0][0]
+    for peer in spec.peers:
+        artifact = peer_artifacts[peer.resolved_name]
+        peer_pool_name = peer.pool or default_pool_name
+        comp_index_for_peer = (
+            pool_component_index[peer_pool_name] if is_hetjob else None
+        )
+        cmd = _emit_peer_srun_command(
+            peer=peer,
+            pool_name=peer_pool_name,
+            base_pre_submission_id=pre_submission_id,
+            args_basename=artifact.args_basename,
+            kwargs_basename=artifact.kwargs_basename,
+            callbacks_file=shared_inputs.callbacks_filename,
+            pickled_sys_path=shared_inputs.pickled_sys_path,
+            packaging_strategy=peer_packaging_strategies[peer.resolved_name],
+            component_index=comp_index_for_peer,
+        )
+        peer_commands.append((peer, cmd))
+
+    plan = build_plan(
+        spec=spec,
+        peer_commands=peer_commands,
+        pool_name=default_pool_name if not is_hetjob else None,
+        pre_submission_id=pre_submission_id,
+        pool_component_index=pool_component_index if is_hetjob else None,
+    )
+
+    return PreparedParallelSubmission(
+        plan=plan,
+        representative_task=representative_task,
+        environment_exports=_build_environment_exports_map(
+            target_job_dir,
+            representative_task,
+            packaging_strategy,
+            cluster,
+        ),
+        python_runtime_exports=_build_local_python_runtime_exports(),
+        shared_inputs=shared_inputs,
+        peer_artifacts=peer_artifacts,
+        peer_packaging_strategies=dict(peer_packaging_strategies),
+        unique_packaging_strategies=tuple(unique_strategies),
+        target_job_dir=target_job_dir,
+        pre_submission_id=pre_submission_id,
+    )
+
+
+def render_parallel_local_prep_script(prepared: PreparedParallelSubmission) -> str:
+    """Render the dedicated local-mode prep script.
+
+    This script is intentionally narrower than the full batch script: it only
+    exports the shared environment, changes into ``JOB_DIR``, runs packaging
+    setup, materialises the artifact bundle, and exits. Bootstrap and the
+    supervisor are launched directly from Python afterward.
+    """
+    lines: List[str] = ["#!/bin/bash"]
+    lines.append(
+        f'echo "Target Job Directory (from Python): {prepared.target_job_dir}"'
+    )
+    lines.extend(_emit_export_assignments(prepared.environment_exports))
+    lines.extend(_emit_export_assignments(prepared.python_runtime_exports))
+    lines.append("")
+    lines.extend(_job_directory_setup_lines())
+    lines.append("")
+    for strategy in prepared.unique_packaging_strategies:
+        lines.extend(
+            _emit_packaging_setup(
+                strategy,
+                prepared.representative_task,
+                prepared.pre_submission_id,
+            )
+        )
+    lines.append("")
+    lines.extend(_emit_shared_runner_input_lines(prepared.shared_inputs))
+    lines.append("")
+    for peer_name, artifact in prepared.peer_artifacts.items():
+        lines.extend(_emit_peer_artifact_lines(peer_name, artifact))
+        lines.append("")
+        if artifact.replica_payloads_b64:
+            lines.extend(
+                _emit_replica_artifact_lines(peer_name, artifact.replica_payloads_b64)
+            )
+            lines.append("")
+    lines.extend(_emit_plan_heredoc(prepared.plan))
+    lines.append("")
+    return "\n".join(
+        line.rstrip("\r") for line in "\n".join(lines).splitlines()
+    )
+
+
 def render_parallel_script(
     *,
     spec: "_ParallelSpec",
@@ -604,6 +875,7 @@ def render_parallel_script(
     callbacks: Optional[List[Any]] = None,
     replica_items: Optional[Dict[str, List[Any]]] = None,
     peer_packaging_strategies: Optional[Dict[str, "PackagingStrategy"]] = None,
+    prepared_submission: Optional[PreparedParallelSubmission] = None,
 ) -> str:
     """Render the batch script for a ``parallel(...)`` submission.
 
@@ -644,46 +916,25 @@ def render_parallel_script(
     Returns:
         The rendered bash script as a single string.
     """
-    # Per-peer strategy map — default every peer to the single shared
-    # strategy so callers that do not opt into Phase 10 (e.g. tests) keep
-    # working byte-for-byte.
-    if peer_packaging_strategies is None:
-        peer_packaging_strategies = {
-            peer.resolved_name: packaging_strategy for peer in spec.peers
-        }
-    else:
-        # Belt-and-braces: validation should have caught this, but the
-        # renderer depends on every peer having an entry.
-        missing = [
-            p.resolved_name
-            for p in spec.peers
-            if p.resolved_name not in peer_packaging_strategies
-        ]
-        if missing:
-            raise RuntimeError(
-                "peer_packaging_strategies is missing entries for peer(s): "
-                f"{missing}. Every peer in the spec must have a resolved "
-                "packaging strategy."
-            )
+    prepared = prepared_submission or prepare_parallel_submission(
+        spec=spec,
+        packaging_strategy=packaging_strategy,
+        target_job_dir=target_job_dir,
+        pre_submission_id=pre_submission_id,
+        cluster=cluster,
+        callbacks=callbacks,
+        replica_items=replica_items,
+        peer_packaging_strategies=peer_packaging_strategies,
+    )
     # Pools in declaration order — component 0 is the first pool. Dict
     # insertion order preservation (3.7+) is what lets us use the ordered
     # list directly as the component layout.
     pool_items: List[Tuple[str, "Pool"]] = list(spec.topology.pools.items())
-    pool_component_index: Dict[str, int] = {
-        name: idx for idx, (name, _pool) in enumerate(pool_items)
-    }
-    is_hetjob = len(pool_items) > 1
-
     # We need a representative task_func for helpers that expect one (sbatch
     # directives, packaging setup, environment exports). Prefer the leader,
     # else the first peer. The surface they read (``__name__``, ``__module__``)
     # is homogeneous across peers.
-    representative_peer = next((p for p in spec.peers if p.leader), spec.peers[0])
-    representative_task = (
-        representative_peer.task.task.func
-        if isinstance(representative_peer.task, BoundTask)
-        else representative_peer.task
-    )
+    representative_task = prepared.representative_task
 
     # Build per-component #SBATCH blocks. Component 0 carries the shebang
     # emitted by ``_emit_sbatch_directives``; subsequent components are
@@ -759,95 +1010,40 @@ def render_parallel_script(
     # Peers are iterated in declaration order so setup blocks appear in the
     # order strategies were first encountered — this keeps the rendered
     # script deterministic for golden-file tests.
-    unique_strategies: List["PackagingStrategy"] = []
-    seen_ids: set[int] = set()
-    for peer in spec.peers:
-        strategy = peer_packaging_strategies[peer.resolved_name]
-        if id(strategy) in seen_ids:
-            continue
-        seen_ids.add(id(strategy))
-        unique_strategies.append(strategy)
-
     # Use the representative task as the token handed to each strategy;
     # packaging hooks only read ``__name__``/``__module__`` which are
     # homogeneous across peers in a single parallel() call.
-    for strategy in unique_strategies:
+    for strategy in prepared.unique_packaging_strategies:
         script_lines.extend(
             _emit_packaging_setup(strategy, representative_task, pre_submission_id)
         )
     script_lines.append("")
 
     # Callbacks + sys.path are shared across peers — one heredoc for each.
-    pickled_sys_path, callbacks_lines, callbacks_file = _emit_shared_runner_inputs(
-        callbacks=callbacks or [],
-        pre_submission_id=pre_submission_id,
-    )
-    script_lines.extend(callbacks_lines)
+    script_lines.extend(_emit_shared_runner_input_lines(prepared.shared_inputs))
     script_lines.append("")
 
     # Per-peer arg serialisation — one heredoc pair per peer, plus one
     # per-replica heredoc for replica peers.
-    replica_items = replica_items or {}
-    peer_arg_basenames: Dict[str, Tuple[str, str]] = {}
     for peer in spec.peers:
-        lines, args_basename, kwargs_basename = _emit_peer_arg_heredocs(
-            peer, pre_submission_id
-        )
-        script_lines.extend(lines)
+        artifact = prepared.peer_artifacts[peer.resolved_name]
+        script_lines.extend(_emit_peer_artifact_lines(peer.resolved_name, artifact))
         script_lines.append("")
-        peer_arg_basenames[peer.resolved_name] = (args_basename, kwargs_basename)
-        if peer.is_replica_set:
-            items = replica_items.get(peer.resolved_name)
-            if items is None:
-                raise RuntimeError(
-                    f"Replica peer {peer.resolved_name!r} is missing "
-                    "pre-resolved replica items. The submission pipeline "
-                    "must pass replica_items={name: [...]} for every "
-                    "replica peer."
+        if artifact.replica_payloads_b64:
+            script_lines.extend(
+                _emit_replica_artifact_lines(
+                    peer.resolved_name, artifact.replica_payloads_b64
                 )
-            script_lines.extend(_emit_replica_arg_heredocs(peer, items))
+            )
             script_lines.append("")
 
     script_lines.extend(_emit_python_path_setup())
     script_lines.append("")
 
-    # Build per-peer srun commands. The tuple order follows spec.peers so the
-    # rendered script respects the caller's declaration order. Each peer's
-    # runner command is wrapped by *its own* packaging strategy — peers with
-    # ``packaging="none"`` emit a bare srun while containerised peers
-    # prepend ``srun --container-image=…``.
-    peer_commands: List[Tuple["Peer", str]] = []
-    default_pool_name = pool_items[0][0]
-    for peer in spec.peers:
-        args_basename, kwargs_basename = peer_arg_basenames[peer.resolved_name]
-        peer_pool_name = peer.pool or default_pool_name
-        comp_index_for_peer = (
-            pool_component_index[peer_pool_name] if is_hetjob else None
-        )
-        cmd = _emit_peer_srun_command(
-            peer=peer,
-            pool_name=peer_pool_name,
-            base_pre_submission_id=pre_submission_id,
-            args_basename=args_basename,
-            kwargs_basename=kwargs_basename,
-            callbacks_file=callbacks_file,
-            pickled_sys_path=pickled_sys_path,
-            packaging_strategy=peer_packaging_strategies[peer.resolved_name],
-            component_index=comp_index_for_peer,
-        )
-        peer_commands.append((peer, cmd))
-
     # Serialise the supervisor plan and hand control to the Python
     # bootstrap/supervisor chain. Hetjobs carry the full pool→component
     # mapping so the supervisor can drive per-component scancel.
-    plan = build_plan(
-        spec=spec,
-        peer_commands=peer_commands,
-        pool_name=default_pool_name if not is_hetjob else None,
-        pre_submission_id=pre_submission_id,
-        pool_component_index=pool_component_index if is_hetjob else None,
-    )
-    script_lines.extend(_emit_plan_heredoc(plan))
+    script_lines.extend(_emit_plan_heredoc(prepared.plan))
     script_lines.append("")
     script_lines.extend(_emit_supervisor_invocation())
 
@@ -859,7 +1055,7 @@ def render_parallel_script(
     # down safely. Currently every concrete strategy returns ``[]`` here so
     # this is a no-op in practice, but the scaffolding lets strategies opt
     # in without another rendering change.
-    for strategy in reversed(unique_strategies):
+    for strategy in reversed(prepared.unique_packaging_strategies):
         cleanup = strategy.generate_cleanup_commands(
             task=representative_task,
             job_id=pre_submission_id,
@@ -872,16 +1068,12 @@ def render_parallel_script(
     return "\n".join(line.rstrip("\r") for line in "\n".join(script_lines).splitlines())
 
 
-def _emit_shared_runner_inputs(
+def _build_shared_runner_inputs(
     *,
     callbacks: List[Any],
     pre_submission_id: str,
-) -> Tuple[str, List[str], str]:
-    """Serialize callbacks + sys.path shared across every peer's runner call.
-
-    Returns:
-        ``(pickled_sys_path_b64, script_lines, callbacks_filename)``.
-    """
+) -> SharedRunnerInputs:
+    """Serialize callbacks + sys.path shared across every peer runner."""
     submission_sys_path = [p for p in sys.path if isinstance(p, str) and p]
     repo_root = os.getcwd()
     if repo_root not in submission_sys_path:
@@ -905,16 +1097,28 @@ def _emit_shared_runner_inputs(
                 "Skipping non-picklable callback %s: %s", type(cb).__name__, err
             )
 
-    lines: List[str] = []
+    callbacks_payload_b64 = None
     if picklable_callbacks:
-        pickled_cbs = base64.b64encode(dumps_pickled(picklable_callbacks)).decode()
-        lines.append(f'base64 -d > "{callbacks_filename}" << "BASE64_PARALLEL_CBS"')
-        lines.append(pickled_cbs)
-        lines.append("BASE64_PARALLEL_CBS")
-    else:
-        lines.append(f'touch "{callbacks_filename}"')
+        callbacks_payload_b64 = base64.b64encode(
+            dumps_pickled(picklable_callbacks)
+        ).decode()
 
-    return pickled_sys_path, lines, callbacks_filename
+    return SharedRunnerInputs(
+        pickled_sys_path=pickled_sys_path,
+        callbacks_filename=callbacks_filename,
+        callbacks_payload_b64=callbacks_payload_b64,
+    )
+
+
+def _emit_shared_runner_input_lines(shared_inputs: SharedRunnerInputs) -> List[str]:
+    """Emit shell lines that materialise shared callbacks/sys.path inputs."""
+    if shared_inputs.callbacks_payload_b64:
+        return [
+            f'base64 -d > "{shared_inputs.callbacks_filename}" << "BASE64_PARALLEL_CBS"',
+            shared_inputs.callbacks_payload_b64,
+            "BASE64_PARALLEL_CBS",
+        ]
+    return [f'touch "{shared_inputs.callbacks_filename}"']
 
 
 __all__ = [
