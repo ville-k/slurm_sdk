@@ -255,7 +255,9 @@ class ParallelJob:
         if not peer_jobs:
             return {}
 
-        replica_map = {name: tuple(jobs) for name, jobs in (peer_replica_jobs or {}).items()}
+        replica_map = {
+            name: tuple(jobs) for name, jobs in (peer_replica_jobs or {}).items()
+        }
         handles: Dict[str, _ParallelPeerHandle] = {}
         for name, representative_job in peer_jobs.items():
             handles[name] = _ParallelPeerHandle(
@@ -274,7 +276,8 @@ class ParallelJob:
     def peer_jobs(self) -> Dict[str, "Job"]:
         """Read-only mapping from peer name to per-peer :class:`Job`."""
         return {
-            name: handle.representative_job for name, handle in self._peer_handles.items()
+            name: handle.representative_job
+            for name, handle in self._peer_handles.items()
         }
 
     def __iter__(self):
@@ -374,7 +377,9 @@ class ParallelJob:
         if self._target_job_dir:
             return os.path.join(self._target_job_dir, "registry.json")
         # Fall back to the first peer's job directory.
-        first_job = next(handle.representative_job for handle in self._peer_handles.values())
+        first_job = next(
+            handle.representative_job for handle in self._peer_handles.values()
+        )
         tdir = getattr(first_job, "_target_job_dir", None) or getattr(
             first_job, "target_job_dir", None
         )

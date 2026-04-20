@@ -440,7 +440,9 @@ def _emit_replica_arg_heredocs(
         pre_submission_id="",
         replica_items=replica_items,
     )
-    return _emit_replica_artifact_lines(peer.resolved_name, artifact.replica_payloads_b64)
+    return _emit_replica_artifact_lines(
+        peer.resolved_name, artifact.replica_payloads_b64
+    )
 
 
 def _emit_peer_srun_command(
@@ -768,7 +770,9 @@ def prepare_parallel_submission(
         artifact = _build_peer_artifact_bundle(
             peer,
             pre_submission_id=pre_submission_id,
-            replica_items=replica_items.get(peer.resolved_name) if peer.is_replica_set else None,
+            replica_items=replica_items.get(peer.resolved_name)
+            if peer.is_replica_set
+            else None,
         )
         peer_artifacts[peer.resolved_name] = artifact
 
@@ -858,9 +862,7 @@ def render_parallel_local_prep_script(prepared: PreparedParallelSubmission) -> s
             lines.append("")
     lines.extend(_emit_plan_heredoc(prepared.plan))
     lines.append("")
-    return "\n".join(
-        line.rstrip("\r") for line in "\n".join(lines).splitlines()
-    )
+    return "\n".join(line.rstrip("\r") for line in "\n".join(lines).splitlines())
 
 
 def render_parallel_script(

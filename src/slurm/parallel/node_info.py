@@ -176,7 +176,9 @@ def _load_nodes_from_path(path: Path, current_pool: Optional[str] = None) -> Nod
 
     nodes_section = registry.get("nodes") or {}
     derive_node_peers = "peers" in registry
-    peer_membership = _derive_node_peer_membership(registry) if derive_node_peers else {}
+    peer_membership = (
+        _derive_node_peer_membership(registry) if derive_node_peers else {}
+    )
     infos = []
     for entry in nodes_section.values():
         materialized = dict(entry)
@@ -190,7 +192,9 @@ def _load_nodes_from_path(path: Path, current_pool: Optional[str] = None) -> Nod
     return NodeGroup(_nodes=infos, _path=path, current_pool=current_pool)
 
 
-def _derive_node_peer_membership(registry: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
+def _derive_node_peer_membership(
+    registry: Mapping[str, object],
+) -> dict[str, tuple[str, ...]]:
     """Return ``hostname -> peer names`` derived from peer runtime placement.
 
     The registry keeps a ``nodes[*].peers`` list for compatibility and for
