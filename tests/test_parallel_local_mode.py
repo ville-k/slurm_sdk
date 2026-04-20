@@ -13,6 +13,7 @@ these tests deterministically, so they set
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -234,6 +235,33 @@ def test_local_parallel_prep_materializes_artifacts(local_cluster):
     ]
     for path in expected_files:
         assert os.path.exists(path), f"missing local parallel prep artifact: {path}"
+
+
+def test_local_parallel_prep_materializes_replica_payloads(local_cluster):
+    """Replica peers write one prepared args pickle per replica index."""
+    from slurm._serialization import loads_pickled
+
+    with local_cluster:
+        job = parallel(
+            Peer.replicas(
+                _return_replica_marker,
+                count=3,
+                args=[{"worker_id": i} for i in range(3)],
+                name="workers",
+            ),
+        )
+        assert job.wait(timeout=60)
+        assert job.get_results()["workers"] == ["replica-0", "replica-1", "replica-2"]
+
+    worker_jobs = job["workers"]
+    job_dir = Path(worker_jobs[0].target_job_dir)
+
+    assert loads_pickled((job_dir / "peer_workers_args.pkl").read_bytes()) == ()
+    assert loads_pickled((job_dir / "peer_workers_kwargs.pkl").read_bytes()) == {}
+
+    for idx in range(3):
+        payload = loads_pickled((job_dir / f"peer_workers_{idx}_args.pkl").read_bytes())
+        assert payload == {"worker_id": idx}
 
 
 def test_extract_runner_argv_strips_srun_prefix():
