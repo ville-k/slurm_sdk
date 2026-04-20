@@ -170,6 +170,9 @@ class _ParallelPeerHandle:
     """Internal owner of one peer's representative and replica jobs."""
 
     name: str
+    # The sole callback/poller target for this peer. Moving lifecycle hooks off
+    # this Job without updating submission wiring reintroduces duplicate
+    # CompletedContext events for one shared allocation.
     representative_job: "Job"
     replica_jobs: Tuple["Job", ...] = ()
 
