@@ -28,7 +28,7 @@ import shutil
 import subprocess  # nosec B404 - used to probe optional tooling (nvidia-smi)
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from ..errors import TopologyError
 from .registry import _RESERVED_ANNOUNCE_KEYS

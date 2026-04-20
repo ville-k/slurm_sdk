@@ -183,12 +183,16 @@ def _emit_environment_exports(
     """Emit shell export lines for JOB_DIR, Slurmfile path, packaging config, etc."""
     lines: List[str] = []
     lines.append(f'echo "Target Job Directory (from Python): {target_job_dir}"')
-    lines.extend(_emit_export_assignments(_build_environment_exports_map(
-        target_job_dir,
-        task_func,
-        packaging_strategy,
-        cluster,
-    )))
+    lines.extend(
+        _emit_export_assignments(
+            _build_environment_exports_map(
+                target_job_dir,
+                task_func,
+                packaging_strategy,
+                cluster,
+            )
+        )
+    )
     return lines
 
 

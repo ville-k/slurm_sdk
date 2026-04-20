@@ -122,9 +122,8 @@ def resolve_current_hostname(
     :attr:`JobContext.node` so both surfaces agree on the hostname key used
     inside ``registry.json``.
     """
-    if (
-        job_context.node_rank is not None
-        and 0 <= job_context.node_rank < len(job_context.hostnames)
+    if job_context.node_rank is not None and 0 <= job_context.node_rank < len(
+        job_context.hostnames
     ):
         hostname = job_context.hostnames[job_context.node_rank]
         if hostname:
