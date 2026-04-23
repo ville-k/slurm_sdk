@@ -129,6 +129,23 @@ def parallel_leader_task() -> int:
     return 42
 
 
+@task(time="00:03:00", mem="100M")
+def parallel_long_lived_sidecar_task() -> str:
+    """Sleep long enough that a leader-exit cascade is observable.
+
+    Paired with ``parallel_leader_task`` in the cascade test: if the
+    supervisor's ``leader=True`` shutdown signal is broken, the sidecar
+    runs to natural completion and the allocation's elapsed time pokes
+    past this sleep. The ``on_failure="continue"`` policy on the peer
+    means a SIGTERM-driven exit still registers as a
+    ``shutdown_by_leader`` outcome rather than aborting the group.
+    """
+    import time
+
+    time.sleep(120)
+    return "side-ran-to-completion"
+
+
 @task(time="00:01:00", mem="100M")
 def parallel_pool_identity_task(pool: str) -> dict:
     """Hetjob test helper — return pool name + env tag from the scheduler."""
@@ -222,6 +239,21 @@ def parallel_flaky_peer_task(ctx: JobContext) -> int:
 def parallel_upstream_token() -> str:
     """Produce a token used as proof of an upstream dependency running first."""
     return "upstream-token"
+
+
+@task(time="00:02:00", mem="100M")
+def parallel_slow_upstream_task() -> str:
+    """Upstream that runs long enough to observe downstream in a dep-gated state.
+
+    The dependency integration test submits this task, then submits a
+    downstream ``parallel(...).after(upstream)`` and queries
+    ``scontrol show job`` while this is still running. The sleep gives
+    headroom for scheduler latency between the resubmit and the query.
+    """
+    import time
+
+    time.sleep(20)
+    return "slow-upstream-token"
 
 
 @task(time="00:01:00", mem="100M")

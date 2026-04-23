@@ -827,13 +827,14 @@ class ParallelJob:
     def cancel(self) -> bool:
         """Cancel the allocation via ``scancel``.
 
-        Single-pool submissions share one Slurm job id so one ``scancel``
-        tears the whole allocation down. Hetjob submissions address each
-        component by a distinct suffixed id (``<base>``, ``<base>+1``,
-        ``<base>+2``, …) and cancelling only the base leaves later
-        components pending forever. We iterate every peer's Job id —
-        duplicates are collapsed to one cancel per unique id — and return
-        ``True`` iff every cancellation succeeded.
+        Every peer Job — single-pool or hetjob — is constructed with the
+        allocation's shared base Slurm id (hetjob components are
+        addressable individually as ``<base>+N``, but ``scancel <base>``
+        resolves to the entire hetjob in Slurm). We iterate every peer
+        handle's Job ids, collapse duplicates, and call ``scancel``
+        once per unique id — in practice one call per submission
+        regardless of pool count. Returns ``True`` iff every
+        cancellation succeeded.
 
         In-flight allocations where the supervisor is already running
         also get the cascade from inside the batch script; calling
