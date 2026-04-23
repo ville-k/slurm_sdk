@@ -170,7 +170,9 @@ def parallel_coordinator_task(ctx: JobContext) -> dict:
     the scheduler-agnostic surface we care about.
     """
     port = ctx.my_ports["rpc"]
-    endpoint = f"tcp://{ctx.node.hostname}:{port}" if ctx.node else f"tcp://local:{port}"
+    endpoint = (
+        f"tcp://{ctx.node.hostname}:{port}" if ctx.node else f"tcp://local:{port}"
+    )
     ctx.announce(ready=True, endpoint=endpoint, role="coordinator")
     return {"endpoint": endpoint, "port": port}
 

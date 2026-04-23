@@ -427,8 +427,13 @@ class ParallelJob:
         # Remote backend — the registry lives on the cluster's filesystem.
         # Stage it into a tempfile and parse locally. ``download_file`` is
         # the one backend surface guaranteed to work for both SSH and
-        # (future) other remote transports.
+        # (future) other remote transports. ``backend`` was already
+        # non-None above (is_remote returned True), but ty can't narrow
+        # through the try/except, so guard explicitly.
         import tempfile
+
+        if backend is None:  # pragma: no cover - ty narrowing guard
+            return {}
 
         try:
             with tempfile.NamedTemporaryFile(

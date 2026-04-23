@@ -26,7 +26,6 @@ from __future__ import annotations
 import pytest
 
 from slurm import Peer, Pool, Topology, parallel
-from slurm.errors import CompositeJobError
 from slurm.examples.integration_test_task import (
     parallel_coordinator_task,
     parallel_downstream_peer_task,
