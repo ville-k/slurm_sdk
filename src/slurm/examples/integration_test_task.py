@@ -260,3 +260,63 @@ def parallel_slow_upstream_task() -> str:
 def parallel_downstream_peer_task() -> str:
     """Downstream peer — just proves ``parallel(...).after(upstream)`` ran."""
     return "downstream-ok"
+
+
+# ---------------------------------------------------------------------------
+# Multi-node parallel(...) integration tasks.
+# ---------------------------------------------------------------------------
+
+
+@task(time="00:02:00", mem="100M")
+def parallel_hostname_identity_task(ctx: JobContext) -> dict:
+    """Return the peer's hostname + its own identity from the registry.
+
+    Used by the multi-node hetjob / node-pinning / colocate_with tests to
+    prove each peer landed on the hostname the test expected.
+    """
+    import socket
+
+    return {
+        "hostname": socket.gethostname(),
+        "peer_name": ctx.peer_name,
+        "node_hostname": ctx.node.hostname if ctx.node else None,
+    }
+
+
+@task(time="00:02:00", mem="100M")
+def parallel_cross_node_worker_task(ctx: JobContext) -> dict:
+    """Worker flavour for the cross-node service-discovery test.
+
+    Waits for the coordinator's ``endpoint`` announce, then returns both
+    the worker's own hostname and the coordinator's announced hostname so
+    the test can assert they differ — i.e. the allocation and registry
+    publish actually spanned two nodes.
+    """
+    import socket
+
+    ctx.peers["coordinator"].wait_all(keys=["endpoint"], timeout=120)
+    coord = ctx.peers["coordinator"].first
+    return {
+        "worker_hostname": socket.gethostname(),
+        "observed_coord_hostname": coord.hostname,
+        "observed_coord_endpoint": coord.metadata.get("endpoint"),
+    }
+
+
+@task(time="00:02:00", mem="100M")
+def parallel_multi_node_task() -> dict:
+    """Return scheduler-populated multi-node env for the spans-two-nodes test.
+
+    The outer pool (``Pool(nodes=2)``) makes ``sbatch`` reserve a 2-node
+    allocation. Inside a ``srun`` step, ``SLURM_JOB_NUM_NODES`` still
+    reflects the allocation's node count even when the step itself only
+    dispatched to one of them; ``SLURM_JOB_NODELIST`` enumerates both.
+    """
+    import os
+
+    return {
+        "job_nodelist": os.environ.get("SLURM_JOB_NODELIST"),
+        "job_num_nodes": os.environ.get("SLURM_JOB_NUM_NODES"),
+        "step_nodes": os.environ.get("SLURM_STEP_NUM_NODES")
+        or os.environ.get("SLURM_NNODES"),
+    }
