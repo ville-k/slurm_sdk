@@ -128,7 +128,9 @@ jobs:
       - name: Build documentation
         run: uv run mkdocs build --strict
 
-  # Integration tests run only after all fast checks pass
+  # Integration tests run only after all fast checks pass. Hosts two Slurm
+  # containers (controller + worker) plus a registry and the dev container —
+  # if the default 7 GB runner tier OOMs, bump to `ubuntu-latest-8-cores`.
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
@@ -160,7 +162,10 @@ jobs:
             -f containers/slurm-pyxis-integration/Containerfile \
             containers/slurm-pyxis-integration/
 
-      - name: Start Slurm container
+      - name: Create shared Slurm home volume
+        run: docker volume create slurm-test-home
+
+      - name: Start Slurm controller container
         run: |
           docker run -d \
             --name slurm-test \
@@ -169,8 +174,10 @@ jobs:
             --cgroupns=host \
             --network slurm-dev-network \
             --network-alias slurm \
+            --network-alias slurm-control \
             -p 2222:22 \
             -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v slurm-test-home:/home/slurm \
             slurm-integration:latest \
             /sbin/init
 
@@ -178,6 +185,26 @@ jobs:
           sleep 5
           docker exec slurm-test mkdir -p /sys/fs/cgroup/system.slice/slurm-control_slurmstepd.scope/system || true
           docker exec slurm-test chown -R slurm:slurm /sys/fs/cgroup/system.slice/slurm-control_slurmstepd.scope || true
+
+      - name: Start Slurm worker container
+        run: |
+          docker run -d \
+            --name slurm-worker \
+            --hostname slurm-worker \
+            --privileged \
+            --cgroupns=host \
+            --network slurm-dev-network \
+            --network-alias slurm-worker \
+            -e SLURM_ROLE=worker \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v slurm-test-home:/home/slurm \
+            slurm-integration:latest \
+            /sbin/init
+
+          # Pre-create cgroup directories for slurmd stepd scope
+          sleep 5
+          docker exec slurm-worker mkdir -p /sys/fs/cgroup/system.slice/slurm-worker_slurmstepd.scope/system || true
+          docker exec slurm-worker chown -R slurm:slurm /sys/fs/cgroup/system.slice/slurm-worker_slurmstepd.scope || true
 
       - name: Wait for Slurm services
         run: |
@@ -234,22 +261,49 @@ jobs:
           echo "=== Container status ==="
           docker ps -a
 
-          echo ""
-          echo "=== Slurm node state ==="
-          # Wait for node to be in IDLE state
-          echo -n "Waiting for node to be IDLE..."
+          # Wait for slurmd on the worker too (runs under SLURM_ROLE=worker).
+          echo -n "Waiting for slurmd on slurm-worker..."
           for i in $(seq 1 60); do
-            state=$(docker exec slurm-test sinfo -h -o "%T" 2>/dev/null || echo "unknown")
-            if [ "$state" = "idle" ]; then
-              echo " ready (state: $state)"
+            if docker exec slurm-worker systemctl is-active slurmd >/dev/null 2>&1; then
+              echo " ready"
               break
             fi
             if [ $i -eq 60 ]; then
-              echo " TIMEOUT (state: $state)"
+              echo " TIMEOUT"
+              docker exec slurm-worker systemctl status slurmd || true
+              docker exec slurm-worker journalctl -u slurmd --no-pager -n 50 || true
+            fi
+            echo -n "."
+            sleep 1
+          done
+
+          echo ""
+          echo "=== Slurm node states ==="
+          # Wait for every node reported by sinfo to reach IDLE. Single-node
+          # setups see 1 line; two-node setups see 2.
+          echo -n "Waiting for all nodes to be IDLE..."
+          for i in $(seq 1 60); do
+            # Collect states; require every line to be 'idle' and at least one present.
+            mapfile -t states < <(docker exec slurm-test sinfo -h -o "%T" 2>/dev/null || true)
+            all_idle="yes"
+            if [ ${#states[@]} -eq 0 ]; then
+              all_idle="no"
+            fi
+            for s in "${states[@]}"; do
+              [ "$s" = "idle" ] || all_idle="no"
+            done
+            if [ "$all_idle" = "yes" ]; then
+              echo " ready (${#states[@]} node(s): ${states[*]})"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo " TIMEOUT (states: ${states[*]:-none})"
               echo "=== sinfo output ==="
               docker exec slurm-test sinfo || true
               echo "=== scontrol show node ==="
               docker exec slurm-test scontrol show node || true
+              echo "=== slurmd journal on worker ==="
+              docker exec slurm-worker journalctl -u slurmd --no-pager -n 100 || true
             fi
             echo -n "."
             sleep 2
@@ -311,8 +365,11 @@ jobs:
       - name: Show container logs on failure
         if: failure()
         run: |
-          echo "=== Slurm container logs ==="
+          echo "=== Slurm controller container logs ==="
           docker logs slurm-test 2>&1 | tail -100 || true
+          echo ""
+          echo "=== Slurm worker container logs ==="
+          docker logs slurm-worker 2>&1 | tail -100 || true
           echo ""
           echo "=== Registry container logs ==="
           docker logs slurm-test-registry 2>&1 | tail -50 || true
@@ -320,6 +377,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker stop slurm-test slurm-test-registry 2>/dev/null || true
-          docker rm slurm-test slurm-test-registry 2>/dev/null || true
+          docker stop slurm-test slurm-worker slurm-test-registry 2>/dev/null || true
+          docker rm slurm-test slurm-worker slurm-test-registry 2>/dev/null || true
+          docker volume rm slurm-test-home 2>/dev/null || true
           docker network rm slurm-dev-network 2>/dev/null || true

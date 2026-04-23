@@ -71,6 +71,7 @@ addopts = [
 markers = [
     "integration_test: marks tests as integration tests",
     "slow_integration_test: marks tests as slow integration tests",
+    "integration_test_multi_node: marks tests that require a 2+ node Slurm cluster",
     "container_runtime: marks tests that run containers using prebuilt images",
     "container_build: marks tests that build containers from Dockerfiles",
 ]
