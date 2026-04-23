@@ -132,3 +132,122 @@ def multi_node_identity_task() -> dict:
         "nodelist": os.environ.get("SLURM_JOB_NODELIST"),
         "nnodes": os.environ.get("SLURM_JOB_NUM_NODES"),
     }
+
+
+# ---------------------------------------------------------------------------
+# parallel(...) integration tasks
+#
+# Tasks used by tests/integration/test_parallel_end_to_end.py. They live here
+# (not in tests/) because remote peer processes import them by module name.
+# ---------------------------------------------------------------------------
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_named_peer_task(name: str) -> str:
+    """Return ``"peer:<name>"`` — minimal round-trip identity."""
+    return f"peer:{name}"
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_leader_task() -> int:
+    """Deterministic leader result for leader+sidecar integration tests."""
+    return 42
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_pool_identity_task(pool: str) -> dict:
+    """Hetjob test helper — return pool name + env tag from the scheduler."""
+    import os
+
+    return {
+        "pool": pool,
+        "het_group": os.environ.get("SLURM_JOB_HET_GROUP"),
+        "job_id": os.environ.get("SLURM_JOB_ID"),
+    }
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_replica_identity_task(ctx: JobContext) -> dict:
+    """Return per-replica scheduler-populated identity — SLURM_PROCID etc.
+
+    Used to prove the runner sees a real Slurm-populated environment for
+    ``:by-taskid`` dispatch (not a synthesized one) and that the
+    per-replica result file picks up PROCID correctly.
+    """
+    import os
+    import socket
+
+    return {
+        "replica_index": ctx.replica_index,
+        "replica_count": ctx.replica_count,
+        "procid": os.environ.get("SLURM_PROCID"),
+        "ntasks": os.environ.get("SLURM_NTASKS"),
+        "hostname": socket.gethostname(),
+    }
+
+
+@task(time="00:02:00", mem="100M", ports={"rpc": "auto"})
+def parallel_coordinator_task(ctx: JobContext) -> dict:
+    """Coordinator — announces its endpoint, then exits.
+
+    Mirrors the service-discovery how-to recipe. For the integration test
+    we don't need to actually serve traffic; the ``announce()`` itself is
+    the scheduler-agnostic surface we care about.
+    """
+    port = ctx.my_ports["rpc"]
+    endpoint = f"tcp://{ctx.node.hostname}:{port}" if ctx.node else f"tcp://local:{port}"
+    ctx.announce(ready=True, endpoint=endpoint, role="coordinator")
+    return {"endpoint": endpoint, "port": port}
+
+
+@task(time="00:02:00", mem="100M")
+def parallel_worker_task(ctx: JobContext) -> dict:
+    """Worker — blocks on the coordinator's ``endpoint`` via ``wait_all``.
+
+    Proves bootstrap has written the registry, the coordinator's runner has
+    published its hostname, and ``wait_all(keys=["endpoint"])`` can pick
+    up an announced metadata key from a sibling peer running under real
+    Slurm.
+    """
+    ctx.peers["coordinator"].wait_all(keys=["endpoint"], timeout=60)
+    coord = ctx.peers["coordinator"].first
+    return {
+        "observed_endpoint": coord.metadata.get("endpoint"),
+        "observed_role": coord.metadata.get("role"),
+        "coordinator_state": coord.state,
+        "coordinator_hostname": coord.hostname,
+    }
+
+
+@task(time="00:02:00", mem="100M")
+def parallel_flaky_peer_task(ctx: JobContext) -> int:
+    """Fail once, then succeed — exercises supervisor restart under real Slurm.
+
+    Uses ``ctx.shared_dir`` as persistent state across the restart (both
+    invocations share the allocation). First call writes the marker and
+    exits non-zero; second call sees the marker and returns the restart
+    count that observed it.
+    """
+    import sys
+
+    if ctx.shared_dir is None:
+        raise RuntimeError("ctx.shared_dir is not set — bootstrap did not seed it")
+    marker = ctx.shared_dir / "flaky_marker"
+    if not marker.exists():
+        marker.write_text("first-attempt")
+        sys.exit(7)
+    # Restart observed the marker → succeed. Return a small dict mirroring
+    # what the test will assert against.
+    return 99
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_upstream_token() -> str:
+    """Produce a token used as proof of an upstream dependency running first."""
+    return "upstream-token"
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_downstream_peer_task() -> str:
+    """Downstream peer — just proves ``parallel(...).after(upstream)`` ran."""
+    return "downstream-ok"
