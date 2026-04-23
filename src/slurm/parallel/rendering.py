@@ -223,9 +223,7 @@ def _sbatch_params_from_pool(
     # (peers run concurrently inside the allocation).
     resolved_pool_name = pool_name or spec.topology.default_pool
     peer_ntasks_total = sum(
-        max(1, peer.count)
-        for peer in spec.peers
-        if peer.pool == resolved_pool_name
+        max(1, peer.count) for peer in spec.peers if peer.pool == resolved_pool_name
     )
     if peer_ntasks_total > 0:
         existing_ntasks = params.get("ntasks")
