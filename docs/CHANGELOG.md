@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Two-node integration test cluster for `parallel(...)` coverage —
+  `containers/docker-compose.yml` now runs a second `slurm-worker`
+  container (slurmctld masked via `SLURM_ROLE=worker`) sharing the same
+  munge key and `slurm-home` volume as the controller. A new
+  `multi_node_cluster` pytest fixture skips cleanly on single-node dev
+  setups and gates five new end-to-end tests
+  (`tests/integration/test_parallel_multi_node.py`) that prove hetjob
+  scheduling across nodes, cross-node service discovery, named-node
+  pinning, `colocate_with` host sharing, and multi-node srun step
+  dispatch. CI runs on default `ubuntu-latest`; documented
+  `ubuntu-latest-8-cores` escape hatch if the default tier OOMs
 - Documentation suite for `parallel(...)` following the Diataxis framework:
   a tutorial (`Your first multi-peer job`), four how-to guides (add
   sidecars, deploy a heterogeneous topology, run replica sets, discover
