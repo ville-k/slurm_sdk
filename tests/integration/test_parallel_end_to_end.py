@@ -31,10 +31,10 @@ from slurm.examples.integration_test_task import (
     parallel_downstream_peer_task,
     parallel_flaky_peer_task,
     parallel_leader_task,
-    parallel_named_peer_task,
+    parallel_long_lived_sidecar_task,
     parallel_pool_identity_task,
     parallel_replica_identity_task,
-    parallel_upstream_token,
+    parallel_slow_upstream_task,
     parallel_worker_task,
     simple_integration_task,
 )
@@ -48,25 +48,56 @@ from slurm.examples.integration_test_task import (
 @pytest.mark.integration_test
 @pytest.mark.slow_integration_test
 def test_two_peer_leader_sidecar(slurm_cluster):
-    """Smallest real-Slurm round-trip: leader + sidecar.
+    """Leader exit cascades SIGTERM to a long-lived sidecar under real Slurm.
 
-    Proves that ``parallel(Peer(leader=True), Peer(on_failure="continue"))``
-    survives an actual ``sbatch`` submission, both peers run, and
-    ``job.leader_result`` returns the leader's value. Cascade-on-leader-exit
-    is observable indirectly: the sidecar sleeps long enough that if the
-    cascade were broken it would outlive the allocation.
+    Proves the ``leader=True`` shutdown semantic end-to-end:
+
+    - The leader returns quickly (~1s body) and exits 0.
+    - The sidecar sleeps 120s so its natural runtime is never reached —
+      only a broken cascade would let the allocation outlive the leader
+      by that long.
+    - After ``job.wait()`` the sidecar's ``peer_outcomes()`` status is
+      ``"shutdown_by_leader"``, the terminal string the supervisor
+      writes when it SIGTERMs a peer on leader exit (see
+      ``OUTCOME_SHUTDOWN_BY_LEADER`` in ``topology_supervisor``).
+    - The wall-clock elapsed time stays well under the sidecar's 120s
+      sleep — a belt-and-braces check that catches the case where the
+      supervisor records the right outcome but the process hung around.
+
+    If the cascade is removed the elapsed assertion fires first and the
+    outcome assertion fails second.
     """
+    import time
+
     with slurm_cluster:
+        started = time.monotonic()
         job = parallel(
             Peer(parallel_leader_task, leader=True, name="leader"),
             Peer(
-                parallel_named_peer_task.partial(name="side"),
+                parallel_long_lived_sidecar_task,
                 on_failure="continue",
                 name="side",
             ),
         )
         assert job.wait(timeout=180)
-        assert job.leader_result == 42
+        elapsed = time.monotonic() - started
+        outcomes = job.peer_outcomes()
+        leader_result = job.leader_result
+
+    assert leader_result == 42
+
+    side_outcome = outcomes["side"]
+    assert side_outcome.status == "shutdown_by_leader", (
+        f"expected side.status='shutdown_by_leader' (leader-driven cascade); "
+        f"got {side_outcome!r}"
+    )
+    # The sidecar sleeps 120s; leader exits ~immediately. Real-Slurm
+    # scheduling latency on the test cluster is a few seconds. An elapsed
+    # much closer to 120s means the sidecar ran to natural completion.
+    assert elapsed < 90, (
+        f"elapsed={elapsed:.1f}s is too close to the sidecar's 120s sleep — "
+        "leader-exit cascade may be broken"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -295,25 +326,64 @@ def test_restart_under_real_slurm(slurm_cluster):
 @pytest.mark.integration_test
 @pytest.mark.slow_integration_test
 def test_parallel_after_upstream_dependency(slurm_cluster):
-    """``parallel(...).after(upstream)`` wires ``--dependency=afterok:`` correctly.
+    """``parallel(...).after(upstream)`` holds the allocation PENDING on the dep.
 
-    Submits an upstream single-task job, waits for it to finish, then
-    submits a ``parallel(...)`` that declares ``.after(upstream)`` so
-    Slurm must honour the ``afterok`` dependency before it starts the
-    parallel allocation. The downstream peer simply exits cleanly; the
-    signal is that ``wait()`` returns successfully and both jobs
-    completed.
+    The prior form waited for upstream to finish before submitting
+    downstream, which only proved wait() returned — the dependency
+    string could have been dropped silently and the test still passed.
+    This form submits downstream while upstream is still running, then
+    queries ``scontrol show job`` on the downstream allocation directly
+    and asserts:
+
+    - ``Dependency=afterok:<upstream_id>`` is present in the output,
+      proving the SDK wired the dep onto every hetjob component.
+    - ``JobState=PENDING`` + ``Reason=Dependency``, proving Slurm
+      honoured it.
+
+    If the ``--dependency=afterok:`` wiring is removed, the scontrol
+    output won't carry the Dependency substring and the test fails on
+    the first assertion — this is the point of the rework.
     """
     with slurm_cluster:
-        upstream = parallel_upstream_token()
-        assert upstream.wait(timeout=120)
-        assert upstream.get_result() == "upstream-token"
+        upstream = parallel_slow_upstream_task()
+        upstream_id = upstream.id
+        assert upstream_id, "upstream did not receive a Slurm job id"
 
         downstream = parallel(
             Peer(parallel_downstream_peer_task, name="tail"),
         ).after(upstream)
+        dep_id = downstream.job_id
+        assert dep_id, "downstream did not receive a Slurm job id"
 
-        assert downstream.wait(timeout=240)
+        # Query Slurm's view of the downstream job while upstream is
+        # still running. The 20s sleep on upstream plus the few seconds
+        # between .after()-resubmit and this scontrol call leaves plenty
+        # of observation window.
+        result = slurm_cluster.backend._run_command(
+            f"scontrol show job {dep_id}", timeout=10
+        )
+        scontrol_out = result[0] if isinstance(result, tuple) else str(result)
+
+        assert f"Dependency=afterok:{upstream_id}" in scontrol_out, (
+            f"scontrol show job {dep_id} did not report "
+            f"Dependency=afterok:{upstream_id} — the afterok wiring did "
+            f"not propagate to the resubmitted allocation. Output:\n"
+            f"{scontrol_out[:800]}"
+        )
+        assert "JobState=PENDING" in scontrol_out, (
+            f"downstream job {dep_id} is not PENDING — dependency "
+            f"did not hold it. Output:\n{scontrol_out[:800]}"
+        )
+        assert "Reason=Dependency" in scontrol_out, (
+            f"downstream job {dep_id} PENDING but not held by Dependency "
+            f"reason — state was held by something else. Output:\n"
+            f"{scontrol_out[:800]}"
+        )
+
+        # Dependency satisfied → both jobs complete normally.
+        assert upstream.wait(timeout=120)
+        assert upstream.get_result() == "slow-upstream-token"
+        assert downstream.wait(timeout=300)
         assert downstream.get_results()["tail"] == "downstream-ok"
 
 
