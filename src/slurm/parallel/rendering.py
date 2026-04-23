@@ -150,6 +150,8 @@ def _sbatch_params_from_pool(
     spec: "_ParallelSpec",
     task_defaults: Dict[str, Any],
     sbatch_overrides: Dict[str, Any],
+    *,
+    pool_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the ``#SBATCH`` parameter dict for a single-pool allocation.
 
@@ -211,6 +213,24 @@ def _sbatch_params_from_pool(
         params["reservation"] = spec.reservation
     if spec.network is not None and "network" not in params:
         params["network"] = spec.network
+
+    # Outer allocation must declare enough ``ntasks`` for every peer's
+    # ``srun --ntasks=<peer.count>`` step to fit. Without this the
+    # supervisor's srun inside the allocation gets rejected with
+    # "More processors requested than permitted" — Slurm tracks per-step
+    # task budgets against the parent allocation's ntasks. Sum across every
+    # peer targeting this pool gives the densest-packing upper bound
+    # (peers run concurrently inside the allocation).
+    resolved_pool_name = pool_name or spec.topology.default_pool
+    peer_ntasks_total = sum(
+        max(1, peer.count)
+        for peer in spec.peers
+        if peer.pool == resolved_pool_name
+    )
+    if peer_ntasks_total > 0:
+        existing_ntasks = params.get("ntasks")
+        if existing_ntasks is None or int(existing_ntasks) < peer_ntasks_total:
+            params["ntasks"] = peer_ntasks_total
 
     params.update(sbatch_overrides)
     return params
@@ -944,7 +964,7 @@ def render_parallel_script(
     script_lines: List[str] = []
     for comp_index, (pool_name, pool) in enumerate(pool_items):
         component_params = _sbatch_params_from_pool(
-            pool, spec, task_defaults, sbatch_overrides
+            pool, spec, task_defaults, sbatch_overrides, pool_name=pool_name
         )
         # "cpus_per_node" is a Pool concept; flatten to cpus_per_task so the
         # shared sbatch emitter handles it without special-casing.

@@ -17,6 +17,7 @@ now raises :class:`CompositeJobError` aggregating every fatal peer's
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union
@@ -31,6 +32,8 @@ from .parallel.registry import (
     OUTCOME_SUCCESS,
     read_registry,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .array_job import ArrayJob
@@ -390,6 +393,66 @@ class ParallelJob:
             return None
         return os.path.join(tdir, "registry.json")
 
+    def _read_registry_via_backend(self) -> Dict[str, Any]:
+        """Load ``registry.json`` for this allocation, local or remote.
+
+        Local-mode submissions keep the registry on the same filesystem as
+        the client, so a bare ``os.path.exists`` + ``read_registry`` does
+        the right thing. SSH-backed clusters put it on the remote host;
+        the client must go through the backend (``download_file`` or
+        ``read_file``) to see it. Returns an empty dict on any read
+        failure — callers treat "no registry" as "every peer is
+        ``not_started``" which is the honest pre-run / mid-run answer.
+        """
+        reg_path = self._registry_path()
+        if not reg_path:
+            return {}
+
+        backend = getattr(self.cluster, "backend", None) if self.cluster else None
+        is_remote = False
+        if backend is not None:
+            try:
+                is_remote = bool(backend.is_remote())
+            except Exception:  # pragma: no cover - defensive
+                is_remote = False
+
+        if not is_remote:
+            if os.path.exists(reg_path):
+                try:
+                    return read_registry(reg_path)
+                except (OSError, ValueError):
+                    return {}
+            return {}
+
+        # Remote backend — the registry lives on the cluster's filesystem.
+        # Stage it into a tempfile and parse locally. ``download_file`` is
+        # the one backend surface guaranteed to work for both SSH and
+        # (future) other remote transports.
+        import tempfile
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix="_registry.json", delete=False
+            ) as tmp:
+                local_path = tmp.name
+            try:
+                backend.download_file(reg_path, local_path)
+                return read_registry(local_path)
+            finally:
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
+        except (OSError, ValueError, FileNotFoundError):
+            return {}
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "peer_outcomes() could not download registry from %s: %s",
+                reg_path,
+                exc,
+            )
+            return {}
+
     def peer_outcomes(self) -> Dict[str, PeerOutcome]:
         """Return ``{peer_name: PeerOutcome}`` for every peer in the job.
 
@@ -411,13 +474,7 @@ class ParallelJob:
             replica of every replica peer, using ``<name>[<i>]`` keys for
             replicas.
         """
-        registry: Dict[str, Any] = {}
-        reg_path = self._registry_path()
-        if reg_path and os.path.exists(reg_path):
-            try:
-                registry = read_registry(reg_path)
-            except (OSError, ValueError):
-                registry = {}
+        registry: Dict[str, Any] = self._read_registry_via_backend()
 
         peers_section = registry.get("peers", {})
         outcomes: Dict[str, PeerOutcome] = {}
@@ -765,16 +822,34 @@ class ParallelJob:
     def cancel(self) -> bool:
         """Cancel the allocation via ``scancel``.
 
-        Every peer shares the same Slurm job id, so one scancel tears the
-        whole allocation down. Returns ``True`` on a successful
-        cancellation command, ``False`` if the backend reported a
-        failure.
+        Single-pool submissions share one Slurm job id so one ``scancel``
+        tears the whole allocation down. Hetjob submissions address each
+        component by a distinct suffixed id (``<base>``, ``<base>+1``,
+        ``<base>+2``, …) and cancelling only the base leaves later
+        components pending forever. We iterate every peer's Job id —
+        duplicates are collapsed to one cancel per unique id — and return
+        ``True`` iff every cancellation succeeded.
+
+        In-flight allocations where the supervisor is already running
+        also get the cascade from inside the batch script; calling
+        ``cancel()`` before the supervisor starts is the more common
+        path (e.g. ``ParallelJob.after(...)`` re-submits with a
+        dependency and cancels the original).
         """
-        # All peers share one job id; just call cancel on the first Job.
-        first_job = next(
-            handle.representative_job for handle in self._peer_handles.values()
-        )
-        return first_job.cancel()
+        seen_ids: set = set()
+        results: List[bool] = []
+        for handle in self._peer_handles.values():
+            for job in handle.ordered_jobs:
+                jid = getattr(job, "_job_id", None) or getattr(job, "id", None)
+                if jid is None or jid in seen_ids:
+                    continue
+                seen_ids.add(jid)
+                try:
+                    results.append(bool(job.cancel()))
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("cancel of %s failed: %s", jid, exc)
+                    results.append(False)
+        return all(results) if results else False
 
     def __repr__(self) -> str:
         peers = ", ".join(sorted(self._peer_handles.keys()))
