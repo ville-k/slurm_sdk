@@ -790,9 +790,15 @@ def multi_node_cluster(pyxis_container, slurm_cluster_config):
         client.close()
 
     if len(idle_nodes) < 2:
-        pytest.skip(
+        # CI sets SLURM_TEST_REQUIRE_MULTI_NODE=1 to turn this skip into a
+        # hard failure — silently skipping these tests in CI would mask a
+        # broken worker container as a green build.
+        message = (
             f"multi_node_cluster requires 2+ IDLE nodes; sinfo reports {idle_nodes}"
         )
+        if os.environ.get("SLURM_TEST_REQUIRE_MULTI_NODE"):
+            pytest.fail(message)
+        pytest.skip(message)
 
     return {
         "idle_nodes": idle_nodes,
