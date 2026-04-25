@@ -327,10 +327,12 @@ jobs:
           # Wait for every node reported by sinfo to reach IDLE. CI requires
           # exactly 2 nodes (controller + worker) — anything less means the
           # worker didn't register and multi-node tests would silently skip.
+          # ``sinfo -N`` forces one row per node (otherwise sinfo collapses
+          # nodes sharing a partition+state into a single line).
           echo -n "Waiting for both nodes to be IDLE..."
           all_idle=no
           for i in $(seq 1 60); do
-            mapfile -t states < <(docker exec slurm-test sinfo -h -o "%T" 2>/dev/null || true)
+            mapfile -t states < <(docker exec slurm-test sinfo -h -N -o "%T" 2>/dev/null || true)
             if [ ${#states[@]} -eq 2 ]; then
               all_idle="yes"
               for s in "${states[@]}"; do
