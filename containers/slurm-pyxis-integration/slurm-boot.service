@@ -1,0 +1,12 @@
+[Unit]
+Description=Role-based Slurm boot configuration
+Before=slurmctld.service slurmd.service
+After=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/slurm-boot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -93,6 +93,36 @@ services:
       retries: 30
       start_period: 10s
 
+  # Second Slurm compute node — runs slurmd only (slurmctld masked by
+  # SLURM_ROLE=worker). Shares /home/slurm with the controller so jobs
+  # submitted on the controller see the same wheel install + scratch.
+  # Optional service — started explicitly by the multi-node integration
+  # tests and CI; single-node dev workflows can leave it stopped.
+  slurm-worker:
+    image: slurm-integration:latest
+    container_name: slurm-worker
+    hostname: slurm-worker
+    privileged: true
+    networks:
+      slurm-dev-network:
+        aliases:
+          - slurm-worker
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - slurm-home:/home/slurm
+    environment:
+      - SLURM_ROLE=worker
+    depends_on:
+      slurm:
+        condition: service_healthy
+    command: ["/sbin/init"]
+    healthcheck:
+      test: ["CMD", "systemctl", "is-active", "slurmd"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
 networks:
   slurm-dev-network:
     driver: bridge
