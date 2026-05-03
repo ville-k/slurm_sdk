@@ -195,9 +195,22 @@ def test_colocate_with_shares_host(slurm_cluster, multi_node_cluster):
     assert a_host == b_host, (
         f"colocate_with failed: A={a_host!r}, B={b_host!r} should match"
     )
-    # C is unpinned — either host is fine. We just assert it landed on one
-    # of the allocated nodes (not some other host on the network).
-    assert c_host in {a_host, results["A"]["node_hostname"]} or c_host != a_host
+    # C is unpinned — either host is fine. Assert it actually landed on
+    # one of the two nodes the scheduler allocated to this job (not some
+    # unrelated host on the network). The allocation's host list is
+    # identical across peers within a single-pool allocation; we pull it
+    # from C's own ``ctx.hostnames`` so the assertion covers the same
+    # peer under test.
+    allocation_hosts = set(results["C"]["allocation_hostnames"])
+    assert len(allocation_hosts) == 2, (
+        f"allocation did not span 2 nodes: {allocation_hosts}"
+    )
+    assert a_host in allocation_hosts, (
+        f"A's hostname {a_host!r} is not in the allocation hosts {allocation_hosts}"
+    )
+    assert c_host in allocation_hosts, (
+        f"C's hostname {c_host!r} is not in the allocation hosts {allocation_hosts}"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -272,14 +272,39 @@ def parallel_hostname_identity_task(ctx: JobContext) -> dict:
     """Return the peer's hostname + its own identity from the registry.
 
     Used by the multi-node hetjob / node-pinning / colocate_with tests to
-    prove each peer landed on the hostname the test expected.
+    prove each peer landed on the hostname the test expected. Also
+    surfaces the *allocation's* full host list (expanded via
+    ``scontrol show hostnames`` from ``SLURM_JOB_NODELIST``) so callers
+    can assert a peer's hostname is one of the nodes the scheduler
+    actually reserved.
+
+    Note: ``ctx.hostnames`` prefers ``SLURM_STEP_NODELIST`` over
+    ``SLURM_JOB_NODELIST``, which for an ``srun --ntasks=1`` peer
+    collapses to just that peer's single node. We expand
+    ``SLURM_JOB_NODELIST`` instead so the returned list covers the
+    whole allocation regardless of step shape.
     """
     import socket
+    import subprocess
 
+    alloc_nodelist = ctx.environment.get("SLURM_JOB_NODELIST", "")
+    allocation_hostnames: list[str] = []
+    if alloc_nodelist:
+        expanded = subprocess.run(
+            ["scontrol", "show", "hostnames", alloc_nodelist],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if expanded.returncode == 0:
+            allocation_hostnames = [
+                line.strip() for line in expanded.stdout.splitlines() if line.strip()
+            ]
     return {
         "hostname": socket.gethostname(),
         "peer_name": ctx.peer_name,
         "node_hostname": ctx.node.hostname if ctx.node else None,
+        "allocation_hostnames": allocation_hostnames,
     }
 
 
