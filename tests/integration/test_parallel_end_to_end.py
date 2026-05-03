@@ -331,18 +331,23 @@ def test_parallel_after_upstream_dependency(slurm_cluster):
     The prior form waited for upstream to finish before submitting
     downstream, which only proved wait() returned — the dependency
     string could have been dropped silently and the test still passed.
-    This form submits downstream while upstream is still running, then
-    queries ``scontrol show job`` on the downstream allocation directly
-    and asserts:
+    This form submits a single-pool downstream ``parallel(...)`` while
+    upstream is still running, then queries ``scontrol show job`` on
+    the downstream allocation directly and asserts:
 
     - ``Dependency=afterok:<upstream_id>`` is present in the output,
-      proving the SDK wired the dep onto every hetjob component.
+      proving the SDK wired the dependency onto the downstream
+      allocation.
     - ``JobState=PENDING`` + ``Reason=Dependency``, proving Slurm
       honoured it.
 
-    If the ``--dependency=afterok:`` wiring is removed, the scontrol
-    output won't carry the Dependency substring and the test fails on
-    the first assertion — this is the point of the rework.
+    Multi-pool hetjob submissions share the same ``#SBATCH
+    --dependency=…`` header (it's a single allocation with multiple
+    components), so this single-allocation form exercises the wiring
+    path without needing a two-pool topology. If the
+    ``--dependency=afterok:`` wiring is removed, the scontrol output
+    won't carry the Dependency substring and the test fails on the
+    first assertion — this is the point of the rework.
     """
     with slurm_cluster:
         upstream = parallel_slow_upstream_task()
