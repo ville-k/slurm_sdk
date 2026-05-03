@@ -981,7 +981,19 @@ def prebuilt_integration_image(docker_compose_project, local_registry, request):
     project_root = Path(__file__).parent.parent.parent
     tag = f"session-{os.getpid()}"
     image_name = "slurm-sdk/integration-test"
+    # Image reference used by tests — Slurm containers pull this via Docker
+    # network DNS where the ``registry`` alias is authoritative.
     image_ref = f"{local_registry}/{image_name}:{tag}"
+    # Push reference — host-side ``docker/podman push`` resolves names via
+    # Go's net resolver, which on macOS goes straight to system DNS and
+    # ignores ``/etc/hosts``. If the host has a search domain that defines
+    # ``registry.<corp>``, the bare ``registry`` lookup gets hijacked to
+    # whatever ingress that domain points at and the push times out.
+    # ``localhost:20002`` is unambiguous from the host (same registry
+    # container via Docker Desktop's published port) and the manifest is
+    # stored at the same path, so the in-network pull via ``registry:20002``
+    # serves the same blobs.
+    push_ref = f"localhost:20002/{image_name}:{tag}"
     platform = _detect_host_platform()
 
     # Determine which container runtime to use
@@ -992,14 +1004,17 @@ def prebuilt_integration_image(docker_compose_project, local_registry, request):
     dockerfile_path.write_text(_get_integration_test_dockerfile())
 
     try:
-        print(f"\nBuilding integration test image: {image_ref}")
+        print(f"\nBuilding integration test image: {image_ref} (+ {push_ref})")
 
-        # Build the image
+        # Build the image, tagged for both pull (registry:20002, used inside
+        # Slurm) and push (localhost:20002, used from the host).
         build_cmd = [
             container_runtime,
             "build",
             "-t",
             image_ref,
+            "-t",
+            push_ref,
             "-f",
             str(dockerfile_path),
             "--platform",
@@ -1022,19 +1037,21 @@ def prebuilt_integration_image(docker_compose_project, local_registry, request):
                 f"stdout: {result.stdout}"
             )
 
-        print(f"Pushing integration test image: {image_ref}")
+        print(f"Pushing integration test image: {push_ref}")
 
         # Detect if docker is actually podman (common on macOS)
         is_podman = container_runtime == "podman" or _is_podman_masquerading_as_docker(
             container_runtime
         )
 
-        # Push the image with appropriate flags for insecure registry
+        # Push via the localhost-tagged ref. Same blobs land at the same
+        # registry path so any ``docker pull registry:20002/<image>`` from
+        # inside the Docker network resolves them.
         push_cmd = [container_runtime, "push"]
         if is_podman:
             # Podman needs explicit flags for insecure registry and Docker format
             push_cmd.extend(["--tls-verify=false", "--format", "v2s2"])
-        push_cmd.append(image_ref)
+        push_cmd.append(push_ref)
 
         result = subprocess.run(
             push_cmd,
@@ -1049,7 +1066,7 @@ def prebuilt_integration_image(docker_compose_project, local_registry, request):
                 hint = (
                     "\n\nHint: Docker requires insecure registry configuration.\n"
                     "Add to /etc/docker/daemon.json:\n"
-                    '  {"insecure-registries": ["registry:20002"]}\n'
+                    '  {"insecure-registries": ["localhost:20002"]}\n'
                     "Then restart Docker."
                 )
             pytest.fail(

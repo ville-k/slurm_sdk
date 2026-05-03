@@ -72,13 +72,17 @@ def test_container_with_mounts(
         container_test_tasks.read_mounted_file.unwrapped
     )
 
-    try:
-        with slurm_pyxis_cluster:
+    # Cleanup must run before the cluster context manager exits because
+    # ``__exit__`` calls ``backend.close()`` and reusing the closed backend
+    # in an outer ``finally`` fails with paramiko "No authentication
+    # methods available" on reconnect.
+    with slurm_pyxis_cluster:
+        try:
             job = slurm_pyxis_cluster.submit(read_mounted_file_packaged)(
                 file_path="/data/input.txt"
             )
             assert job.wait(timeout=300), f"Job did not complete: {job.get_stderr()}"
             result = job.get_result()
             assert result.strip() == "test data from mounted volume"
-    finally:
-        backend.execute_command(f"rm -rf {remote_data_dir}")
+        finally:
+            backend.execute_command(f"rm -rf {remote_data_dir}")
