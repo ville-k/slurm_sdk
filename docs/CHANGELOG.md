@@ -7,12 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Two-node containerized Slurm test cluster (`slurm-test` controller +
+  `slurm-worker`) for integration tests that require multiple compute
+  nodes; CI brings both up and hard-fails when the worker doesn't
+  register, preventing silent skips from looking green
+- `multi_node_cluster` pytest fixture that returns controller/worker
+  hostnames and skips cleanly on single-node dev setups (or fails when
+  `SLURM_TEST_REQUIRE_MULTI_NODE=1` is set)
+- `tests/integration/test_multi_node.py` — end-to-end coverage of
+  `@task(nodelist=…)` pinning and `@task(nodes=2)` allocation spans
+  against the two-node cluster, exercising only the existing
+  single-task API
+
 ### Fixed
 
 - `loads_pickled()` now raises a descriptive `ValueError` when the pickle
   payload is truncated after the header prefix, instead of a bare `IndexError`
 - `rendering.serialize_task_arguments()` replaces `assert` guards with explicit
   `RuntimeError`, ensuring correctness under `python -O`
+- `slurm-boot.sh` now reconciles `/home/slurm` ownership when the
+  `slurm-home` named volume is initialized fresh (root-owned mountpoint
+  overlays the image's slurm-owned dir), preventing EACCES when tests
+  create sibling directories under `/home/slurm`
 
 ### Changed
 

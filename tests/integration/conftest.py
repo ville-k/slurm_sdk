@@ -761,10 +761,11 @@ def multi_node_cluster(pyxis_container, slurm_cluster_config):
     """Skip the calling test unless the test cluster has 2+ IDLE nodes.
 
     Single-node dev workflows (the default when running
-    ``docker compose up -d slurm registry``) see a clean skip instead of a
-    hard failure. CI and multi-node dev setups bring up ``slurm-worker``
-    alongside ``slurm-test`` and the fixture returns node identity for tests
-    that need to pin peers to specific hosts.
+    ``docker compose up -d slurm registry``) see a clean skip instead of
+    a hard failure. CI and multi-node dev setups bring up ``slurm-worker``
+    alongside ``slurm-test`` and the fixture returns node identity for
+    tests that need to pin work to specific hosts or assert that an
+    allocation spans the full cluster.
     """
     import paramiko
 

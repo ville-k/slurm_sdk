@@ -107,3 +107,28 @@ def slow_multiply_task(x: int) -> int:
 
     time.sleep(1)
     return x * 2
+
+
+# ---------------------------------------------------------------------------
+# Multi-node integration tasks (used by tests/integration/test_multi_node.py)
+# ---------------------------------------------------------------------------
+
+
+@task(time="00:01:00", mem="100M")
+def multi_node_identity_task() -> dict:
+    """Return ``socket.gethostname()`` plus ``SLURM_JOB_NODELIST``.
+
+    Used by the multi-node integration tests (which apply
+    ``.with_options(nodelist=...)`` or ``.with_options(nodes=2)`` per
+    test case) to verify that the existing single-task ``@task`` path
+    honours node-pinning and multi-node-allocation directives against
+    a real Slurm cluster with two compute nodes.
+    """
+    import os
+    import socket
+
+    return {
+        "hostname": socket.gethostname(),
+        "nodelist": os.environ.get("SLURM_JOB_NODELIST"),
+        "nnodes": os.environ.get("SLURM_JOB_NUM_NODES"),
+    }
