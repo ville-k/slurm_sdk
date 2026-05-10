@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "cyclopts>=3.0.0",
     "fastmcp>=2.0.0",
-    "paramiko>=3.5.1",
+    "paramiko>=3.5.1,<4",
     "requests>=2.32.3",
     "rich>=13.9.4",
     "tomli>=2.0.0; python_version < '3.11'",
@@ -71,6 +71,7 @@ addopts = [
 markers = [
     "integration_test: marks tests as integration tests",
     "slow_integration_test: marks tests as slow integration tests",
+    "integration_test_multi_node: marks tests that require a 2+ node Slurm cluster",
     "container_runtime: marks tests that run containers using prebuilt images",
     "container_build: marks tests that build containers from Dockerfiles",
 ]

@@ -394,6 +394,55 @@ def _assert_port_available(host: str, port: int, description: str) -> None:
         sock.close()
 
 
+def _wait_for_nodes_idle(
+    container_runtime: str, container_name: str, timeout_s: int = 120
+) -> None:
+    """Wait for every Slurm node in the cluster to reach IDLE.
+
+    The cluster may have 1 (single-node) or 2+ nodes depending on whether
+    slurm-worker is running. We poll ``sinfo`` until every reported node's
+    state is ``idle``. If any node is still in DOWN* after roughly half the
+    timeout, we issue a one-shot ``scontrol update State=RESUME`` to recover
+    from the slurmd-before-slurmctld race that sometimes marks nodes DOWN.
+    """
+    deadline = time.time() + timeout_s
+    resumed = False
+    while time.time() < deadline:
+        result = subprocess.run(
+            [container_runtime, "exec", container_name, "sinfo", "-h", "-o", "%T %n"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if lines and all(line.split()[0] == "idle" for line in lines):
+            print(f"All nodes IDLE: {lines}")
+            return
+        if not resumed and time.time() > deadline - (timeout_s / 2):
+            for line in lines:
+                parts = line.split()
+                if len(parts) == 2 and parts[0] != "idle":
+                    subprocess.run(
+                        [
+                            container_runtime,
+                            "exec",
+                            container_name,
+                            "scontrol",
+                            "update",
+                            f"NodeName={parts[1]}",
+                            "State=RESUME",
+                        ],
+                        capture_output=True,
+                        check=False,
+                    )
+            resumed = True
+        time.sleep(1)
+    pytest.fail(
+        f"Slurm nodes did not all reach IDLE within {timeout_s}s; "
+        f"last sinfo output: {lines if lines else '(empty)'}"
+    )
+
+
 def _container_runtime_for(container_name: str) -> str | None:
     preferred = os.environ.get("SLURM_TEST_CONTAINER_RUNTIME")
     candidates: list[str] = [preferred] if preferred else []
@@ -540,7 +589,8 @@ def docker_compose_project(request):
         running_services = (
             result.stdout.strip().split("\n") if result.stdout.strip() else []
         )
-        if "registry" in running_services and "slurm" in running_services:
+        required = {"registry", "slurm"}
+        if required.issubset(running_services):
             print(f"Services running: {running_services}")
             break
         time.sleep(1)
@@ -606,6 +656,12 @@ def docker_compose_project(request):
         capture_output=True,
         check=False,
     )
+
+    # Wait for every configured node to reach IDLE. Single-node dev setups see
+    # one node; two-node setups (when slurm-worker is running) wait for both.
+    # Slurm sometimes boots a node in DOWN* initially if slurmd registers
+    # before slurmctld is fully initialized — we resume and retry once.
+    _wait_for_nodes_idle(container_runtime, "slurm-test", timeout_s=120)
 
     info = {
         "registry_url": "registry:20002",
@@ -695,6 +751,60 @@ def pyxis_container(docker_compose_project):
         "name": docker_compose_project["pyxis_container_name"],
         "job_base_dir": f"/home/{SLURM_USER}/slurm_jobs",
         "partition": "debug",
+        "controller_hostname": "slurm-control",
+        "worker_hostname": "slurm-worker",
+    }
+
+
+@pytest.fixture(scope="session")
+def multi_node_cluster(pyxis_container, slurm_cluster_config):
+    """Skip the calling test unless the test cluster has 2+ IDLE nodes.
+
+    Single-node dev workflows (the default when running
+    ``docker compose up -d slurm registry``) see a clean skip instead of
+    a hard failure. CI and multi-node dev setups bring up ``slurm-worker``
+    alongside ``slurm-test`` and the fixture returns node identity for
+    tests that need to pin work to specific hosts or assert that an
+    allocation spans the full cluster.
+    """
+    import paramiko
+
+    backend_cfg = slurm_cluster_config["cluster"]["backend_config"]
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=backend_cfg["hostname"],
+            port=backend_cfg["port"],
+            username=backend_cfg["username"],
+            password=backend_cfg["password"],
+            look_for_keys=False,
+            allow_agent=False,
+        )
+        _stdin, stdout, _stderr = client.exec_command(
+            "sinfo -h -o '%n %T' | awk '$2==\"idle\" {print $1}'"
+        )
+        idle_nodes = [
+            line.strip() for line in stdout.read().decode().splitlines() if line.strip()
+        ]
+    finally:
+        client.close()
+
+    if len(idle_nodes) < 2:
+        # CI sets SLURM_TEST_REQUIRE_MULTI_NODE=1 to turn this skip into a
+        # hard failure — silently skipping these tests in CI would mask a
+        # broken worker container as a green build.
+        message = (
+            f"multi_node_cluster requires 2+ IDLE nodes; sinfo reports {idle_nodes}"
+        )
+        if os.environ.get("SLURM_TEST_REQUIRE_MULTI_NODE"):
+            pytest.fail(message)
+        pytest.skip(message)
+
+    return {
+        "idle_nodes": idle_nodes,
+        "controller_hostname": pyxis_container["controller_hostname"],
+        "worker_hostname": pyxis_container["worker_hostname"],
     }
 
 

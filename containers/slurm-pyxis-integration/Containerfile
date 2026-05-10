@@ -81,6 +81,15 @@ RUN mkdir -p /var/run/sshd \
     && ln -sf /lib/systemd/system/slurmd.service /etc/systemd/system/multi-user.target.wants/slurmd.service \
     && ln -sf /lib/systemd/system/slurmctld.service /etc/systemd/system/multi-user.target.wants/slurmctld.service
 
+# Role-based systemd gating. Default role ('controller') runs slurmctld + slurmd.
+# SLURM_ROLE=worker (set by container runtime) masks slurmctld so only slurmd
+# starts, enabling multi-node cluster setups from a single image.
+COPY slurm-boot.sh /usr/local/bin/slurm-boot.sh
+COPY slurm-boot.service /etc/systemd/system/slurm-boot.service
+RUN chmod +x /usr/local/bin/slurm-boot.sh \
+    && ln -sf /etc/systemd/system/slurm-boot.service \
+        /etc/systemd/system/multi-user.target.wants/slurm-boot.service
+
 # Note: Hostname and /etc/hosts are managed by docker-compose/podman at runtime
 # No need to set them during build
 
