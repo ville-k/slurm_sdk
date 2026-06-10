@@ -282,6 +282,46 @@ def _emit_packaging_setup(
     return lines
 
 
+def _filter_picklable_callbacks(callbacks: Optional[List[Any]]) -> List[Any]:
+    """Select callbacks that should ship to the runner and survive pickling.
+
+    Applied identically by the single-job and parallel submission paths. A
+    callback is shipped only if it (a) opts into runner transport via
+    ``requires_runner_transport()`` (default: yes), (b) does not set
+    ``requires_pickling=False``, and (c) actually pickles. Non-qualifying
+    callbacks are dropped with a debug log rather than failing the submit.
+    """
+    picklable: List[Any] = []
+    for cb in callbacks or []:
+        needs_runner = True
+        if hasattr(cb, "requires_runner_transport"):
+            try:
+                needs_runner = cb.requires_runner_transport()
+            except Exception as err:  # pragma: no cover - defensive
+                logger.debug(
+                    "Callback %s failed requires_runner_transport check: %s",
+                    type(cb).__name__,
+                    err,
+                )
+        if not needs_runner:
+            continue
+        if getattr(cb, "requires_pickling", True) is False:
+            logger.debug(
+                "Skipping callback %s: requires_pickling=False", type(cb).__name__
+            )
+            continue
+        try:
+            # Picklability probe — the bytes actually shipped are produced by
+            # the caller via dumps_pickled() on the returned list.
+            pickle.dumps(cb)
+            picklable.append(cb)
+        except Exception as err:
+            logger.debug(
+                "Skipping non-picklable callback %s: %s", type(cb).__name__, err
+            )
+    return picklable
+
+
 def _serialize_runner_inputs(
     task_func: _NamedCallable,
     task_args: Tuple[Any, ...],
@@ -312,35 +352,7 @@ def _serialize_runner_inputs(
             pickled_kwargs = base64.b64encode(dumps_pickled(task_kwargs)).decode()
         pickled_sys_path = base64.b64encode(dumps_pickled(sys.path)).decode()
 
-        picklable_callbacks: List[BaseCallback] = []
-        for cb in callbacks or []:
-            needs_runner = True
-            if hasattr(cb, "requires_runner_transport"):
-                try:
-                    needs_runner = cb.requires_runner_transport()
-                except Exception as _cb_err:  # pragma: no cover - defensive
-                    logger.debug(
-                        "Callback %s failed requires_runner_transport check: %s",
-                        type(cb).__name__,
-                        _cb_err,
-                    )
-            if not needs_runner:
-                continue
-            if getattr(cb, "requires_pickling", True) is False:
-                logger.debug(
-                    "Skipping callback %s: requires_pickling=False",
-                    type(cb).__name__,
-                )
-                continue
-            try:
-                # Picklability probe — the actual serialized bytes we ship
-                # are produced below via dumps_pickled() on the full list.
-                pickle.dumps(cb)
-                picklable_callbacks.append(cb)
-            except Exception as _cb_err:
-                logger.debug(
-                    "Skipping non-picklable callback %s: %s", type(cb).__name__, _cb_err
-                )
+        picklable_callbacks = _filter_picklable_callbacks(callbacks)
 
         pickled_callbacks = (
             base64.b64encode(dumps_pickled(picklable_callbacks)).decode()

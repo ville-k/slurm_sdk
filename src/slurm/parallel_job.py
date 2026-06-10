@@ -555,21 +555,21 @@ class ParallelJob:
                         else None
                     )
                     replica_results.append(
-                        self._collect_replica_result(
+                        self._collect_result(
                             peer,
-                            replica_index,
                             rjob,
                             outcome,
                             has_registry_data,
                             timeout,
                             failures,
+                            replica_index=replica_index,
                         )
                     )
                 results[peer_name] = replica_results
             else:
                 job = self._peer_handles[peer_name].representative_job
                 outcome = outcomes.get(peer_name)
-                results[peer_name] = self._collect_singleton_result(
+                results[peer_name] = self._collect_result(
                     peer, job, outcome, has_registry_data, timeout, failures
                 )
 
@@ -578,60 +578,26 @@ class ParallelJob:
 
         return results
 
-    def _collect_singleton_result(
+    def _collect_result(
         self,
         peer: Any,
-        job: "Job",
-        outcome: Optional[PeerOutcome],
-        has_registry_data: bool,
-        timeout: Optional[float],
-        failures: "list[PeerFailureError]",
-    ) -> Any:
-        """Resolve one singleton peer's result slot."""
-        if has_registry_data and outcome is not None:
-            if outcome.status in (OUTCOME_SUCCESS, OUTCOME_RESTARTED):
-                return job.get_result(timeout=timeout)
-            if outcome.status in (
-                OUTCOME_CONTINUE_ON_FAILURE,
-                OUTCOME_SHUTDOWN_BY_LEADER,
-            ):
-                return None
-            failures.append(
-                PeerFailureError(
-                    peer_name=peer.resolved_name,
-                    replica_index=None,
-                    exit_code=outcome.exit_code
-                    if outcome.exit_code is not None
-                    else -1,
-                    message=outcome.message or f"peer outcome: {outcome.status}",
-                )
-            )
-            return None
-
-        # Legacy path — no registry; fall back to Phase 3 behavior.
-        try:
-            return job.get_result(timeout=timeout)
-        except Exception:
-            if peer.on_failure == "continue":
-                return None
-            raise
-
-    def _collect_replica_result(
-        self,
-        peer: Any,
-        replica_index: int,
         job: Optional["Job"],
         outcome: Optional[PeerOutcome],
         has_registry_data: bool,
         timeout: Optional[float],
         failures: "list[PeerFailureError]",
+        replica_index: Optional[int] = None,
     ) -> Any:
-        """Resolve one replica's result slot (see :meth:`get_results`)."""
+        """Resolve one peer or replica result slot (see :meth:`get_results`).
+
+        ``replica_index`` is ``None`` for singleton peers and the 0-based
+        index for replica-set members; it only affects failure reporting.
+        ``job`` may be ``None`` for a replica whose Job handle is missing
+        (singletons always pass a real Job).
+        """
         if has_registry_data and outcome is not None:
             if outcome.status in (OUTCOME_SUCCESS, OUTCOME_RESTARTED):
-                if job is None:
-                    return None
-                return job.get_result(timeout=timeout)
+                return job.get_result(timeout=timeout) if job is not None else None
             if outcome.status in (
                 OUTCOME_CONTINUE_ON_FAILURE,
                 OUTCOME_SHUTDOWN_BY_LEADER,
@@ -649,6 +615,7 @@ class ParallelJob:
             )
             return None
 
+        # Legacy path — no registry; fall back to Phase 3 behavior.
         if job is None:
             return None
         try:

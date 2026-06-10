@@ -292,20 +292,21 @@ def _backend_will_bypass_sbatch(cluster: "Cluster") -> bool:
     return _shutil.which("sbatch") is None
 
 
-def _per_peer_stdout_stderr(
-    target_job_dir: str, pre_submission_id: str, peer_name: str
-) -> Tuple[str, str]:
-    """Per-peer output paths used for the :class:`Job`'s stdout/stderr pointers.
+def _layer_replica_args(bound: "BoundTask", item: Any) -> Tuple[tuple, dict]:
+    """Compose effective args/kwargs by layering ``item`` over the binding.
 
-    Slurm writes one stdout / stderr for the *batch* step, but each ``srun``
-    step also emits its own interleaved lines. For Phase 2 we point each
-    per-peer :class:`Job` at the shared batch output; per-step capture lands
-    with the Python supervisor in Phase 3.
+    Mirrors what the runner does via ``unpack_item_to_args_kwargs``: dict items
+    become extra kwargs, tuple items extend positionals, and a scalar becomes
+    one trailing positional. A singleton peer is just the ``item={}`` case (no
+    per-replica variance), so the same helper serves both shapes.
     """
-    stdout = f"{target_job_dir}/slurm_{pre_submission_id}.out"
-    stderr = f"{target_job_dir}/slurm_{pre_submission_id}.err"
-    del peer_name  # reserved for Phase 3 per-step capture
-    return stdout, stderr
+    base_args = tuple(bound.args)
+    base_kwargs = dict(bound.kwargs)
+    if isinstance(item, dict):
+        return base_args, {**base_kwargs, **item}
+    if isinstance(item, tuple):
+        return base_args + item, base_kwargs
+    return base_args + (item,), base_kwargs
 
 
 def submit_parallel_spec(
@@ -486,6 +487,37 @@ def submit_parallel_spec(
     # :class:`CompletedContext` events. The representative poller fires
     # exactly once for the whole allocation (Phase 11 contract).
     representative_name = representative_peer.resolved_name
+    # Every per-peer Job points at the shared batch stdout/stderr — Slurm
+    # writes one pair for the batch step; per-step capture is a future phase.
+    peer_stdout = f"{target_job_dir}/slurm_{pre_submission_id}.out"
+    peer_stderr = f"{target_job_dir}/slurm_{pre_submission_id}.err"
+
+    def _make_peer_job(
+        task_func: Any,
+        args: tuple,
+        kwargs: dict,
+        pre_id: str,
+        *,
+        is_representative: bool,
+    ) -> "Job":
+        # Only the representative Job gets ``on_completed`` — every peer shares
+        # the same Slurm job id, so dispatching the completion callback from
+        # multiple Jobs would emit duplicate CompletedContext events.
+        return Job(
+            id=base_job_id,
+            cluster=cluster,
+            task_func=task_func,
+            args=args,
+            kwargs=kwargs,
+            target_job_dir=target_job_dir,
+            pre_submission_id=pre_id,
+            sbatch_options=dict(effective_sbatch_options),
+            stdout_path=peer_stdout,
+            stderr_path=peer_stderr,
+            backend=cluster.backend,
+            on_completed=cluster._emit_completed_context if is_representative else None,
+        )
+
     peer_handles: Dict[str, _ParallelPeerHandle] = {}
     for peer in spec.peers:
         if not isinstance(peer.task, BoundTask):
@@ -494,92 +526,42 @@ def submit_parallel_spec(
                 "Internal error."
             )
         peer_slurm_task = peer.task.task
+        peer_pre = peer_pre_submission_id(pre_submission_id, peer.resolved_name)
 
         if peer.is_replica_set:
-            replica_jobs: List["Job"] = []
             items = replica_items.get(peer.resolved_name, [])
+            replica_jobs: List["Job"] = []
             for replica_idx in range(peer.count):
-                replica_pre_id = (
-                    f"{peer_pre_submission_id(pre_submission_id, peer.resolved_name)}"
-                    f"_{replica_idx}"
-                )
                 item = items[replica_idx] if replica_idx < len(items) else {}
-                # Compose the effective args/kwargs for this replica by
-                # layering the replica-specific item over the shared
-                # BoundTask binding — the runner does the same under the
-                # hood via ``unpack_item_to_args_kwargs`` + the shared
-                # pickle fallback.
-                base_args = tuple(peer.task.args)
-                base_kwargs = dict(peer.task.kwargs)
-                replica_args: tuple
-                replica_kwargs: dict
-                if isinstance(item, dict):
-                    replica_args = base_args
-                    replica_kwargs = {**base_kwargs, **item}
-                elif isinstance(item, tuple):
-                    replica_args = base_args + item
-                    replica_kwargs = base_kwargs
-                else:
-                    replica_args = base_args + (item,)
-                    replica_kwargs = base_kwargs
-                peer_stdout = f"{target_job_dir}/slurm_{pre_submission_id}.out"
-                peer_stderr = f"{target_job_dir}/slurm_{pre_submission_id}.err"
-                # Replica 0 of the representative peer is the surface that
-                # drives the aggregate completion callback; every other Job
-                # skips ``on_completed`` so duplicate events can't fire.
+                args, kwargs = _layer_replica_args(peer.task, item)
+                # Replica 0 of the representative peer drives the aggregate
+                # completion callback; every other Job skips on_completed.
                 is_representative = (
                     peer.resolved_name == representative_name and replica_idx == 0
                 )
-                on_completed = (
-                    cluster._emit_completed_context if is_representative else None
+                replica_jobs.append(
+                    _make_peer_job(
+                        peer_slurm_task,
+                        args,
+                        kwargs,
+                        f"{peer_pre}_{replica_idx}",
+                        is_representative=is_representative,
+                    )
                 )
-                job = Job(
-                    id=base_job_id,
-                    cluster=cluster,
-                    task_func=peer_slurm_task,
-                    args=replica_args,
-                    kwargs=replica_kwargs,
-                    target_job_dir=target_job_dir,
-                    pre_submission_id=replica_pre_id,
-                    sbatch_options=dict(effective_sbatch_options),
-                    stdout_path=peer_stdout,
-                    stderr_path=peer_stderr,
-                    backend=cluster.backend,
-                    on_completed=on_completed,
-                )
-                replica_jobs.append(job)
-            # The leader / representative Job for the peer's aggregate
-            # surface is replica 0 — used anywhere the legacy
-            # ``peer_jobs[name]`` path returned a singleton.
             peer_handles[peer.resolved_name] = _ParallelPeerHandle(
                 name=peer.resolved_name,
                 representative_job=replica_jobs[0],
                 replica_jobs=tuple(replica_jobs),
             )
         else:
-            peer_pre_id = peer_pre_submission_id(pre_submission_id, peer.resolved_name)
-            peer_args = tuple(peer.task.args)
-            peer_kwargs = dict(peer.task.kwargs)
-            peer_stdout, peer_stderr = _per_peer_stdout_stderr(
-                target_job_dir, pre_submission_id, peer.resolved_name
-            )
-            is_representative = peer.resolved_name == representative_name
-            on_completed = (
-                cluster._emit_completed_context if is_representative else None
-            )
-            job = Job(
-                id=base_job_id,
-                cluster=cluster,
-                task_func=peer_slurm_task,
-                args=peer_args,
-                kwargs=peer_kwargs,
-                target_job_dir=target_job_dir,
-                pre_submission_id=peer_pre_id,
-                sbatch_options=dict(effective_sbatch_options),
-                stdout_path=peer_stdout,
-                stderr_path=peer_stderr,
-                backend=cluster.backend,
-                on_completed=on_completed,
+            # A singleton is the item={} case — no per-replica variance.
+            args, kwargs = _layer_replica_args(peer.task, {})
+            job = _make_peer_job(
+                peer_slurm_task,
+                args,
+                kwargs,
+                peer_pre,
+                is_representative=peer.resolved_name == representative_name,
             )
             peer_handles[peer.resolved_name] = _ParallelPeerHandle(
                 name=peer.resolved_name,

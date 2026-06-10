@@ -35,15 +35,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from typing import TYPE_CHECKING
 
 from ..errors import TopologyError
-from .types import Peer, _ParallelSpec
+from .types import NodeRef, _ParallelSpec
 
 if TYPE_CHECKING:
-    from .plan import Plan, PlanPeer
+    from .plan import Plan
 
 logger = logging.getLogger("slurm.parallel.placement")
 
@@ -81,40 +81,60 @@ class PlacementMap:
         return dict(self._pins)
 
 
-def resolve_placement(
-    spec: _ParallelSpec,
+@dataclass(frozen=True)
+class _PlacementRequest:
+    """Normalized placement intent for one peer.
+
+    Both the submission-time spec (:class:`Peer`) and the runtime plan
+    (:class:`PlanPeer`) carry the same five placement fields under different
+    names. Projecting each into a ``_PlacementRequest`` lets a single resolver
+    drive off one type instead of duplicating the algorithm per source.
+    """
+
+    name: str
+    pool: str
+    on_node: Optional[NodeRef]
+    on_nodes: Optional[Tuple[NodeRef, ...]]
+    colocate_with: Optional[str]
+    count: int
+
+
+def _resolve_requests(
+    requests: Sequence[_PlacementRequest],
     pool_hostnames: Mapping[str, Tuple[str, ...]],
+    pool_labels: Mapping[str, Optional[Tuple[str, ...]]],
 ) -> PlacementMap:
-    """Resolve every peer's placement intent to concrete hostnames.
+    """Resolve normalized placement requests to concrete hostnames.
+
+    Walks ``colocate_with`` chains in declaration order (``_resolve``
+    recursively pulls targets in first), assigning the pool's "first unused"
+    host to any unpinned colocation anchor so colocated peers share a node.
 
     Args:
-        spec: The validated :class:`_ParallelSpec`. Validation must have
-            already rejected cycles, cross-pool colocation, and out-of-range
-            node references — the resolver trusts those invariants.
-        pool_hostnames: Mapping of pool name → tuple of hostnames allocated
-            to that pool, in Slurm's allocation order. Pools not represented
-            in the mapping contribute no hostnames — peers in those pools
-            remain unpinned (safe default for tests without a real
+        requests: One :class:`_PlacementRequest` per peer, in declaration
+            order. The resolver trusts the validator's invariants (no cycles,
+            no cross-pool colocation, in-range node references).
+        pool_hostnames: Pool name → hostnames allocated to it, in Slurm
+            allocation order. Absent pools contribute no hostnames, leaving
+            their peers unpinned (safe default for tests without a real
             allocation).
+        pool_labels: Pool name → its ``node_labels`` (or ``None``), used to
+            resolve string node references.
 
     Returns:
-        A :class:`PlacementMap` with one entry per explicitly-pinned peer
-        (directly via ``on_node`` / ``on_nodes``, or transitively via
-        ``colocate_with``).
+        A :class:`PlacementMap` with one entry per explicitly-pinned peer.
 
     Raises:
-        TopologyError: If a ``colocate_with`` target references a peer in a
-            different pool (defensive — the validator should have caught
-            this) or if replica-set ``on_nodes`` length disagrees with
-            ``count`` (ditto).
+        TopologyError: Defensive — on a runtime cycle, cross-pool colocation,
+            or ``on_nodes``/``count`` mismatch the validator should have
+            already rejected.
     """
-    peers_by_name: Dict[str, Peer] = {p.resolved_name: p for p in spec.peers}
-
+    by_name: Dict[str, _PlacementRequest] = {r.name: r for r in requests}
     pins: Dict[str, Tuple[str, ...]] = {}
     # Pool free-list: hostnames not yet claimed by any pinned peer. Drained
     # as we assign "first unused" nodes to unpinned colocate targets.
     free_lists: Dict[str, List[str]] = {
-        pool: list(pool_hostnames.get(pool, ())) for pool in spec.topology.pools
+        r.pool: list(pool_hostnames.get(r.pool, ())) for r in requests
     }
     # Guard against runaway recursion if a malformed spec slips past the
     # validator. The cycle detector in validation.py catches real cycles at
@@ -122,297 +142,132 @@ def resolve_placement(
     resolving: set[str] = set()
 
     def _resolve(name: str) -> Optional[Tuple[str, ...]]:
-        # Already resolved? Return cached result.
         if name in pins:
             return pins[name]
         if name in resolving:
-            # Cycle — validator should have caught this. Break out rather
-            # than loop forever.
             raise TopologyError(
                 f"colocate_with cycle detected at runtime involving peer "
                 f"{name!r}. This should have been rejected at spec "
                 "validation — please file a bug."
             )
-        peer = peers_by_name.get(name)
-        if peer is None:
+        req = by_name.get(name)
+        if req is None:
             return None
 
         resolving.add(name)
         try:
-            resolved = _resolve_one(peer)
+            resolved = _resolve_one(req)
         finally:
             resolving.discard(name)
 
         if resolved is not None:
             pins[name] = resolved
-            # Remove claimed hostnames from the pool's free list so future
-            # "first unused" assignments don't collide.
-            free = free_lists.get(peer.pool or "", [])
+            free = free_lists.get(req.pool, [])
             for host in resolved:
                 if host in free:
                     free.remove(host)
         return resolved
 
-    def _resolve_one(peer: Peer) -> Optional[Tuple[str, ...]]:
-        pool_name = peer.pool or ""
-        pool = spec.topology.pools.get(pool_name) if pool_name else None
-        hostnames = pool_hostnames.get(pool_name, ()) if pool_name else ()
+    def _resolve_one(req: _PlacementRequest) -> Optional[Tuple[str, ...]]:
+        hostnames = pool_hostnames.get(req.pool, ())
+        labels = pool_labels.get(req.pool)
 
         # Explicit pins — on_node (singleton) / on_nodes (replica set).
-        if peer.on_node is not None:
-            host = _node_ref_to_hostname(peer.on_node, pool, hostnames, peer)
-            return (host,)
+        if req.on_node is not None:
+            return (_node_ref_to_hostname(req.on_node, labels, hostnames, req.name),)
 
-        if peer.on_nodes is not None:
-            if len(peer.on_nodes) != peer.count:
+        if req.on_nodes is not None:
+            if len(req.on_nodes) != req.count:
                 raise TopologyError(
-                    f"Peer {peer.resolved_name!r}: on_nodes length "
-                    f"{len(peer.on_nodes)} != count {peer.count}. This "
-                    "should have been rejected at spec validation."
+                    f"Peer {req.name!r}: on_nodes length "
+                    f"{len(req.on_nodes)} != count {req.count}. This should "
+                    "have been rejected at spec validation."
                 )
             return tuple(
-                _node_ref_to_hostname(ref, pool, hostnames, peer)
-                for ref in peer.on_nodes
+                _node_ref_to_hostname(ref, labels, hostnames, req.name)
+                for ref in req.on_nodes
             )
 
         # Colocation — inherit target's pin; if the target has none, assign
         # it the pool's first unused node so both peers end up on the same
         # concrete host.
-        if peer.colocate_with is not None:
-            target = peers_by_name.get(peer.colocate_with)
+        if req.colocate_with is not None:
+            target = by_name.get(req.colocate_with)
             if target is None:
                 # Validator would normally have rejected this; if it ever
                 # slips through, treat the peer as unpinned rather than
                 # crashing the whole allocation.
                 logger.warning(
                     "Peer %r colocate_with=%r — target missing; leaving unpinned",
-                    peer.resolved_name,
-                    peer.colocate_with,
+                    req.name,
+                    req.colocate_with,
                 )
                 return None
-            if target.pool != peer.pool:
+            if target.pool != req.pool:
                 raise TopologyError(
-                    f"Peer {peer.resolved_name!r} colocate_with="
-                    f"{peer.colocate_with!r} but peers are in different "
-                    f"pools ({peer.pool!r} vs {target.pool!r}). This "
-                    "should have been rejected at spec validation."
+                    f"Peer {req.name!r} colocate_with={req.colocate_with!r} "
+                    f"but peers are in different pools ({req.pool!r} vs "
+                    f"{target.pool!r}). This should have been rejected at "
+                    "spec validation."
                 )
-            target_pin = _resolve(target.resolved_name)
+            target_pin = _resolve(target.name)
             if target_pin is not None:
-                # Replica sets colocating with a singleton inherit the
-                # single host across all their replicas (Slurm handles
-                # per-task placement on the shared node). Replica sets
-                # colocating with replica sets would need per-replica
-                # broadcasting — not currently specified, and the validator
-                # rejects this combo with a cross-replica colocate check.
-                if peer.is_replica_set and len(target_pin) == 1:
-                    return tuple(target_pin[0] for _ in range(peer.count))
+                # Replica sets colocating with a singleton inherit the single
+                # host across all their replicas (Slurm handles per-task
+                # placement on the shared node).
+                if req.count > 1 and len(target_pin) == 1:
+                    return tuple(target_pin[0] for _ in range(req.count))
                 return target_pin
 
             # Target is itself unpinned — assign it the first free host in
             # its pool, then share.
-            target_free = free_lists.get(target.pool or "", [])
-            if not target_free:
-                # No capacity left to assign — leave both unpinned. Slurm
-                # will place them as it sees fit.
-                return None
-            assigned_host = target_free[0]
-            pins[target.resolved_name] = (assigned_host,)
-            target_free.remove(assigned_host)
-            if peer.is_replica_set:
-                return tuple(assigned_host for _ in range(peer.count))
-            return (assigned_host,)
-
-        # Nothing declared — leave unpinned.
-        return None
-
-    # Resolve in declaration order. ``_resolve`` recursively pulls
-    # colocate targets in first, so this single pass is enough.
-    for peer in spec.peers:
-        _resolve(peer.resolved_name)
-
-    return PlacementMap(_pins=dict(pins))
-
-
-def _node_ref_to_hostname(
-    ref: object,
-    pool: "object | None",
-    hostnames: Tuple[str, ...],
-    peer: Peer,
-) -> str:
-    """Resolve a single ``NodeRef`` (label or ordinal) to a hostname.
-
-    Trusts validation for bounds/label-exists checks but still guards
-    against missing hostnames (empty allocation in tests) by raising a
-    clear error.
-    """
-    if isinstance(ref, int):
-        if ref < 0 or ref >= len(hostnames):
-            # In a well-formed allocation the validator's ordinal bounds
-            # check plus Pool.nodes guarantees this never triggers. If it
-            # does, it's because the runtime allocation shrunk below the
-            # declared pool size — surface the mismatch to the caller.
-            raise TopologyError(
-                f"Peer {peer.resolved_name!r}: cannot resolve on_node={ref} "
-                f"— pool has {len(hostnames)} hostname(s) available."
-            )
-        return hostnames[ref]
-    if isinstance(ref, str):
-        from .types import Pool
-
-        if not isinstance(pool, Pool) or pool.node_labels is None:
-            raise TopologyError(
-                f"Peer {peer.resolved_name!r}: on_node={ref!r} references a "
-                "label but the pool declares no node_labels. This should "
-                "have been rejected at spec validation."
-            )
-        try:
-            idx = pool.node_labels.index(ref)
-        except ValueError as err:
-            raise TopologyError(
-                f"Peer {peer.resolved_name!r}: unknown label {ref!r} — pool "
-                f"labels are {list(pool.node_labels)}."
-            ) from err
-        if idx >= len(hostnames):
-            raise TopologyError(
-                f"Peer {peer.resolved_name!r}: label {ref!r} maps to "
-                f"ordinal {idx} but pool has {len(hostnames)} hostname(s) "
-                "allocated."
-            )
-        return hostnames[idx]
-    raise TopologyError(
-        f"Peer {peer.resolved_name!r}: invalid node reference {ref!r} "
-        "— must be a string label or integer ordinal."
-    )
-
-
-def resolve_placement_from_plan(
-    plan: "Plan",
-    pool_hostnames: Mapping[str, Tuple[str, ...]],
-) -> PlacementMap:
-    """Resolve placement from a :class:`Plan` without needing ``_ParallelSpec``.
-
-    The bootstrap only has ``plan.json`` at runtime — the full
-    :class:`_ParallelSpec` is a submission-time artifact. Rather than
-    re-serialize the spec, the plan carries enough placement intent
-    (``PlanPeer.on_node`` / ``on_nodes`` / ``colocate_with`` and
-    ``PlanComponent.node_labels``) for the bootstrap to run the same
-    algorithm :func:`resolve_placement` uses.
-
-    The implementation mirrors :func:`resolve_placement` but drives off the
-    plan's dataclasses instead of ``Peer`` / ``Pool``.
-    """
-    # Build an index from plan data so the resolver algorithm below stays
-    # close to resolve_placement() even though it operates on plan types.
-    plan_peers_by_name = {p.name: p for p in plan.peers}
-    components = {c.pool: c for c in plan.effective_components()}
-
-    pins: Dict[str, Tuple[str, ...]] = {}
-    free_lists: Dict[str, List[str]] = {
-        pool: list(pool_hostnames.get(pool, ())) for pool in components
-    }
-    resolving: set[str] = set()
-
-    def _resolve(name: str) -> Optional[Tuple[str, ...]]:
-        if name in pins:
-            return pins[name]
-        if name in resolving:
-            raise TopologyError(
-                f"colocate_with cycle detected at runtime involving peer "
-                f"{name!r}. This should have been rejected at spec "
-                "validation — please file a bug."
-            )
-        peer = plan_peers_by_name.get(name)
-        if peer is None:
-            return None
-        resolving.add(name)
-        try:
-            resolved = _resolve_plan_peer(peer)
-        finally:
-            resolving.discard(name)
-        if resolved is not None:
-            pins[name] = resolved
-            free = free_lists.get(peer.pool, [])
-            for host in resolved:
-                if host in free:
-                    free.remove(host)
-        return resolved
-
-    def _resolve_plan_peer(peer: "PlanPeer") -> Optional[Tuple[str, ...]]:
-        pool_name = peer.pool
-        hostnames = pool_hostnames.get(pool_name, ())
-        comp = components.get(pool_name)
-        labels = comp.node_labels if comp is not None else None
-
-        on_node_ref = peer.on_node
-        on_nodes_refs = peer.on_nodes
-        colocate_target = peer.colocate_with
-        replica_count = int(peer.replica_count)
-        peer_name = peer.name
-
-        if on_node_ref is not None:
-            host = _plan_node_ref_to_hostname(on_node_ref, labels, hostnames, peer_name)
-            return (host,)
-        if on_nodes_refs is not None:
-            if len(on_nodes_refs) != replica_count:
-                raise TopologyError(
-                    f"Peer {peer_name!r}: on_nodes length "
-                    f"{len(on_nodes_refs)} != replica_count {replica_count}."
-                )
-            return tuple(
-                _plan_node_ref_to_hostname(r, labels, hostnames, peer_name)
-                for r in on_nodes_refs
-            )
-        if colocate_target is not None:
-            target = plan_peers_by_name.get(colocate_target)
-            if target is None:
-                return None
-            if target.pool != pool_name:
-                raise TopologyError(
-                    f"Peer {peer_name!r} colocate_with={colocate_target!r} "
-                    f"but peers are in different pools ({pool_name!r} vs "
-                    f"{target.pool!r})."
-                )
-            target_pin = _resolve(target.name)
-            if target_pin is not None:
-                if replica_count > 1 and len(target_pin) == 1:
-                    return tuple(target_pin[0] for _ in range(replica_count))
-                return target_pin
             target_free = free_lists.get(target.pool, [])
             if not target_free:
                 return None
             assigned_host = target_free[0]
             pins[target.name] = (assigned_host,)
             target_free.remove(assigned_host)
-            if replica_count > 1:
-                return tuple(assigned_host for _ in range(replica_count))
+            if req.count > 1:
+                return tuple(assigned_host for _ in range(req.count))
             return (assigned_host,)
+
+        # Nothing declared — leave unpinned.
         return None
 
-    for peer in plan.peers:
-        _resolve(peer.name)
+    for req in requests:
+        _resolve(req.name)
+
     return PlacementMap(_pins=dict(pins))
 
 
-def _plan_node_ref_to_hostname(
+def _node_ref_to_hostname(
     ref: object,
     labels: Optional[Tuple[str, ...]],
     hostnames: Tuple[str, ...],
     peer_name: str,
 ) -> str:
-    """Resolve a plan-level NodeRef (label or ordinal) to a hostname."""
+    """Resolve a single ``NodeRef`` (label or ordinal) to a hostname.
+
+    Trusts validation for bounds/label-exists checks but still guards against
+    missing hostnames (empty allocation in tests) by raising a clear error.
+    """
     if isinstance(ref, int):
         if ref < 0 or ref >= len(hostnames):
+            # In a well-formed allocation the validator's ordinal bounds
+            # check plus Pool.nodes guarantees this never triggers. If it
+            # does, the runtime allocation shrank below the declared pool
+            # size — surface the mismatch to the caller.
             raise TopologyError(
-                f"Peer {peer_name!r}: cannot resolve on_node={ref} — "
-                f"pool has {len(hostnames)} hostname(s) available."
+                f"Peer {peer_name!r}: cannot resolve on_node={ref} — pool "
+                f"has {len(hostnames)} hostname(s) available."
             )
         return hostnames[ref]
     if isinstance(ref, str):
         if labels is None:
             raise TopologyError(
-                f"Peer {peer_name!r}: on_node={ref!r} references a label "
-                "but the pool declares no node_labels."
+                f"Peer {peer_name!r}: on_node={ref!r} references a label but "
+                "the pool declares no node_labels. This should have been "
+                "rejected at spec validation."
             )
         try:
             idx = labels.index(ref)
@@ -431,3 +286,64 @@ def _plan_node_ref_to_hostname(
         f"Peer {peer_name!r}: invalid node reference {ref!r} — must be a "
         "string label or integer ordinal."
     )
+
+
+def resolve_placement(
+    spec: _ParallelSpec,
+    pool_hostnames: Mapping[str, Tuple[str, ...]],
+) -> PlacementMap:
+    """Resolve every peer's placement intent to concrete hostnames.
+
+    Args:
+        spec: The validated :class:`_ParallelSpec`. Validation must have
+            already rejected cycles, cross-pool colocation, and out-of-range
+            node references — the resolver trusts those invariants.
+        pool_hostnames: Mapping of pool name → tuple of hostnames allocated to
+            that pool, in Slurm's allocation order.
+
+    Returns:
+        A :class:`PlacementMap` with one entry per explicitly-pinned peer
+        (directly via ``on_node`` / ``on_nodes``, or transitively via
+        ``colocate_with``).
+    """
+    pool_labels = {name: pool.node_labels for name, pool in spec.topology.pools.items()}
+    requests = [
+        _PlacementRequest(
+            name=p.resolved_name,
+            pool=p.pool or "",
+            on_node=p.on_node,
+            on_nodes=p.on_nodes,
+            colocate_with=p.colocate_with,
+            count=p.count,
+        )
+        for p in spec.peers
+    ]
+    return _resolve_requests(requests, pool_hostnames, pool_labels)
+
+
+def resolve_placement_from_plan(
+    plan: "Plan",
+    pool_hostnames: Mapping[str, Tuple[str, ...]],
+) -> PlacementMap:
+    """Resolve placement from a :class:`Plan` without needing ``_ParallelSpec``.
+
+    The bootstrap only has ``plan.json`` at runtime — the full
+    :class:`_ParallelSpec` is a submission-time artifact. The plan carries
+    enough placement intent (``PlanPeer.on_node`` / ``on_nodes`` /
+    ``colocate_with`` and ``PlanComponent.node_labels``) to feed the same
+    :func:`_resolve_requests` core that :func:`resolve_placement` uses.
+    """
+    components = {c.pool: c for c in plan.effective_components()}
+    pool_labels = {pool: comp.node_labels for pool, comp in components.items()}
+    requests = [
+        _PlacementRequest(
+            name=p.name,
+            pool=p.pool,
+            on_node=p.on_node,
+            on_nodes=tuple(p.on_nodes) if p.on_nodes is not None else None,
+            colocate_with=p.colocate_with,
+            count=int(p.replica_count),
+        )
+        for p in plan.peers
+    ]
+    return _resolve_requests(requests, pool_hostnames, pool_labels)

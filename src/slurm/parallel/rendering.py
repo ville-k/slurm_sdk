@@ -28,6 +28,7 @@ from .._serialization import dumps_pickled
 from ..rendering import (
     CALLBACKS_FILENAME,
     _build_environment_exports_map,
+    _filter_picklable_callbacks,
     _emit_export_assignments,
     _emit_environment_exports,
     _emit_packaging_setup,
@@ -326,7 +327,6 @@ def _export_clause(peer: "Peer", pool_name: str) -> str:
 def _build_peer_artifact_bundle(
     peer: "Peer",
     *,
-    pre_submission_id: str,
     replica_items: Optional[List[Any]] = None,
 ) -> PeerArtifactBundle:
     """Serialize the per-peer artifact payloads needed before launch."""
@@ -368,7 +368,6 @@ def _build_peer_artifact_bundle(
                 ) from exc
         replica_payloads_b64 = tuple(payloads)
 
-    del pre_submission_id
     assert pickle.HIGHEST_PROTOCOL >= 2
     return PeerArtifactBundle(
         args_basename=args_basename,
@@ -413,54 +412,6 @@ def _emit_replica_artifact_lines(
             ]
         )
     return lines
-
-
-def _emit_peer_arg_heredocs(
-    peer: "Peer",
-    pre_submission_id: str,
-) -> Tuple[List[str], str, str]:
-    """Emit base64 heredocs that unpack per-peer args/kwargs at allocation start.
-
-    The heredocs produce files with the bare ``peer_<name>_*.pkl`` names in
-    ``$JOB_DIR``. ``pre_submission_id`` is passed through for logging only —
-    the filenames deliberately do *not* include it so the rendered directory
-    stays legible to humans.
-
-    Singleton peers (``count == 1``) get one pair of args/kwargs pickles
-    built from the :class:`BoundTask` binding. Replica peers (``count > 1``)
-    are handled by :func:`_emit_replica_arg_heredocs` — the bare args/kwargs
-    files are still emitted for the :attr:`BoundTask` base binding so the
-    replica loader can fall back to the shared binding when a replica's
-    per-index args are empty.
-
-    Returns:
-        (lines, args_basename, kwargs_basename)
-    """
-    artifact = _build_peer_artifact_bundle(peer, pre_submission_id=pre_submission_id)
-    lines = _emit_peer_artifact_lines(peer.resolved_name, artifact)
-    return lines, artifact.args_basename, artifact.kwargs_basename
-
-
-def _emit_replica_arg_heredocs(
-    peer: "Peer",
-    replica_items: List[Any],
-) -> List[str]:
-    """Emit one base64 heredoc per replica for a replica peer.
-
-    Called with the pre-computed per-index payload list (dict / tuple / scalar)
-    prepared at submission time by ``_parallel_submission.resolve_replica_args``.
-    Each heredoc materialises ``peer_<name>_<index>_args.pkl`` in ``$JOB_DIR``
-    — the runner loads exactly one of these per ``SLURM_PROCID`` via
-    :func:`_load_peer_replica_arguments`.
-    """
-    artifact = _build_peer_artifact_bundle(
-        peer,
-        pre_submission_id="",
-        replica_items=replica_items,
-    )
-    return _emit_replica_artifact_lines(
-        peer.resolved_name, artifact.replica_payloads_b64
-    )
 
 
 def _emit_peer_srun_command(
@@ -787,7 +738,6 @@ def prepare_parallel_submission(
     for peer in spec.peers:
         artifact = _build_peer_artifact_bundle(
             peer,
-            pre_submission_id=pre_submission_id,
             replica_items=replica_items.get(peer.resolved_name)
             if peer.is_replica_set
             else None,
@@ -1107,15 +1057,7 @@ def _build_shared_runner_inputs(
 
     callbacks_filename = f"slurm_job_{pre_submission_id}_{CALLBACKS_FILENAME}"
 
-    picklable_callbacks: List[Any] = []
-    for cb in callbacks:
-        try:
-            pickle.dumps(cb)
-            picklable_callbacks.append(cb)
-        except Exception as err:
-            logger.debug(
-                "Skipping non-picklable callback %s: %s", type(cb).__name__, err
-            )
+    picklable_callbacks = _filter_picklable_callbacks(callbacks)
 
     callbacks_payload_b64 = None
     if picklable_callbacks:

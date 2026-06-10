@@ -375,6 +375,41 @@ def load_node_group(
     return _load_nodes_from_path(Path(registry_path), current_pool)
 
 
+@contextlib.contextmanager
+def _locked_peer_entry(
+    path: "str | Path", peer_name: str, replica_index: int
+) -> "Iterator[tuple[dict, list, dict]]":
+    """Lock the registry and yield ``(registry, entries, entry)`` for one peer.
+
+    Holds the cross-process lock across read → mutate → write. ``entry`` is a
+    *copy* of ``entries[replica_index]``; the caller mutates it (and may touch
+    ``registry`` directly), and on a clean exit the copy is stored back and the
+    whole registry is rewritten atomically.
+
+    Raises:
+        KeyError: If ``peer_name`` is not in the registry.
+        IndexError: If ``replica_index`` is out of range.
+    """
+    with _with_registry_lock(path):
+        registry = read_registry(path)
+        peers = registry.setdefault("peers", {})
+        entries = peers.get(peer_name)
+        if not entries:
+            raise KeyError(
+                f"Peer {peer_name!r} not found in registry (known: "
+                f"{sorted(peers.keys())})"
+            )
+        if replica_index < 0 or replica_index >= len(entries):
+            raise IndexError(
+                f"replica_index {replica_index} out of range for peer "
+                f"{peer_name!r} (have {len(entries)} entries)"
+            )
+        entry = dict(entries[replica_index])
+        yield registry, entries, entry
+        entries[replica_index] = entry
+        write_registry(path, registry)
+
+
 def update_peer_hostinfo(
     path: "str | Path",
     peer_name: str,
@@ -509,28 +544,12 @@ def announce_peer_metadata(
             f"Reserved keys are {sorted(_RESERVED_ANNOUNCE_KEYS)}."
         )
 
-    with _with_registry_lock(path):
-        registry = read_registry(path)
-        peers = registry.setdefault("peers", {})
-        entries = peers.get(peer_name)
-        if not entries:
-            raise KeyError(
-                f"Peer {peer_name!r} not found in registry (known: "
-                f"{sorted(peers.keys())})"
-            )
-        if replica_index < 0 or replica_index >= len(entries):
-            raise IndexError(
-                f"replica_index {replica_index} out of range for peer "
-                f"{peer_name!r} (have {len(entries)} entries)"
-            )
-        entry = dict(entries[replica_index])
+    with _locked_peer_entry(path, peer_name, replica_index) as (registry, _, entry):
         metadata = dict(entry.get("metadata") or {})
         metadata.update(fields)
         entry["metadata"] = metadata
         if ready:
             entry["state"] = STATE_READY
-        entries[replica_index] = entry
-        write_registry(path, registry)
     return registry
 
 
@@ -550,25 +569,9 @@ def update_peer_ports(
     Replaces rather than merges so callers pass a full desired map and we
     never leave stale entries behind.
     """
-    with _with_registry_lock(path):
-        registry = read_registry(path)
-        peers = registry.setdefault("peers", {})
-        entries = peers.get(peer_name)
-        if not entries:
-            raise KeyError(
-                f"Peer {peer_name!r} not found in registry (known: "
-                f"{sorted(peers.keys())})"
-            )
-        if replica_index < 0 or replica_index >= len(entries):
-            raise IndexError(
-                f"replica_index {replica_index} out of range for peer "
-                f"{peer_name!r} (have {len(entries)} entries)"
-            )
-        entry = dict(entries[replica_index])
+    with _locked_peer_entry(path, peer_name, replica_index) as (registry, _, entry):
         # JSON keys must be strings; values must be ints — the writer clamps here.
         entry["ports"] = {str(k): int(v) for k, v in ports.items()}
-        entries[replica_index] = entry
-        write_registry(path, registry)
     return registry
 
 
@@ -597,25 +600,8 @@ def update_peer_entry(
         The full registry dict after the update, for callers that want to
         avoid a second read.
     """
-    with _with_registry_lock(path):
-        registry = read_registry(path)
-        peers = registry.setdefault("peers", {})
-        entries = peers.get(peer_name)
-        if not entries:
-            raise KeyError(
-                f"Peer {peer_name!r} not found in registry (known: "
-                f"{sorted(peers.keys())})"
-            )
-        if replica_index < 0 or replica_index >= len(entries):
-            raise IndexError(
-                f"replica_index {replica_index} out of range for peer "
-                f"{peer_name!r} (have {len(entries)} entries)"
-            )
-        entry = dict(entries[replica_index])
+    with _locked_peer_entry(path, peer_name, replica_index) as (registry, _, entry):
         entry.update(changes)
-        entries[replica_index] = entry
-        # Persist inside the lock so a concurrent writer sees the update.
-        write_registry(path, registry)
     return registry
 
 

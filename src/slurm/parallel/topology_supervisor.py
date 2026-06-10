@@ -105,6 +105,21 @@ def _component_job_ids(job_id: Optional[str], component_count: int) -> List[str]
     return ids
 
 
+def _run_scancel(targets: List[str], *, sig: Optional[str]) -> None:
+    """Best-effort ``scancel [--signal=<sig>] <targets...>``; no-op on absence.
+
+    ``sig=None`` issues a hard cancel. Swallows missing-binary / timeout
+    errors so shutdown never crashes the supervisor on a host without Slurm.
+    """
+    if not targets:
+        return
+    cmd = ["scancel", *([] if sig is None else [f"--signal={sig}"]), *targets]
+    try:
+        subprocess.run(cmd, check=False, timeout=5)  # nosec B603,B607 - trusted scancel
+    except (FileNotFoundError, subprocess.TimeoutExpired) as err:
+        logger.debug("scancel %s not issued: %s", cmd[1:], err)
+
+
 def _signal_slurm_job(
     job_id: Optional[str],
     sig: str = "TERM",
@@ -116,17 +131,7 @@ def _signal_slurm_job(
     For hetjob submissions every component is signalled in one ``scancel``
     call so Slurm's reaper tears down the whole allocation atomically.
     """
-    targets = _component_job_ids(job_id, component_count)
-    if not targets:
-        return
-    try:
-        subprocess.run(  # nosec B603,B607 - trusted scancel invocation
-            ["scancel", f"--signal={sig}", *targets],
-            check=False,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as err:
-        logger.debug("scancel --signal=%s not issued: %s", sig, err)
+    _run_scancel(_component_job_ids(job_id, component_count), sig=sig)
 
 
 def _hard_cancel_slurm_job(
@@ -135,29 +140,22 @@ def _hard_cancel_slurm_job(
     component_count: int = 1,
 ) -> None:
     """Best-effort ``scancel <job_id>[ +1 +2 ...]``; no-op without scancel."""
-    targets = _component_job_ids(job_id, component_count)
-    if not targets:
-        return
-    try:
-        subprocess.run(  # nosec B603,B607 - trusted scancel invocation
-            ["scancel", *targets],
-            check=False,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as err:
-        logger.debug("scancel (hard) not issued: %s", err)
+    _run_scancel(_component_job_ids(job_id, component_count), sig=None)
 
 
-def _terminate_local_processes(
-    processes: Dict[int, subprocess.Popen], *, use_process_groups: bool = False
+def _signal_local_processes(
+    processes: Dict[int, subprocess.Popen],
+    sig: int,
+    *,
+    use_process_groups: bool = False,
 ) -> None:
-    """Send SIGTERM to each peer subprocess.
+    """Send ``sig`` (SIGTERM or SIGKILL) to each peer subprocess.
 
-    When ``use_process_groups`` is True (local mode), we signal the whole
-    process group via :func:`os.killpg` so descendants the peer spawned
-    also receive the signal. Real-Slurm mode relies on ``scancel
-    --signal=TERM`` for remote step processes and only needs ``terminate()``
-    on the local ``srun`` wrapper.
+    When ``use_process_groups`` is True (local mode), signal the whole process
+    group via :func:`os.killpg` so descendants the peer spawned also receive
+    it. Real-Slurm mode relies on ``scancel --signal=...`` for remote step
+    processes and only needs ``terminate()``/``kill()`` on the local ``srun``
+    wrapper.
     """
     for pid, proc in list(processes.items()):
         try:
@@ -166,33 +164,15 @@ def _terminate_local_processes(
                     pgid = os.getpgid(pid)
                 except ProcessLookupError:
                     continue
-                os.killpg(pgid, signal.SIGTERM)
+                os.killpg(pgid, sig)
+            elif sig == signal.SIGKILL:
+                proc.kill()
             else:
                 proc.terminate()
         except ProcessLookupError:
             pass
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("terminate pid=%s failed: %s", pid, exc)
-
-
-def _kill_local_processes(
-    processes: Dict[int, subprocess.Popen], *, use_process_groups: bool = False
-) -> None:
-    """Send SIGKILL to each peer subprocess (hard-kill cascade)."""
-    for pid, proc in list(processes.items()):
-        try:
-            if use_process_groups:
-                try:
-                    pgid = os.getpgid(pid)
-                except ProcessLookupError:
-                    continue
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                proc.kill()
-        except ProcessLookupError:
-            pass
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("kill pid=%s failed: %s", pid, exc)
+            logger.debug("signal %s pid=%s failed: %s", sig, pid, exc)
 
 
 def _extract_runner_argv(srun_command_line: str) -> List[str]:
@@ -694,7 +674,9 @@ def run_supervisor(
             shutdown_deadline = time.time() + plan.grace_period_seconds
             if not local_mode:
                 _signal_slurm_job(job_id, "TERM", component_count=component_count)
-            _terminate_local_processes(processes, use_process_groups=local_mode)
+            _signal_local_processes(
+                processes, signal.SIGTERM, use_process_groups=local_mode
+            )
 
         # 2. Reap any peers that exited since the last poll.
         for pid in list(processes):
@@ -738,7 +720,9 @@ def run_supervisor(
                         _signal_slurm_job(
                             job_id, "TERM", component_count=component_count
                         )
-                    _terminate_local_processes(processes, use_process_groups=local_mode)
+                    _signal_local_processes(
+                        processes, signal.SIGTERM, use_process_groups=local_mode
+                    )
                 continue
 
             # Non-zero: shutdown-in-progress peers became victims of the
@@ -801,8 +785,8 @@ def run_supervisor(
                             if sib_proc is not None:
                                 siblings[sib_pid] = sib_proc
                         if siblings:
-                            _terminate_local_processes(
-                                siblings, use_process_groups=True
+                            _signal_local_processes(
+                                siblings, signal.SIGTERM, use_process_groups=True
                             )
                             deadline = time.time() + max(1, plan.grace_period_seconds)
                             while siblings and time.time() < deadline:
@@ -811,7 +795,9 @@ def run_supervisor(
                                         del siblings[pid]
                                 time.sleep(0.05)
                             if siblings:
-                                _kill_local_processes(siblings, use_process_groups=True)
+                                _signal_local_processes(
+                                    siblings, signal.SIGKILL, use_process_groups=True
+                                )
                                 for proc in siblings.values():
                                     try:
                                         proc.wait(timeout=2)
@@ -870,7 +856,9 @@ def run_supervisor(
                 shutdown_deadline = time.time() + plan.grace_period_seconds
                 if not local_mode:
                     _signal_slurm_job(job_id, "TERM", component_count=component_count)
-                _terminate_local_processes(processes, use_process_groups=local_mode)
+                _signal_local_processes(
+                    processes, signal.SIGTERM, use_process_groups=local_mode
+                )
 
         # 3. Enforce grace window — hard-kill anything still running when
         #    the deadline passes.
@@ -884,7 +872,9 @@ def run_supervisor(
                 "Grace window expired; hard-killing %d remaining peer(s)",
                 len(processes),
             )
-            _kill_local_processes(processes, use_process_groups=local_mode)
+            _signal_local_processes(
+                processes, signal.SIGKILL, use_process_groups=local_mode
+            )
             if not local_mode:
                 _hard_cancel_slurm_job(job_id, component_count=component_count)
             hard_killed = True
