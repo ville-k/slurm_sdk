@@ -13,7 +13,6 @@ def _sample_plan() -> Plan:
                 pool="default",
                 leader=True,
                 on_failure="kill",
-                max_restarts=0,
                 srun_command_line="srun --exact python -m slurm.runner --step peer:train",
             ),
             PlanPeer(
@@ -21,7 +20,6 @@ def _sample_plan() -> Plan:
                 pool="default",
                 leader=False,
                 on_failure="continue",
-                max_restarts=0,
                 srun_command_line="srun --exact python -m slurm.runner --step peer:metrics",
             ),
         ],
@@ -60,41 +58,3 @@ def test_write_read_plan_file(tmp_path):
     restored = read_plan(path)
     assert restored.pre_submission_id == plan.pre_submission_id
     assert [p.name for p in restored.peers] == ["train", "metrics"]
-
-
-def test_plan_defaults_max_restarts_when_missing():
-    raw = """\
-{
-  "schema_version": 1,
-  "peers": [
-    {"name": "x", "pool": "default", "leader": false, "on_failure": "kill",
-     "srun_command_line": "echo"}
-  ],
-  "grace_period_seconds": 10,
-  "pool_names": ["default"]
-}"""
-    plan = Plan.from_json(raw)
-    assert plan.peers[0].max_restarts == 0
-    # Missing callback field defaults to None — Phase 4 adds the field but
-    # older plans written by the Phase 3 pipeline must still round-trip.
-    assert plan.peers[0].callback is None
-
-
-def test_plan_peer_preserves_callback_fqname():
-    peer = PlanPeer(
-        name="worker",
-        pool="default",
-        leader=False,
-        on_failure="callback",
-        max_restarts=0,
-        srun_command_line="echo",
-        callback="my.module:my_callback",
-    )
-    plan = Plan(
-        peers=[peer],
-        grace_period_seconds=5,
-        pool_names=["default"],
-        pre_submission_id="cb",
-    )
-    restored = Plan.from_json(plan.to_json())
-    assert restored.peers[0].callback == "my.module:my_callback"

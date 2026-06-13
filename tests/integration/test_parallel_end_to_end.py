@@ -29,7 +29,6 @@ from slurm import Peer, Pool, Topology, parallel
 from slurm.examples.integration_test_task import (
     parallel_coordinator_task,
     parallel_downstream_peer_task,
-    parallel_flaky_peer_task,
     parallel_leader_task,
     parallel_long_lived_sidecar_task,
     parallel_pool_identity_task,
@@ -281,41 +280,6 @@ def test_service_discovery_under_real_slurm(slurm_cluster):
     #   startup ``_publish_initial_hostinfo`` ran against
     #   scheduler-populated env vars rather than synthesized locals.
     assert worker["coordinator_hostname"], "coordinator hostname still empty"
-
-
-# ---------------------------------------------------------------------------
-# 5. Restart — supervisor relaunches a failed peer under real Slurm.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration_test
-@pytest.mark.slow_integration_test
-def test_restart_under_real_slurm(slurm_cluster):
-    """``on_failure="restart"`` survives one non-zero exit and succeeds.
-
-    The peer fails once (marker-less state → exit 7), the supervisor
-    re-launches the same step via a fresh ``srun``, and the second attempt
-    sees the marker in ``ctx.shared_dir`` and returns cleanly. Registry
-    restart_count must reflect exactly one restart.
-    """
-    with slurm_cluster:
-        job = parallel(
-            Peer(
-                parallel_flaky_peer_task,
-                name="flaky",
-                on_failure="restart",
-                max_restarts=3,
-            ),
-        )
-        assert job.wait(timeout=240)
-        results = job.get_results()
-        outcomes = job.peer_outcomes()
-
-    assert results["flaky"] == 99
-    outcome = outcomes["flaky"]
-    assert outcome.status == "restarted"
-    assert outcome.restart_count == 1
-    assert outcome.exit_code == 0
 
 
 # ---------------------------------------------------------------------------

@@ -176,29 +176,10 @@ def test_peer_explicit_name_wins():
 
 
 def test_peer_on_failure_values():
-    for policy in ("kill", "continue", "restart"):
+    for policy in ("kill", "continue"):
         Peer(_train, on_failure=policy)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="on_failure"):
         Peer(_train, on_failure="explode")  # type: ignore[arg-type]
-
-
-def test_peer_callback_required_for_callback_policy():
-    with pytest.raises(ValueError, match="requires callback"):
-        Peer(_train, on_failure="callback")
-
-
-def test_peer_callback_only_with_callback_policy():
-    def cb(snap):
-        return "kill"
-
-    with pytest.raises(ValueError, match="only used with on_failure"):
-        Peer(_train, callback=cb)
-
-
-def test_peer_max_restarts_non_negative():
-    Peer(_train, on_failure="restart", max_restarts=0)
-    with pytest.raises(ValueError, match="max_restarts"):
-        Peer(_train, on_failure="restart", max_restarts=-1)
 
 
 def test_peer_leader_continue_rejected():

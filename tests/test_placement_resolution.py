@@ -63,8 +63,6 @@ def _spec(peers: list[Peer], pools: dict[str, Pool]) -> _ParallelSpec:
                     name=p.name,
                     leader=p.leader,
                     on_failure=p.on_failure,
-                    max_restarts=p.max_restarts,
-                    callback=p.callback,
                     exclusive=p.exclusive,
                     on_node=p.on_node,
                     colocate_with=p.colocate_with,

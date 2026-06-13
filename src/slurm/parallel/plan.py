@@ -10,9 +10,9 @@ supervisor both read it:
   ``srun`` and apply failure policies.
 
 The schema is intentionally small and stable — phases 4+ add fields
-(``max_restarts``, ``callback_module``, replica info, hetjob component
-index), but the existing fields stay put so older bootstraps can read newer
-plans in lockstep with the SDK version that wrote them.
+(replica info, hetjob component index), but the existing fields stay put so
+older bootstraps can read newer plans in lockstep with the SDK version that
+wrote them.
 """
 
 from __future__ import annotations
@@ -32,15 +32,7 @@ class PlanPeer:
         pool: Pool the peer targets — one of :attr:`Plan.pool_names`.
         leader: Whether this peer is a leader. Leader exit (any outcome)
             triggers cascading shutdown of siblings.
-        on_failure: ``"kill"`` / ``"continue"`` / ``"restart"`` / ``"callback"``.
-        max_restarts: Maximum restart count for ``on_failure="restart"``.
-            Ignored for other policies.
-        callback: Fully-qualified name of the user's failure callback in
-            ``"module:qualname"`` form, or ``None`` when ``on_failure`` is
-            not ``"callback"``. The supervisor imports and resolves the
-            callable at startup. We use a string because live callables
-            cannot be pickled reliably across the process boundary between
-            the submission host and the batch allocation.
+        on_failure: ``"kill"`` / ``"continue"``.
         srun_command_line: The shell command that, when executed under
             ``bash -c``, launches this peer's ``srun`` step. Using a
             pre-rendered string (rather than an argv list) lets the shell
@@ -53,9 +45,7 @@ class PlanPeer:
     pool: str
     leader: bool
     on_failure: str
-    max_restarts: int
     srun_command_line: str
-    callback: "str | None" = None
     # Replica count — ``1`` for singleton peers, ``> 1`` for replica sets
     # produced by :meth:`Peer.replicas`. The bootstrap uses this to size
     # the registry skeleton (``count`` entries per replica peer).
@@ -91,9 +81,7 @@ class PlanPeer:
             "pool": self.pool,
             "leader": self.leader,
             "on_failure": self.on_failure,
-            "max_restarts": self.max_restarts,
             "srun_command_line": self.srun_command_line,
-            "callback": self.callback,
             "replica_count": self.replica_count,
             "component_index": self.component_index,
             "nodelist": list(self.nodelist) if self.nodelist is not None else None,
@@ -129,9 +117,7 @@ class PlanPeer:
             pool=data["pool"],
             leader=bool(data["leader"]),
             on_failure=data["on_failure"],
-            max_restarts=int(data.get("max_restarts", 0)),
             srun_command_line=data["srun_command_line"],
-            callback=data.get("callback"),
             replica_count=int(data.get("replica_count", 1)),
             component_index=int(data.get("component_index", 0)),
             nodelist=nodelist,

@@ -301,7 +301,6 @@ def test_launch_peer_local_sets_slurm_procid(tmp_path, monkeypatch):
         pool="default",
         leader=False,
         on_failure="kill",
-        max_restarts=0,
         srun_command_line=srun,
         replica_count=3,
     )

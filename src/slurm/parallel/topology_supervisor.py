@@ -6,15 +6,6 @@ exits with a poll loop, and applies per-peer failure policies:
 
 - ``on_failure="kill"`` — a non-zero peer exit triggers cascading shutdown.
 - ``on_failure="continue"`` — a non-zero peer exit is logged and tolerated.
-- ``on_failure="restart"`` — supervisor re-launches the peer up to
-  ``max_restarts`` times before falling through to ``"kill"``. Restart is
-  transparent to the outer state machine: the peer keeps the same name /
-  command / placement and its entry in the registry is updated atomically.
-- ``on_failure="callback"`` — supervisor imports the user's callback by
-  fully-qualified name (``module:qualname``) and invokes it with a
-  :class:`JobSnapshot` built from the registry + exit state. The callback's
-  return value (``"kill"`` / ``"continue"``) dispatches the same code paths
-  those policies already use.
 - ``leader=True`` — the peer's exit (any outcome) triggers shutdown; the
   leader's exit code becomes the supervisor's exit code.
 
@@ -31,7 +22,6 @@ string (see :data:`slurm.parallel.registry.OUTCOME_*`) so
 from __future__ import annotations
 
 import argparse
-import importlib
 import logging
 import os
 import shlex
@@ -47,11 +37,9 @@ from .registry import (
     OUTCOME_CONTINUE_ON_FAILURE,
     OUTCOME_FATAL,
     OUTCOME_NOT_STARTED,
-    OUTCOME_RESTARTED,
     OUTCOME_SHUTDOWN_BY_LEADER,
     OUTCOME_SUCCESS,
     STATE_FAILED,
-    STATE_RUNNING,
     STATE_SHUTDOWN_BY_LEADER,
     STATE_SUCCESS,
     update_peer_entry,
@@ -345,103 +333,6 @@ def _exit_code_of(proc: subprocess.Popen) -> int:
     return 128 + (-rc)
 
 
-def _resolve_callback(fqname: str) -> Callable[..., Any]:
-    """Import a user callback from ``"module:qualname"``.
-
-    The qualname walk handles methods and nested class attributes (``A.B.c``)
-    even though validation forbids ``<locals>`` / ``<lambda>`` — supporting
-    attribute walks keeps the resolver symmetric with Python's normal import
-    semantics.
-
-    Raises ImportError / AttributeError (wrapped by ``_invoke_callback``) so
-    callers can decide whether to treat a broken callback as a fatal abort.
-    """
-    module_name, _, qualname = fqname.partition(":")
-    if not module_name or not qualname:
-        raise ImportError(
-            f"Callback {fqname!r} is not a valid 'module:qualname' reference"
-        )
-    obj: Any = importlib.import_module(module_name)
-    for part in qualname.split("."):
-        obj = getattr(obj, part)
-    if not callable(obj):
-        raise TypeError(f"Callback {fqname!r} resolved to non-callable {obj!r}")
-    return obj
-
-
-def _build_snapshot(
-    peer: PlanPeer, exit_code: int, registry_path: Optional[Path]
-) -> Any:
-    """Construct a :class:`JobSnapshot`-shaped object for a failed peer.
-
-    We import :class:`JobSnapshot` lazily because the supervisor process
-    doesn't otherwise need anything from :mod:`slurm.job`, and circular
-    imports are cheaper to avoid than to debug. All fields get conservative
-    defaults — the caller's callback sees the true exit code / state but
-    log tails stay empty because the supervisor does not stream stdout.
-    """
-    from ..job import JobSnapshot
-
-    state = "COMPLETED" if exit_code == 0 else "FAILED"
-    # Format matches ``sacct``: ``<exit>:<signal>``. Signal detection from the
-    # Popen-level return code happens in ``_exit_code_of`` — by the time we
-    # reach here the signal has already been folded into ``exit_code``.
-    exit_code_str = f"{exit_code}:0"
-    reason = None
-    if registry_path is not None:
-        try:
-            from .registry import read_registry
-
-            registry = read_registry(registry_path)
-            entry = registry.get("peers", {}).get(peer.name, [{}])[0]
-            reason = entry.get("message")
-        except Exception:  # pragma: no cover - defensive
-            reason = None
-    return JobSnapshot(
-        job_id=os.environ.get("SLURM_JOB_ID", ""),
-        state=state,
-        exit_code=exit_code_str,
-        reason=reason,
-        stdout_tail="",
-        stderr_tail="",
-        elapsed_seconds=None,
-        is_terminal=True,
-        is_successful=(exit_code == 0),
-    )
-
-
-def _invoke_callback(
-    peer: PlanPeer, exit_code: int, registry_path: Optional[Path]
-) -> str:
-    """Run the user callback, return ``"kill"`` / ``"continue"``.
-
-    Any exception during import or invocation is treated as ``"kill"`` so
-    a broken callback fails loudly instead of silently tolerating failures.
-    """
-    assert peer.callback is not None  # guaranteed by policy routing
-    try:
-        fn = _resolve_callback(peer.callback)
-        snapshot = _build_snapshot(peer, exit_code, registry_path)
-        result = fn(snapshot)
-    except Exception as exc:
-        logger.error(
-            "Peer %s callback %s raised %s — treating as kill",
-            peer.name,
-            peer.callback,
-            exc,
-        )
-        return "kill"
-    if result not in ("kill", "continue"):
-        logger.error(
-            "Peer %s callback %s returned %r (not 'kill'/'continue') — treating as kill",
-            peer.name,
-            peer.callback,
-            result,
-        )
-        return "kill"
-    return result
-
-
 def _record_outcome(
     registry_path: Optional[Path],
     peer: "PlanPeer",
@@ -449,7 +340,6 @@ def _record_outcome(
     *,
     exit_code: Optional[int] = None,
     state: Optional[str] = None,
-    restart_count: Optional[int] = None,
     message: Optional[str] = None,
 ) -> None:
     """Persist a peer's terminal outcome to the registry atomically.
@@ -467,8 +357,6 @@ def _record_outcome(
         changes["final_exit_code"] = exit_code
     if state is not None:
         changes["state"] = state
-    if restart_count is not None:
-        changes["restart_count"] = restart_count
     if message is not None:
         changes["message"] = message
     count = max(1, peer.replica_count)
@@ -484,70 +372,21 @@ def _record_outcome(
             )
 
 
-def _increment_restart_count(
-    registry_path: Optional[Path], peer: "PlanPeer", new_value: int
-) -> None:
-    """Bump ``restart_count`` atomically before re-launching a peer."""
-    if registry_path is None:
-        return
-    count = max(1, peer.replica_count)
-    for replica_index in range(count):
-        try:
-            update_peer_entry(
-                registry_path,
-                peer.name,
-                replica_index,
-                restart_count=new_value,
-                state=STATE_RUNNING,
-            )
-        except (FileNotFoundError, KeyError, OSError, IndexError) as exc:
-            logger.debug(
-                "Could not bump restart_count for %s[%d]: %s",
-                peer.name,
-                replica_index,
-                exc,
-            )
-
-
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
 
-def _resolve_policy(
-    peer: PlanPeer,
-    exit_code: int,
-    restart_count: int,
-    registry_path: Optional[Path],
-) -> Tuple[str, Optional[str]]:
+def _resolve_policy(peer: PlanPeer) -> Tuple[str, Optional[str]]:
     """Decide what to do with a non-zero exit.
 
     Returns ``(action, note)`` where ``action`` is one of:
 
     - ``"kill"`` — treat this peer as fatal; triggers cascading shutdown.
     - ``"continue"`` — tolerate the failure; keep other peers running.
-    - ``"restart"`` — re-launch the peer.
 
-    ``note`` is an optional diagnostic string persisted to the registry
-    (e.g. "restart budget exhausted after 3 attempts").
+    ``note`` is an optional diagnostic string persisted to the registry.
     """
-    # Leader failures always win over per-peer policy because the leader
-    # drives the group's termination condition; a restarting leader is
-    # allowed (Phase 4 semantics) but a leader with no restart budget left
-    # still triggers shutdown with its exit code.
-    if peer.on_failure == "restart":
-        if restart_count < peer.max_restarts:
-            return (
-                "restart",
-                f"restart {restart_count + 1}/{peer.max_restarts} after exit {exit_code}",
-            )
-        return (
-            "kill",
-            f"restart budget exhausted after {restart_count} attempt(s)",
-        )
-    if peer.on_failure == "callback":
-        decision = _invoke_callback(peer, exit_code, registry_path)
-        return decision, f"callback decided {decision!r}"
     if peer.on_failure == "continue":
         return "continue", None
     # Default + explicit "kill"
@@ -614,10 +453,7 @@ def run_supervisor(
 
     processes: Dict[int, subprocess.Popen] = {}
     peer_by_pid: Dict[int, PlanPeer] = {}
-    # Track restart counts so we can decide whether to restart again when a
-    # peer with on_failure="restart" keeps failing.
-    restart_count: Dict[str, int] = {peer.name: 0 for peer in plan.peers}
-    # Peers that still have an outstanding process (or will be restarted).
+    # Peers that still have an outstanding process.
     # Used to write OUTCOME_NOT_STARTED for peers that never got a chance
     # (e.g. an upstream peer aborted before they launched — rare but possible
     # if we extend this loop later to stagger launches).
@@ -698,17 +534,14 @@ def run_supervisor(
 
             # Success path — record outcome and (if leader) trigger shutdown.
             if exit_code == 0:
-                count = restart_count.get(peer.name, 0)
-                outcome = OUTCOME_RESTARTED if count > 0 else OUTCOME_SUCCESS
                 _record_outcome(
                     registry_path,
                     peer,
-                    outcome,
+                    OUTCOME_SUCCESS,
                     exit_code=0,
                     state=STATE_SUCCESS,
-                    restart_count=count,
                 )
-                recorded[peer.name] = outcome
+                recorded[peer.name] = OUTCOME_SUCCESS
                 if peer.leader and shutdown_deadline is None:
                     logger.info(
                         "Leader %s exited cleanly — signalling %d sibling(s)",
@@ -737,86 +570,12 @@ def run_supervisor(
                         OUTCOME_SHUTDOWN_BY_LEADER,
                         exit_code=exit_code,
                         state=STATE_SHUTDOWN_BY_LEADER,
-                        restart_count=restart_count.get(peer.name, 0),
                     )
                     recorded[peer.name] = OUTCOME_SHUTDOWN_BY_LEADER
                 continue
 
             # Fresh failure — consult the peer's policy.
-            action, note = _resolve_policy(
-                peer,
-                exit_code,
-                restart_count.get(peer.name, 0),
-                registry_path,
-            )
-
-            if action == "restart":
-                new_count = restart_count.get(peer.name, 0) + 1
-                restart_count[peer.name] = new_count
-                _increment_restart_count(registry_path, peer, new_count)
-                logger.info(
-                    "Restarting peer %s (attempt %d/%d)",
-                    peer.name,
-                    new_count,
-                    peer.max_restarts,
-                )
-                # Restart semantics match Slurm's atomic-step behaviour:
-                # ``srun --ntasks=N`` is one step, so a non-zero exit from
-                # any task restarts the whole step. Slurm mode gets this
-                # for free — ``launch_fn(peer)`` re-submits the single
-                # step. Local mode launches one subprocess per replica, so
-                # we explicitly terminate any still-live siblings of the
-                # failing replica before spawning a fresh set of N.
-                if local_mode:
-                    launches = max(1, peer.replica_count)
-                    if launches > 1:
-                        # Collect live siblings (same peer name) and
-                        # terminate them with the same SIGTERM-grace-
-                        # SIGKILL cascade used for external shutdowns.
-                        sibling_pids = [
-                            pid
-                            for pid, other in peer_by_pid.items()
-                            if other.name == peer.name
-                        ]
-                        siblings: Dict[int, subprocess.Popen] = {}
-                        for sib_pid in sibling_pids:
-                            sib_proc = processes.pop(sib_pid, None)
-                            peer_by_pid.pop(sib_pid, None)
-                            if sib_proc is not None:
-                                siblings[sib_pid] = sib_proc
-                        if siblings:
-                            _signal_local_processes(
-                                siblings, signal.SIGTERM, use_process_groups=True
-                            )
-                            deadline = time.time() + max(1, plan.grace_period_seconds)
-                            while siblings and time.time() < deadline:
-                                for pid in list(siblings):
-                                    if siblings[pid].poll() is not None:
-                                        del siblings[pid]
-                                time.sleep(0.05)
-                            if siblings:
-                                _signal_local_processes(
-                                    siblings, signal.SIGKILL, use_process_groups=True
-                                )
-                                for proc in siblings.values():
-                                    try:
-                                        proc.wait(timeout=2)
-                                    except subprocess.TimeoutExpired:
-                                        pass
-                        for replica_index in range(launches):
-                            new_proc = _launch_one(peer, replica_index)
-                            processes[new_proc.pid] = new_proc
-                            peer_by_pid[new_proc.pid] = peer
-                    else:
-                        new_proc = _launch_one(peer, 0)
-                        processes[new_proc.pid] = new_proc
-                        peer_by_pid[new_proc.pid] = peer
-                else:
-                    assert launch_fn is not None
-                    new_proc = launch_fn(peer)
-                    processes[new_proc.pid] = new_proc
-                    peer_by_pid[new_proc.pid] = peer
-                continue
+            action, note = _resolve_policy(peer)
 
             if action == "continue":
                 _record_outcome(
@@ -825,7 +584,6 @@ def run_supervisor(
                     OUTCOME_CONTINUE_ON_FAILURE,
                     exit_code=exit_code,
                     state=STATE_FAILED,
-                    restart_count=restart_count.get(peer.name, 0),
                     message=note,
                 )
                 recorded[peer.name] = OUTCOME_CONTINUE_ON_FAILURE
@@ -840,7 +598,6 @@ def run_supervisor(
                 OUTCOME_FATAL,
                 exit_code=exit_code,
                 state=STATE_FAILED,
-                restart_count=restart_count.get(peer.name, 0),
                 message=note,
             )
             recorded[peer.name] = OUTCOME_FATAL
@@ -894,7 +651,6 @@ def run_supervisor(
                 OUTCOME_NOT_STARTED,
                 exit_code=None,
                 state=STATE_FAILED,
-                restart_count=restart_count.get(name, 0),
                 message="peer never entered Popen",
             )
 
@@ -907,27 +663,6 @@ def _configure_logging() -> None:
         level=loglevel,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-
-
-def _preload_callbacks(plan: Plan) -> None:
-    """Import every plan callback up front so failures surface at start.
-
-    Fail-fast is the point: if a user misconfigures a callback's module
-    path, we'd rather die before launching peers than discover the typo
-    only when the callback is needed (which may be mid-run, hours in).
-    """
-    for peer in plan.peers:
-        if peer.on_failure == "callback" and peer.callback:
-            try:
-                _resolve_callback(peer.callback)
-            except Exception as exc:
-                logger.error(
-                    "Failed to resolve callback %s for peer %s: %s",
-                    peer.callback,
-                    peer.name,
-                    exc,
-                )
-                raise
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -972,8 +707,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             schema_version=plan.schema_version,
             components=plan.components,
         )
-
-    _preload_callbacks(plan)
 
     registry_path = job_dir / "registry.json"
     shared_dir = job_dir / "shared"

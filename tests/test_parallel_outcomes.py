@@ -20,7 +20,6 @@ from slurm.parallel.registry import (
     OUTCOME_CONTINUE_ON_FAILURE,
     OUTCOME_FATAL,
     OUTCOME_NOT_STARTED,
-    OUTCOME_RESTARTED,
     OUTCOME_SHUTDOWN_BY_LEADER,
     OUTCOME_SUCCESS,
     write_registry,
@@ -120,9 +119,8 @@ def test_peer_outcomes_returns_entry_per_peer(tmp_path: Path):
         {
             "a": {"outcome": OUTCOME_SUCCESS, "final_exit_code": 0},
             "b": {
-                "outcome": OUTCOME_RESTARTED,
-                "final_exit_code": 0,
-                "restart_count": 2,
+                "outcome": OUTCOME_SHUTDOWN_BY_LEADER,
+                "final_exit_code": 143,
             },
             "c": {
                 "outcome": OUTCOME_CONTINUE_ON_FAILURE,
@@ -145,7 +143,7 @@ def test_peer_outcomes_returns_entry_per_peer(tmp_path: Path):
     outcomes = job.peer_outcomes()
     assert outcomes["a"] == PeerOutcome(status="success", exit_code=0, restart_count=0)
     assert outcomes["b"] == PeerOutcome(
-        status="restarted", exit_code=0, restart_count=2
+        status="shutdown_by_leader", exit_code=143, restart_count=0
     )
     assert outcomes["c"] == PeerOutcome(
         status="continue_on_failure",
@@ -199,7 +197,7 @@ def test_get_results_raises_composite_error_when_any_peer_fatal(tmp_path: Path):
             "dead": {
                 "outcome": OUTCOME_FATAL,
                 "final_exit_code": 42,
-                "message": "restart budget exhausted",
+                "message": "on_failure=kill aborted the group",
             },
         },
     )
@@ -219,30 +217,6 @@ def test_get_results_raises_composite_error_when_any_peer_fatal(tmp_path: Path):
     failure = info.value.failures[0]
     assert failure.peer_name == "dead"
     assert failure.exit_code == 42
-
-
-def test_restarted_success_returns_result_not_none(tmp_path: Path):
-    # A "restarted" peer that eventually succeeded should have its actual
-    # result returned — restart is transparent to the outer caller.
-    spec = _spec_with_peers("rescued")
-    _write_registry_with_outcomes(
-        tmp_path,
-        {
-            "rescued": {
-                "outcome": OUTCOME_RESTARTED,
-                "final_exit_code": 0,
-                "restart_count": 1,
-            }
-        },
-    )
-    job = ParallelJob(
-        cluster=None,  # type: ignore[arg-type]
-        job_id="1",
-        peer_jobs={"rescued": _FakeJob("after-retry")},
-        spec=spec,
-        target_job_dir=str(tmp_path),
-    )
-    assert job.get_results() == {"rescued": "after-retry"}
 
 
 def test_not_started_counts_as_fatal(tmp_path: Path):

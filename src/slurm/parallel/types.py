@@ -26,7 +26,6 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from ..job import JobSnapshot
     from ..task import BoundTask, SlurmTask
 
 
@@ -34,14 +33,11 @@ if TYPE_CHECKING:
 # Type aliases
 # ---------------------------------------------------------------------------
 
-OnFailurePolicy = Literal["kill", "continue", "restart", "callback"]
+OnFailurePolicy = Literal["kill", "continue"]
 """Per-peer failure disposition.
 
 - ``"kill"`` (default) — peer failure aborts the allocation.
 - ``"continue"`` — peer failure is tolerated; the rest of the job keeps running.
-- ``"restart"`` — supervisor re-launches the peer up to ``max_restarts`` times.
-- ``"callback"`` — user function is called with a :class:`JobSnapshot` and
-  returns ``"kill"`` or ``"continue"``.
 """
 
 ArgsSpec = Union[Sequence[Any], Callable[[int], Any], range, None]
@@ -60,10 +56,6 @@ Same semantics as :meth:`SlurmTask.map`:
 NodeRef = Union[str, int]
 """Reference to a node inside a :class:`Pool`: a string label from
 ``Pool.node_labels`` or a 0-based integer ordinal."""
-
-FailureCallback = Callable[["JobSnapshot"], Literal["kill", "continue"]]
-"""Signature for ``on_failure="callback"``. Receives the failed peer's
-:class:`JobSnapshot` and returns the disposition for that failure."""
 
 
 # ---------------------------------------------------------------------------
@@ -215,12 +207,6 @@ class Peer:
             the supervisor signals graceful shutdown to every other peer.
             Multiple leaders are allowed; the first to exit wins.
         on_failure: See :data:`OnFailurePolicy`.
-        max_restarts: Only meaningful with ``on_failure="restart"``. The
-            supervisor re-launches the peer up to this many times before
-            falling through to ``"kill"``.
-        callback: Only meaningful with ``on_failure="callback"``. Invoked with
-            the failed peer's :class:`JobSnapshot`; returns ``"kill"`` or
-            ``"continue"``.
         exclusive: Emit ``--exclusive`` on the step — no other step on the
             same node shares its CPUs / GPUs.
         on_node: Pin the peer to a specific node. Either a label from
@@ -257,7 +243,7 @@ class Peer:
             >>> Peer.replicas(
             ...     inference, count=8, pool="serve",
             ...     args=lambda i: {"worker_id": i},
-            ...     on_failure="restart", max_restarts=2,
+            ...     on_failure="continue",
             ... )
     """
 
@@ -266,8 +252,6 @@ class Peer:
     name: Optional[str] = None
     leader: bool = False
     on_failure: OnFailurePolicy = "kill"
-    max_restarts: int = 0
-    callback: Optional[FailureCallback] = None
     exclusive: bool = False
     on_node: Optional[NodeRef] = None
     colocate_with: Optional[str] = None
@@ -305,17 +289,10 @@ class Peer:
 
         # Cheap, obvious validation — richer cross-peer checks happen in
         # validation.py at spec assembly time.
-        if self.on_failure not in ("kill", "continue", "restart", "callback"):
+        if self.on_failure not in ("kill", "continue"):
             raise ValueError(
-                f"on_failure must be one of kill/continue/restart/callback, "
-                f"got {self.on_failure!r}"
+                f"on_failure must be one of kill/continue, got {self.on_failure!r}"
             )
-        if self.max_restarts < 0:
-            raise ValueError(f"max_restarts must be >= 0, got {self.max_restarts!r}")
-        if self.on_failure == "callback" and self.callback is None:
-            raise ValueError("on_failure='callback' requires callback=...")
-        if self.on_failure != "callback" and self.callback is not None:
-            raise ValueError("callback= is only used with on_failure='callback'")
         if self.count < 1:
             raise ValueError(f"Peer count must be >= 1, got {self.count!r}")
         if self.count == 1:
@@ -363,8 +340,6 @@ class Peer:
         pool: Optional[str] = None,
         name: Optional[str] = None,
         on_failure: OnFailurePolicy = "kill",
-        max_restarts: int = 0,
-        callback: Optional[FailureCallback] = None,
         exclusive: bool = False,
         tasks_per_node: Optional[int] = None,
         on_nodes: Optional[Sequence[NodeRef]] = None,
@@ -386,8 +361,6 @@ class Peer:
             pool: Destination pool.
             name: Shared name for all replicas (``ctx.peers[name][i]``).
             on_failure: Failure policy applied per-replica.
-            max_restarts: Restart budget (per-replica).
-            callback: See :class:`Peer`.
             exclusive: Per-step ``--exclusive``.
             tasks_per_node: ``--ntasks-per-node=N``.
             on_nodes: Per-replica node pinning.
@@ -402,8 +375,6 @@ class Peer:
             name=name,
             leader=False,  # replica sets are never leaders
             on_failure=on_failure,
-            max_restarts=max_restarts,
-            callback=callback,
             exclusive=exclusive,
             on_node=None,
             colocate_with=colocate_with,

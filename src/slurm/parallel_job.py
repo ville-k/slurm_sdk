@@ -9,7 +9,7 @@ interact with — lookup by peer name, aggregate ``wait()``, aggregate
 
 Phase 4 adds :class:`PeerOutcome` and :meth:`ParallelJob.peer_outcomes`
 so callers can inspect exactly what happened to each peer (success,
-restarted, tolerated failure, fatal, shut down by leader, never started).
+tolerated failure, fatal, shut down by leader, never started).
 When any peer's outcome is ``"fatal"``, :meth:`ParallelJob.get_results`
 now raises :class:`CompositeJobError` aggregating every fatal peer's
 :class:`PeerFailureError`.
@@ -27,7 +27,6 @@ from .job import JobSnapshot
 from .parallel.registry import (
     OUTCOME_CONTINUE_ON_FAILURE,
     OUTCOME_NOT_STARTED,
-    OUTCOME_RESTARTED,
     OUTCOME_SHUTDOWN_BY_LEADER,
     OUTCOME_SUCCESS,
     read_registry,
@@ -47,17 +46,13 @@ class PeerOutcome:
     """Terminal outcome of a single peer, derived from the supervisor's registry.
 
     Attributes:
-        status: One of the six outcome strings:
+        status: One of the outcome strings:
 
             - ``"success"`` — exited 0 on first launch.
             - ``"continue_on_failure"`` — failed but ``on_failure="continue"``
               kept the group alive; the peer's result is ``None``.
-            - ``"restarted"`` — eventually succeeded after at least one
-              restart. Success is success even when it took multiple tries;
-              ``restart_count`` carries the retry count.
-            - ``"fatal"`` — peer's failure aborted the group (``on_failure=
-              "kill"`` directly, restart budget exhausted, or callback
-              returned ``"kill"``).
+            - ``"fatal"`` — peer's failure aborted the group
+              (``on_failure="kill"``).
             - ``"shutdown_by_leader"`` — another peer (leader or fatal) won
               the shutdown race and this peer received SIGTERM before it
               could complete.
@@ -66,11 +61,10 @@ class PeerOutcome:
               before this peer's Popen fired.
         exit_code: Final process exit code, or ``None`` when the peer never
             ran.
-        restart_count: Number of times the supervisor re-launched the peer.
-            0 means the first launch was terminal.
-        message: Free-form diagnostic string from the supervisor (e.g.
-            ``"restart budget exhausted after 3 attempt(s)"``). ``None`` for
-            plain success.
+        restart_count: Inert retry counter retained for forward-compatible
+            registry schema; always 0 in the current release.
+        message: Free-form diagnostic string from the supervisor. ``None``
+            for plain success.
     """
 
     status: str
@@ -502,7 +496,7 @@ class ParallelJob:
 
         Outcome-driven behavior (Phase 4):
 
-        - ``success`` / ``restarted`` — peer's result is returned normally.
+        - ``success`` — peer's result is returned normally.
         - ``continue_on_failure`` — slot is ``None``; the tolerated failure
           does not abort ``get_results``.
         - ``shutdown_by_leader`` — slot is ``None`` (the peer never finished
@@ -596,7 +590,7 @@ class ParallelJob:
         (singletons always pass a real Job).
         """
         if has_registry_data and outcome is not None:
-            if outcome.status in (OUTCOME_SUCCESS, OUTCOME_RESTARTED):
+            if outcome.status == OUTCOME_SUCCESS:
                 return job.get_result(timeout=timeout) if job is not None else None
             if outcome.status in (
                 OUTCOME_CONTINUE_ON_FAILURE,

@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, List, Optional, Union
 from ..errors import TopologyError
 from .types import (
     ArgsSpec,
-    FailureCallback,
     NodeRef,
     OnFailurePolicy,
     Peer,
@@ -41,7 +40,6 @@ __all__ = [
     "Pool",
     "Topology",
     "ArgsSpec",
-    "FailureCallback",
     "NodeRef",
     "OnFailurePolicy",
 ]
@@ -87,8 +85,6 @@ def _coerce_peer(
             name=kwarg_name,
             leader=peer.leader,
             on_failure=peer.on_failure,
-            max_restarts=peer.max_restarts,
-            callback=peer.callback,
             exclusive=peer.exclusive,
             on_node=peer.on_node,
             colocate_with=peer.colocate_with,
@@ -138,8 +134,6 @@ def _resolve_peer_pool(peer: Peer, default_pool: Optional[str]) -> Peer:
         name=peer.name,
         leader=peer.leader,
         on_failure=peer.on_failure,
-        max_restarts=peer.max_restarts,
-        callback=peer.callback,
         exclusive=peer.exclusive,
         on_node=peer.on_node,
         colocate_with=peer.colocate_with,
@@ -254,7 +248,7 @@ def parallel(
             violated. The error aggregates every problem found.
         NotImplementedError: If the submission uses functionality that ships
             in a later phase (replica sets, multi-pool topologies, per-peer
-            packaging, restart/callback failure policies, named-node placement).
+            packaging, named-node placement).
         RuntimeError: If called outside a :class:`Cluster` context.
 
     Example:

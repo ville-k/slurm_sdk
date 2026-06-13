@@ -27,7 +27,6 @@ def _write_plan(job_dir: Path) -> None:
                 pool="default",
                 leader=False,
                 on_failure="kill",
-                max_restarts=0,
                 srun_command_line="srun true",
             )
         ],
@@ -90,7 +89,6 @@ def test_supervisor_exports_shared_dir_to_peer_env(tmp_path, monkeypatch):
         pool="default",
         leader=False,
         on_failure="kill",
-        max_restarts=0,
         srun_command_line="srun echo hi",
     )
     _launch_peer(peer, registry_path=registry, shared_dir=shared)

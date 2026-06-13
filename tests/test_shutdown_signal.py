@@ -178,7 +178,6 @@ def test_supervisor_launch_starts_new_session_for_signal_propagation():
         pool="default",
         leader=False,
         on_failure="kill",
-        max_restarts=0,
         # A tiny shell pipeline that spawns a child; SIGTERM to the peer
         # process group tears both parents and children down.
         srun_command_line="bash -c 'sleep 30 & wait'",

@@ -22,7 +22,6 @@ def _sample_plan() -> Plan:
                 pool="default",
                 leader=True,
                 on_failure="kill",
-                max_restarts=0,
                 srun_command_line="echo learner",
             ),
             PlanPeer(
@@ -30,7 +29,6 @@ def _sample_plan() -> Plan:
                 pool="default",
                 leader=False,
                 on_failure="continue",
-                max_restarts=0,
                 srun_command_line="echo metrics",
             ),
         ],
