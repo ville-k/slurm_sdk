@@ -30,10 +30,6 @@ the public surface exported from `slurm.parallel` and `slurm.parallel_job`.
 
 ::: slurm.parallel.peer_info.PeerGroup
 
-::: slurm.parallel.node_info.NodeInfo
-
-::: slurm.parallel.node_info.NodeGroup
-
 ## Bound tasks and sidecar sugar
 
 ::: slurm.task.BoundTask

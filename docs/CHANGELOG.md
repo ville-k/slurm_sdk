@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `parallel(...)` ships its single-pool core: one Slurm allocation runs N
+  peer tasks as concurrent `srun` steps. Includes a leader peer whose exit
+  cascades graceful shutdown to the rest (`Peer(leader=True)`,
+  `grace_period_seconds`, `job.leader_result`), `with_sidecars(...)` sugar,
+  `kill` / `continue` failure policies surfaced through `peer_outcomes()`,
+  replica sets (`Peer.replicas(count=N, args=...)`), and runtime peer
+  discovery (`ctx.peers`, `ctx.announce(...)`, `PeerGroup.wait_all(...)`,
+  `ctx.shared_dir`). The same supervisor drives local-mode subprocess runs
+  so the whole surface is testable without a cluster. Multi-pool
+  heterogeneous topologies, named-node placement, colocation, node
+  discovery (`ctx.nodes` / `ctx.node`), `restart` / `callback` failure
+  policies, and port auto-reservation are deferred to a future release; see
+  `fable_plan.md` for the re-introduction roadmap
 - Two-node containerized Slurm test cluster (`slurm-test` controller +
   `slurm-worker`) for integration tests that require multiple compute
   nodes; CI brings both up and hard-fails when the worker doesn't
@@ -21,11 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against the two-node cluster, exercising only the existing
   single-task API
 - Documentation suite for `parallel(...)` following the Diataxis framework:
-  a tutorial (`Your first multi-peer job`), four how-to guides (add
-  sidecars, deploy a heterogeneous topology, run replica sets, discover
-  peers at runtime), an API reference page wired through mkdocstrings, and
-  an explanation page covering hetjob mechanics and the supervisor
-  lifecycle
+  a tutorial (`Your first multi-peer job`), three how-to guides (add
+  sidecars, run replica sets, discover peers at runtime), an API reference
+  page wired through mkdocstrings, and an explanation page covering the
+  single-allocation model and the supervisor lifecycle
 - Local-mode parity for `parallel(...)` — run multi-peer allocations on a
   developer workstation without Slurm installed. When `sbatch` is absent
   (or `SLURM_SDK_FORCE_LOCAL_PARALLEL=1`), the SDK now takes a dedicated
@@ -57,12 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ParallelJob.after(*deps)` — accepts one or more upstream `Job` /
   `ArrayJob` / `ParallelJob` handles. Because `parallel(...)` submits
   eagerly, `.after(...)` cancels the original allocation and re-submits
-  with `#SBATCH --dependency=afterok:<id>[:<id>...]` propagated to every
-  hetjob component. Call `.after(...)` promptly after `parallel(...)` so
-  the cancel is a no-op in practice
+  with `#SBATCH --dependency=afterok:<id>[:<id>...]`. Call `.after(...)`
+  promptly after `parallel(...)` so the cancel is a no-op in practice
 - `parallel(..., after=...)` kwarg — direct pre-submission dependency
   wiring that skips the cancel/resubmit round-trip. Accepts a single Job /
-  ArrayJob / ParallelJob or a list thereof; renders `#SBATCH --dependency=afterok:...` onto every hetjob component
+  ArrayJob / ParallelJob or a list thereof; renders
+  `#SBATCH --dependency=afterok:...` onto the allocation
 
 ### Changed
 
@@ -89,16 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first peer of a leader-less topology is rejected at validation time
   (nothing to inherit from)
 
-- Port reservation at the `@task` decorator — tasks can now declare
-  `@task(ports={"rpc": "auto", "metrics": 50051})`. Fixed integer ports pass
-  through verbatim; `"auto"` entries trigger an ephemeral-socket
-  bind-and-release dance inside the runner before user code starts, and the
-  resolved port numbers are written into the peer's registry entry so
-  sibling peers can discover them via
-  `ctx.peers["<name>"].first.ports["<label>"]`. Peers also get
-  `ctx.my_ports` (read-only mapping of the peer's own resolved ports) and
-  `ctx.reserve_port(name)` for mid-function reservations
-
 - `ctx.shared_dir` — parallel allocations now expose a shared directory
   at `$JOB_DIR/shared/` created by the bootstrap before any peer runs. The
   supervisor exports `SLURM_SDK_SHARED_DIR` into each peer's environment so
@@ -118,45 +120,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call with `Peer(leader=True)` on the leader and
   `Peer(on_failure="continue")` defaults on each sidecar. Accepts
   `SlurmTask`, `BoundTask`, or `Peer` sidecars; an explicit user-provided
-  `Peer(..., on_failure="kill")` keeps its policy. Rejects `topology=` to
-  steer callers to the explicit `parallel(...)` form when pools are needed
-
-- Named-node placement for parallel allocations — peers can now pin to
-  specific hosts within their pool via `Peer(on_node="<label>")` or
-  `Peer(on_node=<ordinal>)`, and replica sets can pin per-replica via
-  `Peer.replicas(on_nodes=[...])`. Pools accept a `node_labels` tuple that
-  maps logical names (e.g. `"head"`, `"ops"`) to the pool's nodes in Slurm
-  allocation order. `Peer(colocate_with="<other>")` inherits the target
-  peer's pin (auto-pinning the target to the first unused node if it has no
-  explicit pin) so co-located services land on the same host from a single
-  declarative flag
-
-- `ctx.nodes` and `ctx.node` runtime discovery — user code can iterate every
-  node in the allocation (`ctx.nodes.in_pool("gpu")`, `ctx.nodes["head"]`,
-  `ctx.nodes.by_hostname(...)`) and introspect the host it is running on
-  (`ctx.node`) through the new `NodeGroup` / `NodeInfo` types, matching the
-  `ctx.peers` / `PeerInfo` discovery surface from Phase 7
-
-- Bootstrap now resolves placement intent to concrete hostnames before the
-  supervisor launches any step. Pinned peers receive `--nodelist=<host>`
-  automatically; unpinned peers remain free for Slurm to place. The plan
-  records each peer's resolved nodelist so restart and cascade paths honour
-  the same pinning
+  `Peer(..., on_failure="kill")` keeps its policy
 
 - Peer service-discovery runtime API — peer functions can now inspect every
   other peer in the allocation via `ctx.peers["<name>"]`, a read-only mapping
   of `PeerGroup` views. Each `PeerGroup` exposes replicas, their hostnames,
-  declared ports, announced metadata, and lifecycle state; iteration, indexing,
+  announced metadata, and lifecycle state; iteration, indexing,
   `first`, `hostnames`, `ready_only()`, `refresh()`, and `wait_all(keys=..., timeout=...)` are available. A blocking `wait_all()` polls the registry with
   exponential backoff (50 ms → 1 s cap) and raises `TimeoutError` with a list
-  of laggard replicas on expiry. `wait_all()` now also understands the
-  top-level runtime fields `hostname`, `step_id`, `node_label`, and `ports`;
-  any other key name still waits on announced `metadata`
+  of laggard replicas on expiry. `wait_all()` understands the top-level
+  runtime fields `hostname` and `step_id`; any other key name still waits on
+  announced `metadata`
 
 - `ctx.announce(ready=True, **fields)` publishes runtime metadata to the peer
   registry via an atomic tmp-and-rename write. Announced fields merge into the
   current replica's `metadata`; `ready=True` flips the replica's `state` to
-  `"ready"`. Reserved registry keys (`name`, `hostname`, `step_id`, `ports`,
+  `"ready"`. Reserved registry keys (`name`, `hostname`, `step_id`,
   `state`, etc.) are rejected; the reserved set is shared with the existing
   static `Peer.announce=` validator so mistakes surface the same way in both
   paths
@@ -169,34 +148,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launches so `JobContext.peers` / `JobContext.announce()` can find the
   registry without any extra wiring in user code
 
-- Multi-pool `parallel(...)` submissions now render as Slurm heterogeneous
-  jobs (`hetjob`). Each pool declared in a `Topology` compiles to its own
-  `#SBATCH` header block separated by `#SBATCH hetjob` dividers; every peer's
-  `srun` step gets `--het-group=<component_index>` so it lands in the right
-  component. One `sbatch` call submits the whole allocation
-
-- The allocation bootstrap resolves per-component nodelists via
-  `SLURM_JOB_NODELIST_HET_GROUP_<N>` and seeds each peer's registry entry
-  with pool membership plus any placement pins. Pinned peers get concrete
-  hostnames immediately; unpinned peers stay pending until their runner
+- The allocation bootstrap expands `SLURM_JOB_NODELIST` and seeds each peer's
+  registry entry with pool membership. Peers stay pending until their runner
   publishes the observed hostname and step id at startup
-
-- Discovery now treats peer entries as authoritative for runtime placement
-  and node entries as authoritative for allocation inventory. `ctx.node.peers`
-  and `PeerInfo.node_label` are derived on read from those sources, so stale
-  cached cross-links in `registry.json` no longer leak into the public
-  discovery surface
-
-- The supervisor now cancels every hetjob component on shutdown — `scancel`
-  receives `<jobid>`, `<jobid>+1`, `<jobid>+2`, ... in one call so Slurm tears
-  the whole allocation down atomically
-
-- Validation flags peers pinned to GPU-less pools when they declare
-  `gpus_per_task > 0`, pointing callers at the pools that actually have GPUs
-
-- `PlanComponent` metadata is serialised into `plan.json` so the supervisor
-  and bootstrap can drive per-component scancel / nodelist resolution without
-  reconstructing the mapping from `peers`
 
 - Replica sets via `Peer.replicas(count=N, args=...)` — one Slurm step runs
   `--ntasks=N` tasks; each replica picks its per-index args from a pickle
@@ -223,23 +177,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ParallelJob.peer_outcomes()` flattens replica peers to `"<name>[<i>]"`
   keys, matching how `PeerFailureError` names replica failures
 
-- `on_failure="restart"` policy with `max_restarts` budget — the supervisor
-  re-launches a failed peer (keeping name / args / placement) until it
-  succeeds or the budget is exhausted. Exhausted restarts fall through to
-  the `"kill"` path and trigger cascading shutdown
-
-- `on_failure="callback"` policy — users supply a top-level function resolved
-  by `module:qualname` at supervisor startup. On failure the supervisor
-  invokes the callback with a `JobSnapshot` and dispatches on its return
-  value (`"kill"` or `"continue"`). Lambdas and nested functions are rejected
-  at spec-validation time
-
 - `ParallelJob.peer_outcomes()` returns a `{peer_name: PeerOutcome}` dict
-  describing exactly what happened to each peer: `success`, `restarted`,
+  describing exactly what happened to each peer: `success`,
   `continue_on_failure`, `fatal`, `shutdown_by_leader`, or `not_started`
 
-- `PeerOutcome` frozen dataclass exposing `status`, `exit_code`,
-  `restart_count`, and a diagnostic `message`
+- `PeerOutcome` frozen dataclass exposing `status`, `exit_code`, and a
+  diagnostic `message`
 
 - `ParallelJob.get_results()` now raises `CompositeJobError` aggregating
   every fatal peer's `PeerFailureError` when any peer's outcome is `"fatal"`

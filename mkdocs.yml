@@ -29,7 +29,6 @@ nav:
       - Add Sidecars to a Training Job: how-to/sidecars.md
       - Run N Copies of a Task in Parallel: how-to/replica_sets.md
       - Discover Other Peers at Runtime: how-to/service_discovery.md
-      - Deploy a Heterogeneous Topology: how-to/heterogeneous_topology.md
   - Reference:
       - reference/index.md
       - CLI Reference: reference/cli.md

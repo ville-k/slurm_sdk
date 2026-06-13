@@ -31,8 +31,8 @@ flowchart LR
 - **Replica set** — N copies of the same task, each with its own replica
   index. Fan-out without boilerplate.
 - **Service discovery** — peers find one another at runtime through
-  `ctx.peers` and `ctx.nodes`, so a training peer can dial the metrics
-  server without hard-coded ports.
+  `ctx.peers`, so a training peer can dial the metrics server using a
+  hostname it discovers instead of one hard-coded ahead of time.
 
 ## 1) Two peers, no leader
 
@@ -214,8 +214,8 @@ with cluster:
   args you pass go to the leader.
 
 Use `with_sidecars` when the shape fits; drop back to a hand-written
-`parallel(Peer(...), ...)` call when you need named pools or custom per-
-peer directives.
+`parallel(Peer(...), ...)` call when you need multiple leader candidates or
+custom per-peer directives.
 
 ## 6) Fan out with `Peer.replicas(...)`
 
@@ -301,7 +301,7 @@ The mechanics:
   `endpoint` key.
 - `ctx.peers["coordinator"].first` returns the first replica's
   `PeerInfo`. Its `metadata` is whatever the coordinator announced plus
-  the bootstrap metadata (hostname, ports, pool).
+  the bootstrap metadata (hostname, pool).
 - The coordinator is `leader=True`, so when the worker replicas finish
   the leader is still running. Declaring a leader is what tells the
   supervisor to terminate the allocation once the orchestrating peer
@@ -368,8 +368,6 @@ tutorial should run on your machine too.
 - [Run N copies of a task in parallel](../how-to/replica_sets.md) —
   deeper patterns for replica sets (list / callable / range).
 - [Discover other peers at runtime](../how-to/service_discovery.md) — the
-  full `ctx.peers` / `ctx.nodes` / `ctx.announce` surface.
-- [Deploy a heterogeneous topology](../how-to/heterogeneous_topology.md) —
-  learner + inference + simulators on different node types.
+  full `ctx.peers` / `ctx.announce` surface.
 - [How parallel allocations work](../explanation/slurm_allocations.md) —
   the Slurm internals behind `parallel(...)`.

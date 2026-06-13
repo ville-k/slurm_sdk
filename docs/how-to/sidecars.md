@@ -113,12 +113,10 @@ Any sidecar passed as a `Peer(...)` passes through untouched. Bare
 `with_sidecars(...)` is sugar for one specific shape. Switch to the explicit
 `parallel(...)` form when you need:
 
-- A `Topology(pools=...)` — `with_sidecars` does not accept `topology=`
-  because named pools defeat the "all on one node" intent.
 - Multiple leader candidates (rare, but valid — e.g. a parameter-server
   replica set where any replica's exit is "done").
 - Per-peer packaging (different container image per sidecar).
-- Per-peer `srun_args` or `on_node=` pinning.
+- Per-peer `srun_args`.
 
 Anything more structured than "leader + helpers on one node" belongs in
 `parallel(Peer(...), Peer(...))`.

@@ -125,9 +125,8 @@ for r in results["workers"]:
 
 ## Per-replica failure policies
 
-`on_failure` applies per-replica within a replica set. Use `"restart"` to
-retry flaky workers and `"continue"` for fan-outs where partial success is
-acceptable:
+`on_failure` applies per-replica within a replica set. Use `"continue"` for
+fan-outs where partial success is acceptable:
 
 ```python
 Peer.replicas(
@@ -136,43 +135,15 @@ Peer.replicas(
     args=lambda i: {"url": urls[i]},
     on_failure="continue",
 )
-
-Peer.replicas(
-    inference,
-    count=16,
-    args=lambda i: {"worker_id": i},
-    on_failure="restart",
-    max_restarts=2,
-)
 ```
+
+With the default `on_failure="kill"`, a failing replica tears the whole
+allocation down; `"continue"` lets the remaining replicas finish and surfaces
+the failure through `job.peer_outcomes()`.
 
 Replica peers are **never leaders** — their failure policy applies per
 replica, not to the group. Declare the orchestrating peer separately with
 `Peer(coordinator, leader=True)` if you need the leader + helpers shape.
-
-## Pin replicas to specific nodes
-
-When pool shape matters, pin each replica to a specific labeled node with
-`on_nodes=[...]`:
-
-```python
-Pool("main", nodes=4, gpus_per_node=8,
-     node_labels=["head", "aux", "spare1", "spare2"])
-
-Peer.replicas(
-    worker,
-    count=2,
-    pool="main",
-    on_nodes=["spare1", "spare2"],  # replica 0 → spare1, replica 1 → spare2
-)
-```
-
-- Length of `on_nodes` must equal `count` — a length mismatch is a
-  validation error.
-- Labels can be strings (from `Pool.node_labels`) or 0-based ordinals.
-- Use `tasks_per_node=N` to control pack density when you want multiple
-  replicas on the same node; the SDK defaults to packing densely based on
-  pool shape.
 
 ## Verification
 
@@ -186,7 +157,5 @@ Peer.replicas(
 
 - [Parallel reference](../reference/parallel.md) — the `Peer.replicas`
   docstring has the full parameter list.
-- [Deploy a heterogeneous topology](heterogeneous_topology.md) — real-
-  world replica sets across different pools.
 - [Choosing a Parallelization Pattern](parallelization_patterns.md) — when
   to reach for `task.map` vs. `Peer.replicas`.
