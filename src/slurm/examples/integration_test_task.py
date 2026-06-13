@@ -211,10 +211,10 @@ def parallel_coordinator_task(ctx: JobContext) -> dict:
     we don't need to actually serve traffic; the ``announce()`` itself is
     the scheduler-agnostic surface we care about.
     """
+    import socket
+
     port = 29555
-    endpoint = (
-        f"tcp://{ctx.node.hostname}:{port}" if ctx.node else f"tcp://local:{port}"
-    )
+    endpoint = f"tcp://{socket.gethostname()}:{port}"
     ctx.announce(ready=True, endpoint=endpoint, role="coordinator")
     return {"endpoint": endpoint, "port": port}
 

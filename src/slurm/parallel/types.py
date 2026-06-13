@@ -53,10 +53,6 @@ Same semantics as :meth:`SlurmTask.map`:
   :meth:`SlurmTask.partial` binding).
 """
 
-NodeRef = Union[str, int]
-"""Reference to a node inside a :class:`Pool`: a string label from
-``Pool.node_labels`` or a 0-based integer ordinal."""
-
 
 # ---------------------------------------------------------------------------
 # Pool
@@ -89,10 +85,6 @@ class Pool:
         features: List of features, AND-joined with ``constraint``.
         reservation: ``--reservation=...``.
         exclude_nodes: List of hostnames to exclude.
-        node_labels: Optional logical names for the pool's nodes, in allocation
-            order. When set, peers can target a node with ``on_node="label"``.
-            Length must equal ``nodes``; each label must be unique and must
-            not contain ``.``, ``[``, or ``]``.
         time: Per-pool walltime override; defaults to ``parallel(time=)``.
         exclusive: Emit ``--exclusive`` on the component.
         gres: Raw GRES passthrough — e.g. ``{"gpu": "h100:8", "bb": "capacity=1TB"}``.
@@ -106,7 +98,6 @@ class Pool:
         ...     mem_per_node="1.5T",
         ...     gpu_type="h100",
         ...     partition="gpu-fat",
-        ...     node_labels=["head", "ops"],
         ... )
     """
 
@@ -122,7 +113,6 @@ class Pool:
     features: tuple[str, ...] = ()
     reservation: Optional[str] = None
     exclude_nodes: Optional[tuple[str, ...]] = None
-    node_labels: Optional[tuple[str, ...]] = None
     time: Optional[str] = None
     exclusive: bool = False
     gres: Mapping[str, str] = field(default_factory=dict)
@@ -134,8 +124,6 @@ class Pool:
             object.__setattr__(self, "features", tuple(self.features))
         if self.exclude_nodes is not None and not isinstance(self.exclude_nodes, tuple):
             object.__setattr__(self, "exclude_nodes", tuple(self.exclude_nodes))
-        if self.node_labels is not None and not isinstance(self.node_labels, tuple):
-            object.__setattr__(self, "node_labels", tuple(self.node_labels))
         if not isinstance(self.gres, dict):
             object.__setattr__(self, "gres", dict(self.gres))
         else:
@@ -156,22 +144,6 @@ class Pool:
             raise ValueError(
                 f"Pool gpus_per_node must be >= 0 when set, got {self.gpus_per_node!r}"
             )
-        if self.node_labels is not None:
-            if len(self.node_labels) != self.nodes:
-                raise ValueError(
-                    f"Pool node_labels length {len(self.node_labels)} != "
-                    f"nodes {self.nodes}"
-                )
-            if len(set(self.node_labels)) != len(self.node_labels):
-                raise ValueError(
-                    f"Pool node_labels must be unique, got {self.node_labels!r}"
-                )
-            for label in self.node_labels:
-                if not label or any(ch in label for ch in ".[]"):
-                    raise ValueError(
-                        f"Invalid node label {label!r}: must be non-empty and "
-                        "must not contain '.', '[', ']'"
-                    )
         if self.gpu_type and "gpu" in self.gres:
             raise ValueError(
                 "Pool: gpu_type and gres['gpu'] are mutually exclusive — pick one"
@@ -188,8 +160,8 @@ class Peer:
     """One service in a parallel allocation.
 
     A ``Peer`` wraps a task (``SlurmTask`` or :class:`BoundTask`) with
-    placement + lifecycle directives. It compiles to one ``srun`` step inside
-    a hetjob component.
+    lifecycle directives. It compiles to one ``srun`` step inside a hetjob
+    component.
 
     Use :meth:`Peer.replicas` to declare a replica set (multiple tasks running
     the same function with per-replica args). Bare ``Peer(...)`` is a
@@ -209,12 +181,6 @@ class Peer:
         on_failure: See :data:`OnFailurePolicy`.
         exclusive: Emit ``--exclusive`` on the step — no other step on the
             same node shares its CPUs / GPUs.
-        on_node: Pin the peer to a specific node. Either a label from
-            ``Pool.node_labels`` or a 0-based integer ordinal. For replica
-            sets, use :paramref:`on_nodes` instead.
-        colocate_with: Name of another peer — this peer inherits that peer's
-            node assignment. Same pool only. Chains allowed; cycles are
-            reported as validation errors.
         srun_args: Extra flags appended verbatim to the step's ``srun`` line.
             The escape hatch for advanced placement
             (``--gpu-bind=closest``, ``--distribution=block:block``, ...).
@@ -230,8 +196,6 @@ class Peer:
             with ``count > 1``.
         tasks_per_node: ``--ntasks-per-node=N``. Only valid with ``count > 1``.
             Default: computed from pool shape so replicas pack densely.
-        on_nodes: Per-replica pin (one label/ordinal per replica). Only valid
-            with ``count > 1``. Length must equal ``count``.
 
     Example:
         Singleton peer:
@@ -253,8 +217,6 @@ class Peer:
     leader: bool = False
     on_failure: OnFailurePolicy = "kill"
     exclusive: bool = False
-    on_node: Optional[NodeRef] = None
-    colocate_with: Optional[str] = None
     srun_args: tuple[str, ...] = ()
     announce: Optional[Mapping[str, Any]] = None
 
@@ -262,7 +224,6 @@ class Peer:
     count: int = 1
     args: ArgsSpec = None
     tasks_per_node: Optional[int] = None
-    on_nodes: Optional[tuple[NodeRef, ...]] = None
 
     def __post_init__(self) -> None:
         # Normalize task → BoundTask. Done lazily via import so types.py does
@@ -280,8 +241,6 @@ class Peer:
         # Coerce tuple-valued collections.
         if self.srun_args and not isinstance(self.srun_args, tuple):
             object.__setattr__(self, "srun_args", tuple(self.srun_args))
-        if self.on_nodes is not None and not isinstance(self.on_nodes, tuple):
-            object.__setattr__(self, "on_nodes", tuple(self.on_nodes))
         if self.announce is not None:
             # Freeze into a plain dict so callers can't mutate through a
             # shared reference.
@@ -301,21 +260,10 @@ class Peer:
                     "Peer(args=...) is only valid for replica sets; use "
                     "Peer.replicas(..., args=...) or drop args"
                 )
-            if self.on_nodes is not None:
-                raise ValueError(
-                    "Peer(on_nodes=...) is only valid for replica sets; use "
-                    "Peer.replicas(..., on_nodes=...) or on_node=... for a "
-                    "single peer"
-                )
             if self.tasks_per_node is not None:
                 raise ValueError(
                     "Peer(tasks_per_node=...) is only valid for replica sets"
                 )
-        if self.on_node is not None and self.on_nodes is not None:
-            raise ValueError(
-                "Use on_node= for a singleton peer or on_nodes= for a "
-                "replica set — not both"
-            )
         if self.leader and self.on_failure == "continue":
             raise ValueError(
                 "leader=True + on_failure='continue' is meaningless: the "
@@ -323,12 +271,6 @@ class Peer:
                 "leader leaves the group without a termination condition. "
                 "Pick one: leader=True with a real policy, or drop leader=True."
             )
-        if self.count > 1 and self.on_nodes is not None:
-            if len(self.on_nodes) != self.count:
-                raise ValueError(
-                    f"on_nodes length {len(self.on_nodes)} does not match "
-                    f"count {self.count}"
-                )
 
     @classmethod
     def replicas(
@@ -342,8 +284,6 @@ class Peer:
         on_failure: OnFailurePolicy = "kill",
         exclusive: bool = False,
         tasks_per_node: Optional[int] = None,
-        on_nodes: Optional[Sequence[NodeRef]] = None,
-        colocate_with: Optional[str] = None,
         srun_args: Sequence[str] = (),
         announce: Optional[Mapping[str, Any]] = None,
     ) -> "Peer":
@@ -363,9 +303,6 @@ class Peer:
             on_failure: Failure policy applied per-replica.
             exclusive: Per-step ``--exclusive``.
             tasks_per_node: ``--ntasks-per-node=N``.
-            on_nodes: Per-replica node pinning.
-            colocate_with: Name of another peer to inherit node assignment
-                from. Applied to every replica.
             srun_args: Verbatim srun flags.
             announce: Static metadata attached to every replica.
         """
@@ -376,14 +313,11 @@ class Peer:
             leader=False,  # replica sets are never leaders
             on_failure=on_failure,
             exclusive=exclusive,
-            on_node=None,
-            colocate_with=colocate_with,
             srun_args=tuple(srun_args),
             announce=announce,
             count=count,
             args=args,
             tasks_per_node=tasks_per_node,
-            on_nodes=tuple(on_nodes) if on_nodes is not None else None,
         )
 
     @property

@@ -161,10 +161,6 @@ def test_runner_publishes_hostname_and_step_id_to_registry(local_cluster, tmp_pa
     entry = registry["peers"]["solo"][0]
     # Hostname is the actual host the runner landed on — no speculation.
     assert entry["hostname"] == socket.gethostname()
-    # Runtime publish also bumped the node section: the real hostname
-    # is present, and ``solo`` is listed under its peers.
-    assert entry["hostname"] in registry["nodes"]
-    assert "solo" in registry["nodes"][entry["hostname"]]["peers"]
 
 
 def test_two_peer_leader_sidecar_local(local_cluster):

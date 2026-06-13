@@ -55,18 +55,11 @@ class PlanPeer:
     # Drives ``srun --het-group=<N>`` at render time and the bootstrap's
     # ``SLURM_JOB_NODELIST_HET_GROUP_<N>`` lookup.
     component_index: int = 0
-    # Resolved hostname pin(s) for this peer, written by the bootstrap after
-    # :func:`slurm.parallel.placement.resolve_placement` walks ``on_node`` /
-    # ``on_nodes`` / ``colocate_with`` chains. ``None`` means "unpinned"
-    # (Slurm places freely); non-None instructs the supervisor to emit
-    # ``--nodelist=<host1>,<host2>,...`` onto the peer's ``srun`` so the
-    # step runs on exactly those nodes.
+    # Inert placement fields retained for forward-compatible plan/registry
+    # schema. Named-node placement and colocation were removed, so these are
+    # always ``None`` now; kept so the JSON round-trip stays stable for
+    # older readers.
     nodelist: Optional[Tuple[str, ...]] = None
-    # Placement intent carried from the spec so the bootstrap can run the
-    # placement resolver without needing the original ``_ParallelSpec``.
-    # ``on_node`` is a str label, int ordinal, or None. ``on_nodes`` is a
-    # per-replica tuple of the same refs (only meaningful for replica sets).
-    # ``colocate_with`` is another peer name or None.
     on_node: Optional["str | int"] = None
     on_nodes: Optional[Tuple["str | int", ...]] = None
     colocate_with: Optional[str] = None
@@ -143,10 +136,9 @@ class PlanComponent:
     index: int
     pool: str
     nodes: int
-    # Pool's declared ``node_labels`` (or ``None`` when the pool has none).
-    # Carried through the plan so the bootstrap can stamp each node registry
-    # entry with its label and resolve ``on_node="<label>"`` pins at
-    # placement time.
+    # Inert field retained for forward-compatible plan schema. Node labels
+    # were removed, so this is always ``None`` now; kept so the JSON
+    # round-trip stays stable for older readers.
     node_labels: Optional[Tuple[str, ...]] = None
 
     def to_dict(self) -> dict:

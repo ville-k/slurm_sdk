@@ -343,16 +343,11 @@ def _load_groups_from_path(path: Path) -> Mapping[str, PeerGroup]:
         return {}
 
     peers_section = registry.get("peers") or {}
-    node_labels_by_hostname = _node_labels_by_hostname(registry)
     out: dict[str, PeerGroup] = {}
     for name, entries in peers_section.items():
         infos = []
         for entry in entries:
-            materialized = dict(entry)
-            hostname = str(materialized.get("hostname") or "")
-            if hostname in node_labels_by_hostname:
-                materialized["node_label"] = node_labels_by_hostname[hostname]
-            infos.append(PeerInfo.from_entry(materialized))
+            infos.append(PeerInfo.from_entry(dict(entry)))
         infos = tuple(infos)
         # Sort by replica_index so indexing is stable regardless of JSON
         # key order (older Python versions preserved insertion order, but
@@ -360,23 +355,6 @@ def _load_groups_from_path(path: Path) -> Mapping[str, PeerGroup]:
         infos = tuple(sorted(infos, key=lambda i: i.replica_index))
         out[str(name)] = PeerGroup(name=str(name), _replicas=infos, _path=path)
     return out
-
-
-def _node_labels_by_hostname(registry: Mapping[str, Any]) -> dict[str, Optional[str]]:
-    """Return the authoritative node label for each known hostname."""
-    nodes_section = registry.get("nodes")
-    if not isinstance(nodes_section, Mapping):
-        return {}
-
-    labels: dict[str, Optional[str]] = {}
-    for entry in nodes_section.values():
-        if not isinstance(entry, Mapping):
-            continue
-        hostname = str(entry.get("hostname") or "")
-        if hostname == "":
-            continue
-        labels[hostname] = entry.get("label")
-    return labels
 
 
 __all__ = [

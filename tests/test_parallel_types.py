@@ -79,33 +79,6 @@ def test_pool_minimal():
     assert p.gpus_per_node is None
 
 
-def test_pool_node_labels_roundtrip_to_tuple():
-    p = Pool(nodes=2, node_labels=["head", "ops"])
-    assert p.node_labels == ("head", "ops")
-
-
-def test_pool_node_labels_length_mismatch_rejected():
-    with pytest.raises(ValueError, match="node_labels length"):
-        Pool(nodes=3, node_labels=["head", "ops"])
-
-
-def test_pool_node_labels_uniqueness_required():
-    with pytest.raises(ValueError, match="must be unique"):
-        Pool(nodes=2, node_labels=["head", "head"])
-
-
-def test_pool_node_labels_invalid_characters_rejected():
-    with pytest.raises(ValueError, match="must not contain"):
-        Pool(nodes=1, node_labels=["node.01"])
-    with pytest.raises(ValueError, match="must not contain"):
-        Pool(nodes=1, node_labels=["node[0]"])
-
-
-def test_pool_node_labels_empty_string_rejected():
-    with pytest.raises(ValueError, match="must be non-empty"):
-        Pool(nodes=1, node_labels=[""])
-
-
 def test_pool_nodes_must_be_positive():
     with pytest.raises(ValueError, match="nodes must be >= 1"):
         Pool(nodes=0)
@@ -122,10 +95,10 @@ def test_pool_gpu_type_and_gres_gpu_mutually_exclusive():
 
 
 def test_pool_collections_are_frozen_from_input():
-    labels = ["a", "b"]
-    p = Pool(nodes=2, node_labels=labels)
-    labels.append("c")  # mutate original; shouldn't leak into Pool
-    assert p.node_labels == ("a", "b")
+    features = ["a", "b"]
+    p = Pool(nodes=2, features=features)
+    features.append("c")  # mutate original; shouldn't leak into Pool
+    assert p.features == ("a", "b")
 
     gres_in = {"gpu": "h100:8"}
     p2 = Pool(nodes=1, gpus_per_node=8, gres=gres_in)
@@ -197,19 +170,9 @@ def test_peer_singleton_cannot_set_args():
         Peer(_train, args=[1, 2, 3])  # type: ignore[arg-type]
 
 
-def test_peer_singleton_cannot_set_on_nodes():
-    with pytest.raises(ValueError, match="on_nodes"):
-        Peer(_train, on_nodes=["head"])
-
-
 def test_peer_singleton_cannot_set_tasks_per_node():
     with pytest.raises(ValueError, match="tasks_per_node"):
         Peer(_train, tasks_per_node=2)
-
-
-def test_peer_replicas_on_nodes_length_check():
-    with pytest.raises(ValueError, match="on_nodes length"):
-        Peer.replicas(_sim, count=4, on_nodes=["a", "b"])
 
 
 def test_peer_replicas_factory():
@@ -224,19 +187,6 @@ def test_peer_frozen():
     p = Peer(_train)
     with pytest.raises(Exception):
         p.leader = True  # type: ignore[misc]
-
-
-def test_peer_on_node_plus_on_nodes_rejected():
-    # Direct Peer(...) construction exercises the mutual-exclusion check.
-    # Peer.replicas(...) never sets on_node, so this path can only be hit via
-    # __init__ directly.
-    with pytest.raises(ValueError, match="not both"):
-        Peer(
-            task=_train,
-            count=2,
-            on_node="head",
-            on_nodes=("head", "ops"),
-        )
 
 
 # ---------------------------------------------------------------------------

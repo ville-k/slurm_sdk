@@ -8,19 +8,10 @@ Runs once on the batch allocation's head node, before the supervisor:
    hetjobs) via ``scontrol show hostnames`` when available; an
    in-process expander handles the common cases in tests and
    scontrol-less environments.
-3. Run the Phase 8 placement resolver over the spec's ``on_node`` /
-   ``on_nodes`` / ``colocate_with`` directives to produce a
-   peer→hostname pin map.
-4. Write a registry skeleton to ``$JOB_DIR/registry.json``. *Pinned*
-   peers get their resolved hostname written up front. *Unpinned*
-   peers — the ones Slurm chooses the node for at ``srun`` time —
-   stay with ``hostname=""`` and ``state="pending"`` until their own
-   runner publishes via :func:`update_peer_hostinfo` at startup.
-
-The nodes section is seeded with per-pool hostname, ordinal, and label
-metadata but leaves each node's ``peers`` list empty — runners
-register themselves at startup so the membership reflects actual
-placement, not bootstrap's guesses.
+3. Write a registry skeleton to ``$JOB_DIR/registry.json``. Every peer
+   starts with ``hostname=""`` and ``state="pending"`` — Slurm chooses
+   the node at ``srun`` time, so the peer's own runner publishes the
+   real hostname via :func:`update_peer_hostinfo` at startup.
 """
 
 from __future__ import annotations
@@ -34,8 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from ..runtime import _expand_nodelist
-from .placement import resolve_placement_from_plan
-from .plan import Plan, read_plan, write_plan
+from .plan import Plan, read_plan
 from .registry import STATE_PENDING, write_registry
 
 logger = logging.getLogger("slurm.parallel.bootstrap")
@@ -78,10 +68,8 @@ def build_registry_skeleton(
     hostnames: Tuple[str, ...],
     *,
     per_component_hostnames: Optional[Dict[int, Tuple[str, ...]]] = None,
-    pool_node_labels: Optional[Dict[str, Tuple[Optional[str], ...]]] = None,
-    peer_pins: Optional[Dict[str, Tuple[str, ...]]] = None,
 ) -> dict:
-    """Build the initial registry dict — all peers ``pending``, nodes seeded.
+    """Build the initial registry dict — all peers ``pending``.
 
     Every peer entry lists the hostnames of its pool. For hetjob submissions
     ``per_component_hostnames`` maps component index → hostname tuple so
@@ -89,22 +77,11 @@ def build_registry_skeleton(
     ``peer.replica_count`` entries in the registry list (one per replica
     index); singleton peers get exactly one.
 
-    Hostname population rule:
-
-    - Peers listed in ``peer_pins`` (Phase 8 placement resolver output)
-      get their pinned hostnames written into the registry here — the
-      SDK emits ``srun --nodelist=<host>`` for them so the pin is
-      authoritative.
-    - Peers NOT in ``peer_pins`` (unpinned — Slurm chooses the node at
-      step-launch time) get ``hostname=""`` and stay in
-      :data:`STATE_PENDING`. The peer's own runner publishes the real
-      hostname via :func:`update_peer_hostinfo` as soon as it starts.
-
-    The earlier behaviour — round-robin ``replica_index mod len(hosts)``
-    assignment — is intentionally gone: it was speculation, not ground
-    truth. Callers that relied on the seeded value saw bootstrap's guess
-    instead of the actual placement, which is worse than
-    ``state=pending`` + ``wait_all(keys=["hostname"])``.
+    Every peer is seeded with ``hostname=""`` and stays in
+    :data:`STATE_PENDING`. Slurm chooses the node at step-launch time; the
+    peer's own runner publishes the real hostname via
+    :func:`update_peer_hostinfo` as soon as it starts. Callers that need the
+    value must ``wait_all(keys=["hostname"])``.
 
     Args:
         plan: Parsed supervisor plan.
@@ -114,15 +91,6 @@ def build_registry_skeleton(
         per_component_hostnames: Optional mapping of component index →
             hostname tuple. When provided, each peer is seeded with the
             hostnames of its component.
-        pool_node_labels: Optional mapping of pool name → per-ordinal label
-            tuple (same shape as :attr:`Pool.node_labels` but expanded to
-            ``None`` for pools without labels). Drives each peer entry's
-            ``node_label`` and the node registry entry's ``label`` field.
-        peer_pins: Optional mapping of peer name → hostname pin tuple
-            produced by :func:`slurm.parallel.placement.resolve_placement`.
-            When a peer has an entry, the listed hostnames override the
-            default round-robin assignment for that peer's replicas. Keys
-            not in the mapping fall back to round-robin.
     """
     components = plan.effective_components()
     # Derive per-component hostname tuples. When the caller did not supply a
@@ -141,55 +109,20 @@ def build_registry_skeleton(
     # Map pool name → component index for quick peer→component lookup.
     pool_to_component: Dict[str, int] = {c.pool: c.index for c in components}
 
-    pool_node_labels = pool_node_labels or {}
-    peer_pins = peer_pins or {}
-
-    def _label_for(pool_name: str, hostname: str) -> Optional[str]:
-        """Label for ``hostname`` within ``pool_name``, or ``None``."""
-        hosts = component_hosts.get(pool_to_component.get(pool_name, -1), ())
-        labels = pool_node_labels.get(pool_name)
-        if not labels:
-            return None
-        try:
-            idx = hosts.index(hostname)
-        except ValueError:
-            return None
-        if idx >= len(labels):
-            return None
-        return labels[idx]
-
     peers_out: dict = {}
     for peer in plan.peers:
         comp_index = pool_to_component.get(peer.pool, 0)
         peer_hostnames = component_hosts.get(comp_index, ())
-        pin = peer_pins.get(peer.name)
         entries = []
         for replica_index in range(peer.replica_count):
-            if pin is not None and replica_index < len(pin):
-                pinned = pin[replica_index]
-            elif pin is not None and len(pin) == 1:
-                # Singleton pin reused across all replicas — useful when a
-                # replica set colocates with a singleton peer that owns one
-                # host.
-                pinned = pin[0]
-            else:
-                # Unpinned: Slurm will choose the node at step-launch
-                # time. Leave hostname empty — the peer's own runner
-                # publishes the actual hostname via
-                # :func:`update_peer_hostinfo` once it knows where it
-                # landed. Callers that need the value must
-                # ``wait_all(keys=["hostname"])``.
-                pinned = ""
-            label = _label_for(peer.pool, pinned) if pinned else None
             entries.append(
                 {
                     "name": peer.name,
                     "pool": peer.pool,
                     "replica_index": replica_index,
                     "replica_count": peer.replica_count,
-                    "hostname": pinned,
+                    "hostname": "",
                     "hostnames": list(peer_hostnames),
-                    "node_label": label,
                     "step_id": None,
                     "ports": {},
                     "metadata": {},
@@ -203,35 +136,7 @@ def build_registry_skeleton(
             )
         peers_out[peer.name] = entries
 
-    nodes_out: dict = {}
-    # ``peers`` membership for each node is populated at runtime by
-    # :func:`update_peer_hostinfo` — it's the first process that knows
-    # which peer actually landed on which hostname. Bootstrap only
-    # emits the nodes it can name (hostname, pool, ordinal, label) so
-    # ``ctx.nodes[ordinal]`` and ``ctx.nodes["<label>"]`` work even
-    # before any peer publishes.
-    global_ordinal = 0
-    for comp in components:
-        hosts = component_hosts.get(comp.index, ())
-        labels = pool_node_labels.get(comp.pool, ())
-        for pool_ordinal, hostname in enumerate(hosts):
-            key = hostname or f"_unresolved_{global_ordinal}"
-            label = labels[pool_ordinal] if pool_ordinal < len(labels) else None
-            nodes_out[key] = {
-                "hostname": hostname,
-                "pool": comp.pool,
-                # Pool-local ordinal — Phase 8 promotes this to a per-pool
-                # index so ``NodeGroup[int]`` semantics work. The previous
-                # "global ordinal across all components" scheme is
-                # reconstructible by walking components in order.
-                "ordinal": pool_ordinal,
-                "label": label,
-                "peers": [],
-                "component_index": comp.index,
-            }
-            global_ordinal += 1
-
-    return {"peers": peers_out, "nodes": nodes_out}
+    return {"peers": peers_out}
 
 
 def _configure_logging() -> None:
@@ -271,88 +176,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     hostnames, per_component_hostnames = _resolve_component_hostnames(plan)
 
-    # Run placement resolution — walks ``on_node`` / ``on_nodes`` /
-    # ``colocate_with`` chains and maps each pinned peer to concrete
-    # hostnames. Bootstrap writes those pins back into plan.json so the
-    # supervisor can emit ``--nodelist=<host>`` onto each srun step.
-    pool_hostnames = _pool_hostnames_for_placement(
-        plan, hostnames, per_component_hostnames
-    )
-    placement = resolve_placement_from_plan(plan, pool_hostnames)
-    pool_node_labels: Dict[str, Tuple[Optional[str], ...]] = {}
-    for comp in plan.effective_components():
-        if comp.node_labels is not None:
-            pool_node_labels[comp.pool] = tuple(comp.node_labels)
-
-    # Write nodelist back onto plan peers and rewrite plan.json so the
-    # supervisor sees the pinned hosts on every peer entry.
-    updated_peers = []
-    for peer in plan.peers:
-        pins = placement.for_peer(peer.name)
-        updated_peers.append(
-            type(peer)(
-                name=peer.name,
-                pool=peer.pool,
-                leader=peer.leader,
-                on_failure=peer.on_failure,
-                srun_command_line=peer.srun_command_line,
-                replica_count=peer.replica_count,
-                component_index=peer.component_index,
-                nodelist=pins,
-                on_node=peer.on_node,
-                on_nodes=peer.on_nodes,
-                colocate_with=peer.colocate_with,
-                ports=dict(peer.ports),
-            )
-        )
-    updated_plan = Plan(
-        peers=updated_peers,
-        grace_period_seconds=plan.grace_period_seconds,
-        pool_names=plan.pool_names,
-        pre_submission_id=plan.pre_submission_id,
-        schema_version=plan.schema_version,
-        components=plan.components,
-    )
-    write_plan(plan_path, updated_plan)
-    logger.info(
-        "Placement resolved for %d peer(s) (%d pinned)",
-        len(plan.peers),
-        len(placement.pinned_peers()),
-    )
-
     skeleton = build_registry_skeleton(
-        updated_plan,
+        plan,
         hostnames,
         per_component_hostnames=per_component_hostnames,
-        pool_node_labels=pool_node_labels,
-        peer_pins=placement.as_dict(),
     )
     write_registry(job_dir / "registry.json", skeleton)
     logger.info("Registry skeleton written to %s", job_dir / "registry.json")
 
     return 0
-
-
-def _pool_hostnames_for_placement(
-    plan: Plan,
-    flat_hostnames: Tuple[str, ...],
-    per_component_hostnames: Optional[Dict[int, Tuple[str, ...]]],
-) -> Dict[str, Tuple[str, ...]]:
-    """Build the ``{pool_name: hostnames}`` mapping the placement resolver wants.
-
-    Single-pool submissions use the flat hostname list; hetjob submissions
-    route each component's per-pool hostname slice.
-    """
-    mapping: Dict[str, Tuple[str, ...]] = {}
-    for comp in plan.effective_components():
-        if (
-            per_component_hostnames is not None
-            and comp.index in per_component_hostnames
-        ):
-            mapping[comp.pool] = tuple(per_component_hostnames[comp.index])
-        else:
-            mapping[comp.pool] = tuple(flat_hostnames)
-    return mapping
 
 
 def _resolve_component_hostnames(

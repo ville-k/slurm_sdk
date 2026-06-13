@@ -155,41 +155,7 @@ def test_peer_group_refresh_picks_up_new_metadata(tmp_path):
     assert group[0].state == "ready"
 
 
-def test_load_peer_groups_prefers_node_inventory_for_node_label(tmp_path):
-    path = tmp_path / "registry.json"
-    write_registry(
-        path,
-        {
-            "peers": {
-                "worker": [
-                    {
-                        "name": "worker",
-                        "pool": "gpu",
-                        "replica_index": 0,
-                        "replica_count": 1,
-                        "hostname": "gpu-02",
-                        "hostnames": ["gpu-02"],
-                        "node_label": "stale",
-                    }
-                ]
-            },
-            "nodes": {
-                "gpu-02": {
-                    "hostname": "gpu-02",
-                    "pool": "gpu",
-                    "ordinal": 1,
-                    "label": "worker",
-                    "peers": [],
-                }
-            },
-        },
-    )
-
-    group = load_peer_groups(path)["worker"]
-    assert group[0].node_label == "worker"
-
-
-def test_load_peer_groups_fall_back_to_stored_node_label_when_node_missing(tmp_path):
+def test_load_peer_groups_reads_stored_node_label(tmp_path):
     path = tmp_path / "registry.json"
     write_registry(
         path,
@@ -207,7 +173,6 @@ def test_load_peer_groups_fall_back_to_stored_node_label_when_node_missing(tmp_p
                     }
                 ]
             },
-            "nodes": {},
         },
     )
 

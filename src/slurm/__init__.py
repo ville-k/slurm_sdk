@@ -19,7 +19,6 @@ from .runtime import JobContext
 from .workflow import WorkflowContext
 from .array_job import ArrayJob
 from .parallel import parallel, Peer, Pool, Topology
-from .parallel.node_info import NodeInfo, NodeGroup
 from .parallel.peer_info import PeerInfo, PeerGroup
 from .parallel_job import ParallelJob, PeerOutcome
 from .packaging import PackagingConfig
@@ -66,8 +65,6 @@ __all__ = [
     "PeerOutcome",
     "PeerInfo",
     "PeerGroup",
-    "NodeInfo",
-    "NodeGroup",
     # Configuration
     "PackagingConfig",
     # Callbacks

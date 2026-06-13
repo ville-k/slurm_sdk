@@ -1,21 +1,15 @@
 """Peer registry — the runtime directory of who landed where.
 
 The registry lives at ``$JOB_DIR/registry.json``. Bootstrap writes the
-skeleton before any peer runs: pool layout, component indices, node
-labels, and the hostname of every *pinned* peer. Unpinned peers carry
-``hostname=""`` and ``state="pending"`` — their runner publishes the
-real hostname and ``SLURM_STEP_ID`` via :func:`update_peer_hostinfo`
-at startup. The supervisor then updates peer entries as peers start /
-fail / finish. User-facing APIs like ``ctx.peers`` read the same file.
+skeleton before any peer runs: pool layout and the ``pending`` entry for
+every peer. Peers carry ``hostname=""`` and ``state="pending"`` until
+their runner publishes the real hostname and ``SLURM_STEP_ID`` via
+:func:`update_peer_hostinfo` at startup. The supervisor then updates peer
+entries as peers start / fail / finish. User-facing APIs like
+``ctx.peers`` read the same file.
 
-Ownership is split intentionally:
-
-- peer entries own runtime placement and lifecycle state (hostname,
-  step id, ports, restart counts, outcomes, user metadata)
-- node entries own allocation inventory (hostname, pool, ordinal, label)
-- discovery surfaces derive cross-links such as ``ctx.node.peers`` and
-  ``PeerInfo.node_label`` on read instead of trusting duplicated cached
-  fields in the raw JSON
+Peer entries own runtime state: hostname, step id, ports, restart
+counts, outcomes, and user metadata.
 
 Concurrency model: atomic writes via ``tmp + os.replace`` so readers
 always see a consistent file, plus an ``fcntl.flock`` on a sibling
@@ -38,7 +32,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Mapping, Optional
 
 if TYPE_CHECKING:
-    from .node_info import NodeGroup
     from .peer_info import PeerGroup
 
 logger = logging.getLogger("slurm.parallel.registry")
@@ -237,36 +230,6 @@ class PeerRegistryEntry:
         )
 
 
-@dataclass
-class NodeRegistryEntry:
-    """One node in the allocation as seen by the registry."""
-
-    hostname: str
-    pool: str
-    ordinal: int
-    label: Optional[str] = None
-    peers: List[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return {
-            "hostname": self.hostname,
-            "pool": self.pool,
-            "ordinal": self.ordinal,
-            "label": self.label,
-            "peers": list(self.peers),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "NodeRegistryEntry":
-        return cls(
-            hostname=data["hostname"],
-            pool=data["pool"],
-            ordinal=int(data.get("ordinal", 0)),
-            label=data.get("label"),
-            peers=list(data.get("peers", [])),
-        )
-
-
 def write_registry(path: "str | Path", registry: dict) -> None:
     """Atomically replace ``registry.json`` at ``path`` with ``registry``.
 
@@ -303,11 +266,10 @@ def write_registry(path: "str | Path", registry: dict) -> None:
 def read_registry(path: "str | Path") -> dict:
     """Read and parse the registry JSON at ``path``.
 
-    Caller gets a dict with ``peers`` (name → list[entry dict]) and
-    ``nodes`` (hostname → entry dict). This low-level dict view is enough
-    for Phase 3 (bootstrap builds, supervisor barely touches). Phase 7
-    wraps it in :class:`~slurm.parallel.registry.PeerGroup` /
-    :class:`NodeGroup` views.
+    Caller gets a dict with a ``peers`` section (name → list[entry dict]).
+    This low-level dict view is enough for the bootstrap to build and the
+    supervisor to touch; user-facing code wraps it in
+    :class:`~slurm.parallel.peer_info.PeerGroup` views.
     """
     return json.loads(Path(path).read_text())
 
@@ -317,14 +279,6 @@ def peers_from_registry(registry: dict) -> Dict[str, List[PeerRegistryEntry]]:
     return {
         name: [PeerRegistryEntry.from_dict(entry) for entry in entries]
         for name, entries in registry.get("peers", {}).items()
-    }
-
-
-def nodes_from_registry(registry: dict) -> Dict[str, NodeRegistryEntry]:
-    """Materialize the ``nodes`` section of a registry dict into dataclasses."""
-    return {
-        key: NodeRegistryEntry.from_dict(entry)
-        for key, entry in registry.get("nodes", {}).items()
     }
 
 
@@ -349,30 +303,6 @@ def load_peer_groups(
     path = Path(registry_path)
     groups = dict(_load_groups_from_path(path))
     return MappingProxyType(groups)
-
-
-def load_node_group(
-    registry_path: "str | Path",
-    *,
-    current_pool: Optional[str] = None,
-) -> "NodeGroup":
-    """Load the node section of ``registry.json`` into a :class:`NodeGroup`.
-
-    Returns an empty :class:`NodeGroup` if the file is missing or unreadable
-    — node discovery must be robust against racing the bootstrap during the
-    first few hundred milliseconds of a peer's life.
-
-    Args:
-        registry_path: Path to ``registry.json``.
-        current_pool: Pool name of the current peer. Passed through so the
-            returned group's ordinal lookup resolves against the right pool.
-
-    Returns:
-        :class:`NodeGroup` populated from the registry's ``nodes`` section.
-    """
-    from .node_info import _load_nodes_from_path
-
-    return _load_nodes_from_path(Path(registry_path), current_pool)
 
 
 @contextlib.contextmanager
@@ -420,26 +350,16 @@ def update_peer_hostinfo(
 ) -> dict:
     """Record the peer's runtime-discovered hostname and Slurm step id.
 
-    Bootstrap seeds each peer entry with ``hostname=""`` (pending) for
-    unpinned peers — it cannot know which node Slurm will pick until the
-    ``srun`` step actually launches. The runner calls this helper at
-    startup, right after resolving any declared ports, so service
-    discovery (``ctx.peers[...].first.hostname``, ``ctx.node``) returns
-    the *actual* host rather than bootstrap's speculation.
-
-    For pinned peers this is still called — it's a no-op observationally
-    since bootstrap's seed already matches — which keeps the publish
-    path uniform regardless of whether the peer was pinned.
+    Bootstrap seeds each peer entry with ``hostname=""`` (pending) — it
+    cannot know which node Slurm will pick until the ``srun`` step actually
+    launches. The runner calls this helper at startup, right after resolving
+    any declared ports, so service discovery
+    (``ctx.peers[...].first.hostname``) returns the *actual* host rather
+    than bootstrap's speculation.
 
     ``step_id`` comes from ``SLURM_STEP_ID`` when the runner is launched
     under srun. It is ``None`` in local-mode (no srun involved) and for
     tests.
-
-    As a side effect, also refreshes the node registry's cached
-    ``nodes[*].peers`` list for debugging / backward compatibility.
-    User-facing discovery derives node membership from the peer section
-    on read, but keeping the cache reasonably current makes the raw file
-    easier to inspect and preserves compatibility with older tooling.
     """
     with _with_registry_lock(path):
         registry = read_registry(path)
@@ -456,9 +376,8 @@ def update_peer_hostinfo(
                 f"{peer_name!r} (have {len(entries)} entries)"
             )
         entry = dict(entries[replica_index])
-        previous_hostname = str(entry.get("hostname") or "")
         # Skip the write if nothing actually changed — saves a rewrite
-        # when a pinned peer's hostname already matches the runner's.
+        # when a peer's hostname already matches the runner's.
         changed = False
         if entry.get("hostname") != hostname:
             entry["hostname"] = hostname
@@ -467,36 +386,7 @@ def update_peer_hostinfo(
             entry["step_id"] = step_id
             changed = True
         if changed:
-            nodes = registry.setdefault("nodes", {})
-            destination_node = dict(nodes.get(hostname) or {})
-            destination_label = destination_node.get("label")
-            if entry.get("node_label") != destination_label:
-                entry["node_label"] = destination_label
             entries[replica_index] = entry
-
-            # Also refresh the nodes section so ``ctx.nodes`` / ``ctx.node``
-            # reflect the actual host once the runner knows where it is.
-            if previous_hostname and previous_hostname != hostname:
-                previous_node = dict(nodes.get(previous_hostname) or {})
-                if previous_node:
-                    previous_node["peers"] = [
-                        name
-                        for name in list(previous_node.get("peers") or ())
-                        if name != peer_name
-                    ]
-                    nodes[previous_hostname] = previous_node
-
-            node_entry = destination_node
-            node_entry.setdefault("hostname", hostname)
-            node_entry.setdefault("pool", entry.get("pool", ""))
-            node_entry.setdefault("component_index", entry.get("component_index", 0))
-            node_entry.setdefault("ordinal", len(nodes))
-            node_entry.setdefault("label", entry.get("node_label"))
-            existing_peers = list(node_entry.get("peers") or ())
-            if peer_name not in existing_peers:
-                existing_peers.append(peer_name)
-            node_entry["peers"] = existing_peers
-            nodes[hostname] = node_entry
             write_registry(path, registry)
     return registry
 
@@ -585,16 +475,13 @@ def update_peer_entry(
 
 __all__ = [
     "PeerRegistryEntry",
-    "NodeRegistryEntry",
     "write_registry",
     "read_registry",
     "peers_from_registry",
-    "nodes_from_registry",
     "update_peer_entry",
     "update_peer_hostinfo",
     "announce_peer_metadata",
     "load_peer_groups",
-    "load_node_group",
     "_RESERVED_ANNOUNCE_KEYS",
     "STATE_PENDING",
     "STATE_READY",

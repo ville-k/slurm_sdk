@@ -8,8 +8,7 @@ typo'd pool name — all mistakes should surface before submission.
 Design choices driving the checks here:
 
 - Pools are placement groups: same pool = co-located; different pools =
-  potentially different node types. Cross-pool ``colocate_with`` is always
-  an error.
+  potentially different node types.
 - Names are the peers' runtime identity (``ctx.peers["<name>"]``,
   ``job["<name>"]``). They must be unique.
 - A peer can declare capacity via its underlying ``@task`` decorator's
@@ -118,8 +117,6 @@ def validate_spec(spec: _ParallelSpec) -> None:
     _check_pool_references(spec, problems)
     _check_announce_keys(spec, problems)
     _check_replica_args_length(spec, problems)
-    _check_on_node(spec, problems)
-    _check_colocate_with(spec, problems)
     _check_capacity(spec, problems)
     _check_outer_options(spec, problems)
     _check_packaging_inheritance(spec, problems)
@@ -200,119 +197,6 @@ def _check_replica_args_length(spec: _ParallelSpec, problems: list[str]) -> None
                 problems.append(
                     f"Peer {peer.resolved_name!r} has args= with len "
                     f"{len(args)} but count={peer.count}."
-                )
-
-
-def _check_on_node(spec: _ParallelSpec, problems: list[str]) -> None:
-    pools = spec.topology.pools
-    for peer in spec.peers:
-        pool_name = peer.pool
-        pool = pools.get(pool_name) if pool_name else None
-        if pool is None:
-            continue  # already reported in _check_pool_references
-
-        if peer.on_node is not None:
-            _check_single_node_ref(peer.resolved_name, pool, peer.on_node, problems)
-        if peer.on_nodes is not None:
-            for idx, node in enumerate(peer.on_nodes):
-                _check_single_node_ref(
-                    f"{peer.resolved_name}[{idx}]", pool, node, problems
-                )
-
-
-def _check_single_node_ref(
-    who: str, pool: Pool, node: Any, problems: list[str]
-) -> None:
-    if isinstance(node, int):
-        if node < 0 or node >= pool.nodes:
-            problems.append(
-                f"{who} pins to node ordinal {node} but pool has "
-                f"{pool.nodes} node(s) (0..{pool.nodes - 1})."
-            )
-    elif isinstance(node, str):
-        if pool.node_labels is None:
-            problems.append(
-                f"{who} pins to node label {node!r} but pool has no "
-                "node_labels declared. Either add node_labels=[...] to "
-                "the Pool(...) or use an integer ordinal."
-            )
-        elif node not in pool.node_labels:
-            problems.append(
-                f"{who} pins to unknown label {node!r}. Pool labels: "
-                f"{list(pool.node_labels)}."
-            )
-    else:
-        problems.append(
-            f"{who} has invalid node reference {node!r}; must be a string "
-            "label or integer ordinal."
-        )
-
-
-def _check_colocate_with(spec: _ParallelSpec, problems: list[str]) -> None:
-    peers_by_name = {p.resolved_name: p for p in spec.peers}
-
-    # First pass: cross-pool and unknown-target checks.
-    for peer in spec.peers:
-        target_name = peer.colocate_with
-        if target_name is None:
-            continue
-        if target_name not in peers_by_name:
-            problems.append(
-                f"Peer {peer.resolved_name!r} has colocate_with="
-                f"{target_name!r} but no peer with that name exists."
-            )
-            continue
-        target = peers_by_name[target_name]
-        if peer.pool != target.pool:
-            problems.append(
-                f"Peer {peer.resolved_name!r} colocate_with="
-                f"{target_name!r} but peers are in different pools "
-                f"({peer.pool!r} vs {target.pool!r}). colocation must stay "
-                "within a single pool — move one peer or pick a different "
-                "strategy."
-            )
-
-    # Second pass: cycle detection using DFS.
-    # Build a graph: peer_name -> colocate_with_target (or None).
-    graph: dict[str, str] = {}
-    for peer in spec.peers:
-        if peer.colocate_with and peer.colocate_with in peers_by_name:
-            graph[peer.resolved_name] = peer.colocate_with
-
-    WHITE, GREY, BLACK = 0, 1, 2
-    color: dict[str, int] = {name: WHITE for name in graph}
-
-    def dfs(node: str, stack: list[str]) -> list[str] | None:
-        color[node] = GREY
-        stack.append(node)
-        nxt = graph.get(node)
-        if nxt is not None:
-            if color.get(nxt, BLACK) == GREY:
-                # cycle — return the cycle path
-                cycle_start = stack.index(nxt)
-                return stack[cycle_start:] + [nxt]
-            if color.get(nxt, BLACK) == WHITE:
-                cycle = dfs(nxt, stack)
-                if cycle is not None:
-                    return cycle
-        color[node] = BLACK
-        stack.pop()
-        return None
-
-    reported_cycles: set[tuple[str, ...]] = set()
-    for start in list(graph.keys()):
-        if color[start] == WHITE:
-            cycle = dfs(start, [])
-            if cycle is not None:
-                key = tuple(sorted(cycle))
-                if key in reported_cycles:
-                    continue
-                reported_cycles.add(key)
-                problems.append(
-                    "Cycle in colocate_with: "
-                    + " → ".join(repr(n) for n in cycle)
-                    + ". Break the cycle by pinning at least one peer "
-                    "directly with on_node= or on_nodes=."
                 )
 
 

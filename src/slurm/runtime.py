@@ -26,7 +26,6 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from .parallel.node_info import NodeGroup, NodeInfo
     from .parallel.peer_info import PeerGroup
 
 _DEFAULT_MASTER_PORT = 29500
@@ -83,7 +82,7 @@ def resolve_current_hostname(
     *,
     env: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
-    """Resolve the hostname this process should use for node discovery.
+    """Resolve the hostname this process should use in the peer registry.
 
     Hostname resolution follows the runtime-discovery precedence documented
     for parallel peers:
@@ -93,9 +92,8 @@ def resolve_current_hostname(
     2. ``HOSTNAME`` from the process environment.
     3. :func:`socket.gethostname` as the final local fallback.
 
-    The helper is shared by the runner's initial host publication path and
-    :attr:`JobContext.node` so both surfaces agree on the hostname key used
-    inside ``registry.json``.
+    The runner's initial host publication path uses this so the hostname
+    key written into ``registry.json`` is stable.
     """
     if job_context.node_rank is not None and 0 <= job_context.node_rank < len(
         job_context.hostnames
@@ -220,49 +218,6 @@ class JobContext:
         from .parallel.registry import load_peer_groups
 
         return load_peer_groups(self._registry_path)
-
-    @property
-    def nodes(self) -> "NodeGroup":
-        """Read-only view of every node in the allocation.
-
-        Returns a :class:`~slurm.parallel.node_info.NodeGroup` — see its
-        docstring for the indexing semantics. Integer subscripting
-        (``ctx.nodes[0]``) resolves within the current peer's pool
-        (:attr:`peer_pool`); string subscripting (``ctx.nodes["head"]``)
-        searches every pool for a matching label.
-
-        Outside a parallel allocation (no registry path) the group is
-        empty; callers can still iterate / call :meth:`by_hostname` /
-        :meth:`in_pool` without branching.
-        """
-        if self._registry_path is None:
-            from .parallel.node_info import NodeGroup
-
-            return NodeGroup(_nodes=(), _path=None, current_pool=self.peer_pool)
-        from .parallel.registry import load_node_group
-
-        return load_node_group(self._registry_path, current_pool=self.peer_pool)
-
-    @property
-    def node(self) -> "Optional[NodeInfo]":
-        """The :class:`~slurm.parallel.node_info.NodeInfo` for this process's host.
-
-        Uses :func:`resolve_current_hostname` to look up the current process
-        in :attr:`nodes`. This keeps ``ctx.node`` aligned with the runner's
-        registry publication path: step nodelist / node rank wins, then
-        ``HOSTNAME``, then :func:`socket.gethostname`.
-
-        Returns ``None`` when the current process isn't running under a
-        parallel allocation or the resolved hostname isn't in the registry
-        (e.g. tests that don't mock the full topology).
-        """
-        group = self.nodes
-        if len(group) == 0:
-            return None
-        hostname = resolve_current_hostname(self)
-        if hostname is None:
-            return None
-        return group.by_hostname(hostname)
 
     def announce(self, *, ready: bool = False, **fields: Any) -> None:
         """Publish runtime metadata to the peer registry.

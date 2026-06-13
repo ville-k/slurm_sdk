@@ -295,19 +295,16 @@ class TopologyError(Exception):
     """Raised when a ``parallel(...)`` submission has an invalid topology.
 
     Topology errors surface before the job is submitted. They indicate
-    declarative problems — pool / peer / resource / placement conflicts —
-    that the SDK can detect at spec-validation time. Users see a single
-    aggregated error listing every problem found, so a 24-hour RL job never
-    fails after 30 seconds because a pool was mis-sized.
+    declarative problems — pool / peer / resource conflicts — that the SDK
+    can detect at spec-validation time. Users see a single aggregated error
+    listing every problem found, so a 24-hour RL job never fails after 30
+    seconds because a pool was mis-sized.
 
     Common causes:
         - Peer references a pool name that does not exist in ``Topology.pools``
         - Sum of peer resource claims exceeds a pool's per-node capacity
         - Two peer names collide
         - ``leader=True`` combined with ``on_failure="continue"``
-        - ``on_node="label"`` but the label is not in ``Pool.node_labels``
-        - ``colocate_with="X"`` targets a peer in a different pool
-        - Cycle in the ``colocate_with`` dependency graph
         - ``Peer.replicas(args=...)`` length does not match ``count``
 
     What to check:

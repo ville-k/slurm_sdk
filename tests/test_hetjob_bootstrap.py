@@ -150,14 +150,6 @@ def test_build_registry_skeleton_seeds_per_component_hostnames():
     assert skeleton["peers"]["collector"][0]["hostname"] == ""
     assert skeleton["peers"]["collector"][0]["component_index"] == 2
 
-    # Nodes map carries per-component pool attribution; ``peers``
-    # membership starts empty — runners register themselves at startup.
-    assert skeleton["nodes"]["gpu-01"]["pool"] == "gpu"
-    assert skeleton["nodes"]["cpu-01"]["pool"] == "cpu"
-    assert skeleton["nodes"]["aux-01"]["pool"] == "aux"
-    assert skeleton["nodes"]["gpu-01"]["peers"] == []
-    assert skeleton["nodes"]["aux-01"]["peers"] == []
-
 
 def test_build_registry_skeleton_unpinned_replicas_stay_pending():
     """Replica count > component hostnames — every replica stays empty.
@@ -188,8 +180,7 @@ def test_build_registry_skeleton_unpinned_replicas_stay_pending():
     )
     hosts = [e["hostname"] for e in skeleton["peers"]["worker"]]
     assert hosts == ["", "", "", "", ""]
-    # The full component hostname list is still recorded so ordinal
-    # lookups via ``ctx.nodes[<ordinal>]`` work before runners publish.
+    # The full component hostname list is still recorded for reference.
     assert all(
         e["hostnames"] == ["cpu-01", "cpu-02"] for e in skeleton["peers"]["worker"]
     )

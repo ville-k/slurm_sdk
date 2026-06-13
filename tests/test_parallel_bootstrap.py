@@ -47,44 +47,14 @@ def test_build_registry_skeleton_marks_peers_pending():
         entries = skeleton["peers"][peer_name]
         assert len(entries) == 1
         entry = entries[0]
-        # Unpinned peers carry an empty hostname until the runner
-        # publishes the actual value at startup — see
-        # ``update_peer_hostinfo``. The pool's hostnames are still
-        # recorded so ``ctx.nodes`` lookup by ordinal works.
+        # Every peer carries an empty hostname until its runner publishes
+        # the actual value at startup — see ``update_peer_hostinfo``. The
+        # pool's hostnames are still recorded for reference.
         assert entry["state"] == "pending"
         assert entry["pool"] == "default"
         assert entry["hostname"] == ""
         assert entry["hostnames"] == ["gpu-01", "gpu-02"]
         assert entry["restart_count"] == 0
-
-    # Nodes section still enumerates every hostname allocated to the
-    # component — ordinal / label lookup must work — but ``peers``
-    # membership stays empty until the runners reconcile at startup.
-    assert set(skeleton["nodes"].keys()) == {"gpu-01", "gpu-02"}
-    assert skeleton["nodes"]["gpu-01"]["ordinal"] == 0
-    assert skeleton["nodes"]["gpu-02"]["ordinal"] == 1
-    assert skeleton["nodes"]["gpu-01"]["peers"] == []
-    assert skeleton["nodes"]["gpu-02"]["peers"] == []
-
-
-def test_build_registry_skeleton_honours_pins():
-    """Peers listed in ``peer_pins`` get their pinned hostname; others stay empty.
-
-    Pinned peers are the ones the placement resolver (Phase 8) decided on:
-    either via ``Peer(on_node=...)`` / ``Peer.replicas(on_nodes=...)`` or
-    via a ``colocate_with`` chain. The bootstrap writes the pin so
-    ``ctx.peers[...].first.hostname`` is authoritative before the runner
-    even starts; unpinned peers rely on the runner's startup publish.
-    """
-    plan = _sample_plan()
-    skeleton = topology_bootstrap.build_registry_skeleton(
-        plan,
-        ("gpu-01", "gpu-02"),
-        peer_pins={"learner": ("gpu-02",)},
-    )
-    assert skeleton["peers"]["learner"][0]["hostname"] == "gpu-02"
-    # metrics was not pinned — stays pending
-    assert skeleton["peers"]["metrics"][0]["hostname"] == ""
 
 
 def test_build_registry_skeleton_handles_empty_nodelist():
@@ -95,7 +65,6 @@ def test_build_registry_skeleton_handles_empty_nodelist():
 
     assert skeleton["peers"]["learner"][0]["hostname"] == ""
     assert skeleton["peers"]["learner"][0]["hostnames"] == []
-    assert skeleton["nodes"] == {}
 
 
 def test_resolve_hostnames_falls_back_when_scontrol_missing(monkeypatch):
@@ -137,7 +106,6 @@ def test_main_writes_registry(tmp_path, monkeypatch):
     assert registry_path.exists()
     registry = read_registry(registry_path)
     assert set(registry["peers"].keys()) == {"learner", "metrics"}
-    assert sorted(registry["nodes"].keys()) == ["test-host-01", "test-host-02"]
 
 
 def test_main_returns_error_when_plan_missing(tmp_path):

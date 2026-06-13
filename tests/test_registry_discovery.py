@@ -39,7 +39,6 @@ def _seed_registry(path: Path) -> None:
         path,
         {
             "peers": {"a": _entries("a"), "b": _entries("b")},
-            "nodes": {},
         },
     )
 
