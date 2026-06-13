@@ -4,34 +4,30 @@ The unit suite exercises the parallel surface against ``_RecordingBackend``,
 ``FakeBackend``, and the local bypass-sbatch path. That leaves the set of
 behaviours that only a real scheduler can surface:
 
-1. ``#SBATCH hetjob`` header acceptance by ``sbatch``.
-2. ``srun --het-group=N`` dispatch inside the allocation.
-3. ``$SLURM_JOB_NODELIST_HET_GROUP_<N>`` / ``$SLURM_PROCID`` /
-   ``$SLURM_STEP_ID`` populated by the real scheduler (not synthesized).
-4. ``scancel --signal=TERM <jobid>+<N>`` cascade across hetjob components.
-5. ``scontrol show hostnames`` expansion inside bootstrap.
-6. Real restart semantics under Slurm's atomic-``srun --ntasks=N`` model.
-7. Per-peer dependency chaining (``--dependency=afterok:...``) on every
-   hetjob component.
+1. ``#SBATCH`` header acceptance by ``sbatch``.
+2. ``$SLURM_PROCID`` / ``$SLURM_STEP_ID`` populated by the real scheduler
+   (not synthesized).
+3. ``scancel --signal=TERM <jobid>`` cascade across the allocation.
+4. ``scontrol show hostnames`` expansion inside bootstrap.
+5. Atomic ``srun --ntasks=N`` replica-set semantics under Slurm.
+6. Dependency chaining (``--dependency=afterok:...``) on the allocation.
 
 These tests run against ``containers/slurm-test`` (single-node
-``slurm-control`` in the ``debug`` partition). That covers (1)-(6)
-plus bootstrap / runner publish / ``wait_all`` under a scheduler-
-populated environment. Multi-node placement still needs a production
-cluster — called out in the relevant test's docstring.
+``slurm-control`` in the ``debug`` partition), covering the above plus
+bootstrap / runner publish / ``wait_all`` under a scheduler-populated
+environment.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from slurm import Peer, Pool, Topology, parallel
+from slurm import Peer, parallel
 from slurm.examples.integration_test_task import (
     parallel_coordinator_task,
     parallel_downstream_peer_task,
     parallel_leader_task,
     parallel_long_lived_sidecar_task,
-    parallel_pool_identity_task,
     parallel_replica_identity_task,
     parallel_slow_upstream_task,
     parallel_worker_task,
@@ -141,98 +137,7 @@ def test_replica_set_per_replica_results(slurm_cluster):
 
 
 # ---------------------------------------------------------------------------
-# 3. Two-pool hetjob — sbatch accepts the header, HET_GROUP env is populated.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration_test
-@pytest.mark.slow_integration_test
-def test_two_pool_hetjob_header_accepted(slurm_cluster):
-    """Two-pool ``Topology`` → ``sbatch`` accepts the hetjob header.
-
-    Full end-to-end hetjob scheduling requires multiple nodes so each
-    component can get its own node allocation — the single-node
-    ``slurm-control`` container genuinely cannot schedule a 2-component
-    hetjob where each component declares ``--nodes=1`` (the second
-    component blocks on ``Reason=Resources`` forever). Cross-partition
-    scheduling and cross-node-type placement still require a
-    production-class cluster.
-
-    What this DOES prove, end-to-end against the real scheduler:
-
-    - ``#SBATCH hetjob`` header accepted by ``sbatch`` without syntax
-      errors — Slurm returns a valid hetjob id pair (``<base>+0`` /
-      ``<base>+1``) visible through ``job["<name>"]._job_id``.
-    - The renderer's hetjob script survives ``sbatch``'s parse step and
-      Slurm's allocation controller acknowledges the component layout.
-    - The per-peer ``--dependency=afterok`` propagation wired onto every
-      hetjob component would route correctly — same header path.
-
-    The allocation is cancelled immediately after submission so the test
-    doesn't block on scheduling that will never happen on one node.
-    """
-    topo = Topology(
-        pools={
-            "alpha": Pool(nodes=1, partition="debug"),
-            "beta": Pool(nodes=1, partition="debug"),
-        },
-    )
-    with slurm_cluster:
-        job = parallel(
-            Peer(
-                parallel_pool_identity_task.partial(pool="alpha"),
-                pool="alpha",
-                name="alpha",
-            ),
-            Peer(
-                parallel_pool_identity_task.partial(pool="beta"),
-                pool="beta",
-                name="beta",
-            ),
-            topology=topo,
-        )
-        # sbatch accepts the hetjob header and returns a base id shared
-        # by every peer — the peers' backing Jobs carry that same base id
-        # because the supervisor dispatches component placement via
-        # ``srun --het-group=N`` internally, not via per-peer distinct
-        # job ids. A rejected hetjob header would have raised
-        # ``SubmissionError`` before ``parallel(...)`` returned.
-        alpha_id = job["alpha"].id
-        beta_id = job["beta"].id
-        assert alpha_id, "alpha peer received no job id from sbatch"
-        assert beta_id == alpha_id, (
-            f"peers should share a hetjob base id ({alpha_id} vs {beta_id})"
-        )
-
-        # Slurm's view of the allocation via ``scontrol show job``
-        # confirms the hetjob layout. We verify the peer saw the whole
-        # pair (``<base>+0`` + ``<base>+1``) registered — ``scontrol``
-        # reports ``HetJobIdSet=<base>-<base+1>`` for a 2-component
-        # hetjob. Hitting this successfully proves the whole hetjob
-        # header survived parsing and registration.
-        result = slurm_cluster.backend._run_command(
-            f"scontrol show job {alpha_id}", timeout=10
-        )
-        scontrol_out = result[0] if isinstance(result, tuple) else str(result)
-        assert "HetJobId=" in scontrol_out, (
-            f"scontrol show job {alpha_id} did not report a HetJobId — "
-            "the submission did not register as a heterogeneous job. "
-            f"Output:\n{scontrol_out[:500]}"
-        )
-        assert "HetJobIdSet=" in scontrol_out, (
-            f"scontrol show job {alpha_id} did not report HetJobIdSet — "
-            "hetjob component set missing. "
-            f"Output:\n{scontrol_out[:500]}"
-        )
-
-        # Release the reservation — the single-node cluster cannot
-        # schedule both components anyway, and leaving the hetjob queued
-        # blocks subsequent tests behind pending priority.
-        job.cancel()
-
-
-# ---------------------------------------------------------------------------
-# 4. Service discovery — peers find each other via registry + wait_all.
+# 3. Service discovery — peers find each other via registry + wait_all.
 # ---------------------------------------------------------------------------
 
 
@@ -305,10 +210,8 @@ def test_parallel_after_upstream_dependency(slurm_cluster):
     - ``JobState=PENDING`` + ``Reason=Dependency``, proving Slurm
       honoured it.
 
-    Multi-pool hetjob submissions share the same ``#SBATCH
-    --dependency=…`` header (it's a single allocation with multiple
-    components), so this single-allocation form exercises the wiring
-    path without needing a two-pool topology. If the
+    The dependency is carried on the single ``#SBATCH --dependency=…``
+    header for the allocation. If the
     ``--dependency=afterok:`` wiring is removed, the scontrol output
     won't carry the Dependency substring and the test fails on the
     first assertion — this is the point of the rework.

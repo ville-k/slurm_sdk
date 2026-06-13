@@ -172,18 +172,6 @@ def parallel_long_lived_sidecar_task() -> str:
 
 
 @task(time="00:01:00", mem="100M")
-def parallel_pool_identity_task(pool: str) -> dict:
-    """Hetjob test helper — return pool name + env tag from the scheduler."""
-    import os
-
-    return {
-        "pool": pool,
-        "het_group": os.environ.get("SLURM_JOB_HET_GROUP"),
-        "job_id": os.environ.get("SLURM_JOB_ID"),
-    }
-
-
-@task(time="00:01:00", mem="100M")
 def parallel_replica_identity_task(ctx: JobContext) -> dict:
     """Return per-replica scheduler-populated identity — SLURM_PROCID etc.
 

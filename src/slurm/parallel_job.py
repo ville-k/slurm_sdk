@@ -708,9 +708,8 @@ class ParallelJob:
         """Return a new :class:`ParallelJob` that waits for *deps* first.
 
         Propagates ``#SBATCH --dependency=afterok:<id>[:<id>...]`` onto
-        every hetjob component of the re-submitted allocation so Slurm
-        only schedules the parallel allocation after every upstream job
-        has completed successfully.
+        the re-submitted allocation so Slurm only schedules the parallel
+        allocation after every upstream job has completed successfully.
 
         Because :func:`parallel` submits eagerly, ``.after()`` cancels the
         currently-queued allocation and submits a fresh one with the
@@ -788,14 +787,11 @@ class ParallelJob:
     def cancel(self) -> bool:
         """Cancel the allocation via ``scancel``.
 
-        Every peer Job — single-pool or hetjob — is constructed with the
-        allocation's shared base Slurm id (hetjob components are
-        addressable individually as ``<base>+N``, but ``scancel <base>``
-        resolves to the entire hetjob in Slurm). We iterate every peer
-        handle's Job ids, collapse duplicates, and call ``scancel``
-        once per unique id — in practice one call per submission
-        regardless of pool count. Returns ``True`` iff every
-        cancellation succeeded.
+        Every peer Job is constructed with the allocation's shared base
+        Slurm id. We iterate every peer handle's Job ids, collapse
+        duplicates, and call ``scancel`` once per unique id — in practice
+        one call per submission. Returns ``True`` iff every cancellation
+        succeeded.
 
         In-flight allocations where the supervisor is already running
         also get the cascade from inside the batch script; calling

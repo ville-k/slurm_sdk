@@ -320,8 +320,8 @@ def submit_parallel_spec(
     Args:
         cluster: Active :class:`Cluster` that owns the backend.
         spec: Normalised ``_ParallelSpec`` returned by :func:`_build_spec`.
-        dependency_ids: Optional upstream Slurm job ids. When provided, every
-            hetjob component's ``#SBATCH`` header carries
+        dependency_ids: Optional upstream Slurm job ids. When provided, the
+            allocation's ``#SBATCH`` header carries
             ``--dependency=afterok:<id>[:<id>...]`` so Slurm only schedules
             the allocation after every upstream job succeeds. Used by
             :meth:`ParallelJob.after` and the ``parallel(..., after=...)``
@@ -398,8 +398,8 @@ def submit_parallel_spec(
         peer_packaging_strategies=peer_packaging_strategies,
     )
 
-    # Dependency string propagates to every hetjob component so Slurm only
-    # schedules the allocation once every upstream job has succeeded.
+    # Dependency string propagates to the allocation so Slurm only schedules
+    # it once every upstream job has succeeded.
     sbatch_overrides: Dict[str, Any] = {}
     if dependency_ids:
         sbatch_overrides["dependency"] = "afterok:" + ":".join(dependency_ids)

@@ -3,9 +3,8 @@
 Runs once on the batch allocation's head node, before the supervisor:
 
 1. Read ``$JOB_DIR/plan.json``.
-2. Resolve the allocation's hostnames from ``SLURM_JOB_NODELIST`` (and
-   the per-component ``SLURM_JOB_NODELIST_HET_GROUP_<N>`` vars for
-   hetjobs) via ``scontrol show hostnames`` when available; an
+2. Resolve the allocation's hostnames from ``SLURM_JOB_NODELIST`` /
+   ``SLURM_NODELIST`` via ``scontrol show hostnames`` when available; an
    in-process expander handles the common cases in tests and
    scontrol-less environments.
 3. Write a registry skeleton to ``$JOB_DIR/registry.json``. Every peer
@@ -22,7 +21,7 @@ import os
 import subprocess  # nosec B404 - used to invoke scontrol
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from ..runtime import _expand_nodelist
 from .plan import Plan, read_plan
@@ -66,14 +65,10 @@ def _resolve_hostnames(nodelist: str) -> Tuple[str, ...]:
 def build_registry_skeleton(
     plan: Plan,
     hostnames: Tuple[str, ...],
-    *,
-    per_component_hostnames: Optional[Dict[int, Tuple[str, ...]]] = None,
 ) -> dict:
     """Build the initial registry dict — all peers ``pending``.
 
-    Every peer entry lists the hostnames of its pool. For hetjob submissions
-    ``per_component_hostnames`` maps component index → hostname tuple so
-    peers in different pools see different hostname sets. Replica peers get
+    Every peer entry lists the allocation's hostnames. Replica peers get
     ``peer.replica_count`` entries in the registry list (one per replica
     index); singleton peers get exactly one.
 
@@ -85,34 +80,10 @@ def build_registry_skeleton(
 
     Args:
         plan: Parsed supervisor plan.
-        hostnames: Flat hostname list — used for single-pool submissions and
-            as the fallback when ``per_component_hostnames`` is missing a
-            component.
-        per_component_hostnames: Optional mapping of component index →
-            hostname tuple. When provided, each peer is seeded with the
-            hostnames of its component.
+        hostnames: The allocation's hostname list.
     """
-    components = plan.effective_components()
-    # Derive per-component hostname tuples. When the caller did not supply a
-    # mapping (single-pool path or missing env vars), reuse the flat
-    # hostnames list for every component so callers get sensible defaults.
-    component_hosts: Dict[int, Tuple[str, ...]] = {}
-    for comp in components:
-        if (
-            per_component_hostnames is not None
-            and comp.index in per_component_hostnames
-        ):
-            component_hosts[comp.index] = tuple(per_component_hostnames[comp.index])
-        else:
-            component_hosts[comp.index] = tuple(hostnames)
-
-    # Map pool name → component index for quick peer→component lookup.
-    pool_to_component: Dict[str, int] = {c.pool: c.index for c in components}
-
     peers_out: dict = {}
     for peer in plan.peers:
-        comp_index = pool_to_component.get(peer.pool, 0)
-        peer_hostnames = component_hosts.get(comp_index, ())
         entries = []
         for replica_index in range(peer.replica_count):
             entries.append(
@@ -122,7 +93,7 @@ def build_registry_skeleton(
                     "replica_index": replica_index,
                     "replica_count": peer.replica_count,
                     "hostname": "",
-                    "hostnames": list(peer_hostnames),
+                    "hostnames": list(hostnames),
                     "step_id": None,
                     "ports": {},
                     "metadata": {},
@@ -131,7 +102,6 @@ def build_registry_skeleton(
                     "outcome": None,
                     "final_exit_code": None,
                     "message": None,
-                    "component_index": comp_index,
                 }
             )
         peers_out[peer.name] = entries
@@ -174,78 +144,32 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     plan = read_plan(plan_path)
 
-    hostnames, per_component_hostnames = _resolve_component_hostnames(plan)
+    hostnames = _resolve_allocation_hostnames()
 
-    skeleton = build_registry_skeleton(
-        plan,
-        hostnames,
-        per_component_hostnames=per_component_hostnames,
-    )
+    skeleton = build_registry_skeleton(plan, hostnames)
     write_registry(job_dir / "registry.json", skeleton)
     logger.info("Registry skeleton written to %s", job_dir / "registry.json")
 
     return 0
 
 
-def _resolve_component_hostnames(
-    plan: Plan,
-) -> Tuple[Tuple[str, ...], Optional[Dict[int, Tuple[str, ...]]]]:
-    """Resolve hostnames per hetjob component.
+def _resolve_allocation_hostnames() -> Tuple[str, ...]:
+    """Resolve the allocation's hostnames from the Slurm nodelist env vars.
 
-    Slurm exposes per-component nodelists via
-    ``SLURM_JOB_NODELIST_HET_GROUP_<N>`` — one env var per component. When any
-    of these are set we treat the submission as a hetjob and slice hostnames
-    per component. Otherwise we fall back to the flat ``SLURM_JOB_NODELIST``.
-
-    Returns:
-        ``(flat_hostnames, per_component_hostnames)``. ``per_component_hostnames``
-        is ``None`` in the single-pool (non-hetjob) case so callers can branch
-        on it without probing the dict.
+    Reads ``SLURM_JOB_NODELIST`` (falling back to ``SLURM_NODELIST``) and
+    expands it via ``scontrol show hostnames`` when available, with an
+    in-process expander as the fallback.
     """
-    components = plan.effective_components()
-
-    per_component: Dict[int, Tuple[str, ...]] = {}
-    has_any_component_env = False
-    for comp in components:
-        env_key = f"SLURM_JOB_NODELIST_HET_GROUP_{comp.index}"
-        raw = os.environ.get(env_key, "")
-        if raw:
-            has_any_component_env = True
-            per_component[comp.index] = _resolve_hostnames(raw)
-            logger.info(
-                "Bootstrap resolved %d hostname(s) for component %d (pool %r)",
-                len(per_component[comp.index]),
-                comp.index,
-                comp.pool,
-            )
-
-    flat_nodelist = (
+    nodelist = (
         os.environ.get("SLURM_JOB_NODELIST") or os.environ.get("SLURM_NODELIST") or ""
     )
-    flat_hostnames = _resolve_hostnames(flat_nodelist) if flat_nodelist else ()
-    if not flat_hostnames and per_component:
-        # Single-pool consumers still want a non-empty flat list. Concatenate
-        # the per-component hostnames preserving component order.
-        combined: List[str] = []
-        for comp in components:
-            combined.extend(per_component.get(comp.index, ()))
-        flat_hostnames = tuple(combined)
-
+    hostnames = _resolve_hostnames(nodelist) if nodelist else ()
     logger.info(
-        "Bootstrap resolved %d flat hostname(s) from nodelist %r",
-        len(flat_hostnames),
-        flat_nodelist,
+        "Bootstrap resolved %d hostname(s) from nodelist %r",
+        len(hostnames),
+        nodelist,
     )
-
-    if has_any_component_env:
-        # Backfill components that didn't get their own env var so
-        # build_registry_skeleton never sees a missing component index.
-        for comp in components:
-            per_component.setdefault(comp.index, ())
-        return flat_hostnames, per_component
-
-    # No hetjob env vars — Phase 3 single-pool semantics.
-    return flat_hostnames, None
+    return hostnames
 
 
 if __name__ == "__main__":  # pragma: no cover - module entry point

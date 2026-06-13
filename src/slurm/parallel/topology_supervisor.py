@@ -69,30 +69,6 @@ def _install_sigterm_handler() -> None:
     signal.signal(signal.SIGINT, _handler)
 
 
-def _component_job_ids(job_id: Optional[str], component_count: int) -> List[str]:
-    """Return the scancel targets for a (possibly hetjob) allocation.
-
-    Slurm addresses each hetjob component by a distinct job id of the form
-    ``<base>+<N>`` (literal ``+N`` suffix — not shell arithmetic). Cancelling
-    every component takes one target per component, so the supervisor builds
-    the list up front and passes them all to ``scancel`` in a single call.
-
-    For single-pool submissions (``component_count <= 1``) the return value
-    is just ``[job_id]`` so callers don't need to branch on the shape.
-    """
-    if not job_id:
-        return []
-    if component_count <= 1:
-        return [job_id]
-    # Component 0 is addressable as both ``<jobid>`` and ``<jobid>+0`` — we use
-    # the bare form to match the single-pool path and avoid surprising users
-    # who read supervisor logs.
-    ids = [job_id]
-    for idx in range(1, component_count):
-        ids.append(f"{job_id}+{idx}")
-    return ids
-
-
 def _run_scancel(targets: List[str], *, sig: Optional[str]) -> None:
     """Best-effort ``scancel [--signal=<sig>] <targets...>``; no-op on absence.
 
@@ -108,27 +84,14 @@ def _run_scancel(targets: List[str], *, sig: Optional[str]) -> None:
         logger.debug("scancel %s not issued: %s", cmd[1:], err)
 
 
-def _signal_slurm_job(
-    job_id: Optional[str],
-    sig: str = "TERM",
-    *,
-    component_count: int = 1,
-) -> None:
-    """Best-effort ``scancel --signal=<sig> <job_id>[ +1 +2 ...]``.
-
-    For hetjob submissions every component is signalled in one ``scancel``
-    call so Slurm's reaper tears down the whole allocation atomically.
-    """
-    _run_scancel(_component_job_ids(job_id, component_count), sig=sig)
+def _signal_slurm_job(job_id: Optional[str], sig: str = "TERM") -> None:
+    """Best-effort ``scancel --signal=<sig> <job_id>``."""
+    _run_scancel([job_id] if job_id else [], sig=sig)
 
 
-def _hard_cancel_slurm_job(
-    job_id: Optional[str],
-    *,
-    component_count: int = 1,
-) -> None:
-    """Best-effort ``scancel <job_id>[ +1 +2 ...]``; no-op without scancel."""
-    _run_scancel(_component_job_ids(job_id, component_count), sig=None)
+def _hard_cancel_slurm_job(job_id: Optional[str]) -> None:
+    """Best-effort ``scancel <job_id>``; no-op without scancel."""
+    _run_scancel([job_id] if job_id else [], sig=None)
 
 
 def _signal_local_processes(
@@ -371,7 +334,6 @@ def run_supervisor(
     poll_interval: float = 0.05,
     launch: Optional[Callable[[PlanPeer], subprocess.Popen]] = None,
     registry_path: Optional[Path] = None,
-    component_count: Optional[int] = None,
     shared_dir: Optional[Path] = None,
     local_mode: bool = False,
 ) -> int:
@@ -392,10 +354,6 @@ def run_supervisor(
             ``None``, outcomes are not persisted (tests that don't need
             outcome tracking). The main CLI passes this path so the
             registry stays current.
-        component_count: Number of hetjob components. Defaults to the length
-            of ``plan.pool_names`` when ``None``. Drives the scancel cascade:
-            with ``component_count > 1`` the supervisor cancels every
-            component's job id (``<jobid>``, ``<jobid>+1``, ...).
         local_mode: When ``True``, peers are launched directly (no ``srun``)
             via :func:`_launch_peer_local`. Replica peers spawn one subprocess
             per replica (real srun would use ``--ntasks=N`` to do this for us).
@@ -410,8 +368,7 @@ def run_supervisor(
         from functools import partial as _partial
 
         if local_mode:
-            # Local mode ignores component_count (no hetjob concept without
-            # Slurm) and always launches peers as direct Python subprocesses.
+            # Local mode launches peers as direct Python subprocesses.
             launch_fn = None  # type: ignore[assignment]
         else:
             launch_fn = _partial(
@@ -419,8 +376,6 @@ def run_supervisor(
             )
     else:
         launch_fn = launch
-    if component_count is None:
-        component_count = max(1, len(plan.pool_names))
 
     processes: Dict[int, subprocess.Popen] = {}
     peer_by_pid: Dict[int, PlanPeer] = {}
@@ -480,7 +435,7 @@ def run_supervisor(
             )
             shutdown_deadline = time.time() + plan.grace_period_seconds
             if not local_mode:
-                _signal_slurm_job(job_id, "TERM", component_count=component_count)
+                _signal_slurm_job(job_id, "TERM")
             _signal_local_processes(
                 processes, signal.SIGTERM, use_process_groups=local_mode
             )
@@ -521,9 +476,7 @@ def run_supervisor(
                     )
                     shutdown_deadline = time.time() + plan.grace_period_seconds
                     if not local_mode:
-                        _signal_slurm_job(
-                            job_id, "TERM", component_count=component_count
-                        )
+                        _signal_slurm_job(job_id, "TERM")
                     _signal_local_processes(
                         processes, signal.SIGTERM, use_process_groups=local_mode
                     )
@@ -583,7 +536,7 @@ def run_supervisor(
                 )
                 shutdown_deadline = time.time() + plan.grace_period_seconds
                 if not local_mode:
-                    _signal_slurm_job(job_id, "TERM", component_count=component_count)
+                    _signal_slurm_job(job_id, "TERM")
                 _signal_local_processes(
                     processes, signal.SIGTERM, use_process_groups=local_mode
                 )
@@ -604,7 +557,7 @@ def run_supervisor(
                 processes, signal.SIGKILL, use_process_groups=local_mode
             )
             if not local_mode:
-                _hard_cancel_slurm_job(job_id, component_count=component_count)
+                _hard_cancel_slurm_job(job_id)
             hard_killed = True
 
         if processes:
@@ -676,18 +629,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             pool_names=plan.pool_names,
             pre_submission_id=plan.pre_submission_id,
             schema_version=plan.schema_version,
-            components=plan.components,
         )
 
     registry_path = job_dir / "registry.json"
     shared_dir = job_dir / "shared"
     job_id = os.environ.get("SLURM_JOB_ID")
-    component_count = max(1, len(plan.effective_components()))
     exit_code = run_supervisor(
         plan,
         job_id=job_id,
         registry_path=registry_path if registry_path.exists() else None,
-        component_count=component_count,
         shared_dir=shared_dir if shared_dir.exists() else None,
         local_mode=bool(args.local_mode),
     )

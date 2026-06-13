@@ -369,9 +369,9 @@ def test_peer_outcomes_keys_align_with_snapshot_for_mixed_shape(tmp_path: Path) 
 # ---------------------------------------------------------------------------
 
 
-def test_parallel_after_kwarg_emits_afterok_in_every_component() -> None:
+def test_parallel_after_kwarg_emits_afterok_in_header() -> None:
     """``parallel(after=prior)`` must render ``--dependency=afterok:<id>``
-    into every hetjob component's sbatch header."""
+    into the allocation's sbatch header."""
     import os as _os
     from typing import Optional as _Opt
 

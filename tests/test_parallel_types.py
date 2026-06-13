@@ -204,11 +204,11 @@ def test_topology_auto_resolves_default_pool_when_single():
     assert t.default_pool == "main"
 
 
-def test_topology_multi_pool_requires_explicit_default_or_per_peer():
-    # Not an error at Topology construction; the spec builder only errors
-    # if a peer actually omits pool=.
-    t = Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=4), "cpu": Pool(nodes=2)})
-    assert t.default_pool is None
+def test_topology_multi_pool_rejected():
+    # Multi-pool topologies (heterogeneous Slurm jobs) are deferred to a
+    # future release; only a single Pool is supported. See fable_plan.md.
+    with pytest.raises(ValueError, match="[Mm]ulti-pool"):
+        Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=4), "cpu": Pool(nodes=2)})
 
 
 def test_topology_default_pool_must_exist():

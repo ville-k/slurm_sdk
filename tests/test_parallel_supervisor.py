@@ -184,22 +184,8 @@ def test_signal_slurm_job_noop_without_job_id():
     topology_supervisor._hard_cancel_slurm_job(None)
 
 
-def test_component_job_ids_single_component_returns_base_id():
-    assert topology_supervisor._component_job_ids("12345", 1) == ["12345"]
-
-
-def test_component_job_ids_multi_component_adds_suffixes():
-    # Hetjob: base + <base>+1 + <base>+2 ... literal '+N', not arithmetic.
-    ids = topology_supervisor._component_job_ids("12345", 3)
-    assert ids == ["12345", "12345+1", "12345+2"]
-
-
-def test_component_job_ids_returns_empty_without_job_id():
-    assert topology_supervisor._component_job_ids(None, 3) == []
-
-
-def test_signal_slurm_job_cascades_over_components(monkeypatch):
-    """Multi-component scancel must pass every component id in one call."""
+def test_signal_slurm_job_targets_base_id(monkeypatch):
+    """scancel --signal targets the single allocation job id."""
     import subprocess as _subprocess
 
     captured: dict = {}
@@ -213,17 +199,11 @@ def test_signal_slurm_job_cascades_over_components(monkeypatch):
         return _R()
 
     monkeypatch.setattr(_subprocess, "run", _fake_run)
-    topology_supervisor._signal_slurm_job("7000", "TERM", component_count=3)
-    assert captured["cmd"] == [
-        "scancel",
-        "--signal=TERM",
-        "7000",
-        "7000+1",
-        "7000+2",
-    ]
+    topology_supervisor._signal_slurm_job("7000", "TERM")
+    assert captured["cmd"] == ["scancel", "--signal=TERM", "7000"]
 
 
-def test_hard_cancel_cascades_over_components(monkeypatch):
+def test_hard_cancel_targets_base_id(monkeypatch):
     import subprocess as _subprocess
 
     captured: dict = {}
@@ -237,8 +217,8 @@ def test_hard_cancel_cascades_over_components(monkeypatch):
         return _R()
 
     monkeypatch.setattr(_subprocess, "run", _fake_run)
-    topology_supervisor._hard_cancel_slurm_job("7000", component_count=2)
-    assert captured["cmd"] == ["scancel", "7000", "7000+1"]
+    topology_supervisor._hard_cancel_slurm_job("7000")
+    assert captured["cmd"] == ["scancel", "7000"]
 
 
 def test_main_roundtrips_plan(tmp_path, monkeypatch):

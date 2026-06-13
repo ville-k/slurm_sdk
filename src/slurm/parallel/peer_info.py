@@ -71,8 +71,9 @@ class PeerInfo:
             code stays simple.
         restart_count: Number of times the supervisor has re-launched this
             replica.
-        component_index: Hetjob component index the peer landed in. For
-            single-pool submissions always ``0``.
+        component_index: Inert registry-schema field retained for
+            forward-compatibility. Always ``0`` — multi-pool (heterogeneous)
+            submissions are not supported.
     """
 
     name: str

@@ -61,12 +61,12 @@ Same semantics as :meth:`SlurmTask.map`:
 
 @dataclass(frozen=True)
 class Pool:
-    """One homogeneous hardware reservation — a hetjob component.
+    """One homogeneous hardware reservation.
 
     A pool declares the *shape* of a reservation: how many nodes, of what
     per-node size, satisfying what partition / constraint / account. Peers
-    target a pool by name; Slurm allocates the pool as a hetjob component
-    and runs each peer's step inside it.
+    target a pool by name; Slurm allocates the pool and runs each peer's
+    step inside it.
 
     Attributes:
         nodes: Exact number of nodes to reserve. Must be ``>= 1``.
@@ -160,8 +160,8 @@ class Peer:
     """One service in a parallel allocation.
 
     A ``Peer`` wraps a task (``SlurmTask`` or :class:`BoundTask`) with
-    lifecycle directives. It compiles to one ``srun`` step inside a hetjob
-    component.
+    lifecycle directives. It compiles to one ``srun`` step inside the
+    allocation.
 
     Use :meth:`Peer.replicas` to declare a replica set (multiple tasks running
     the same function with per-replica args). Bare ``Peer(...)`` is a
@@ -356,13 +356,15 @@ class Peer:
 class Topology:
     """Collection of named pools for one ``parallel(...)`` call.
 
+    A topology holds exactly one pool in this release; multi-pool
+    (heterogeneous Slurm jobs) is rejected at construction time.
+
     Attributes:
-        pools: Mapping of pool name to :class:`Pool`. Peers reference pools
-            by name.
-        default_pool: Pool used by peers that omit ``pool=``. Required when
-            there are multiple pools and any peer omits ``pool=``; auto-set
-            to the single pool's name when there is exactly one pool.
-        network: ``#SBATCH --network=...`` applied to every pool (e.g. ``"efa"``).
+        pools: Mapping of pool name to :class:`Pool`. Must contain exactly
+            one entry. Peers reference the pool by name.
+        default_pool: Pool used by peers that omit ``pool=``. Auto-set to
+            the single pool's name.
+        network: ``#SBATCH --network=...`` applied to the pool (e.g. ``"efa"``).
         prolog: Shell snippet inserted into the batch script before the first
             peer launches. Runs once per allocation on the head node.
         epilog: Shell snippet inserted after the supervisor exits. Runs once.
@@ -370,9 +372,7 @@ class Topology:
     Example:
         >>> Topology(
         ...     pools={
-        ...         "learn": Pool(nodes=1, gpus_per_node=8, gpu_type="h100"),
-        ...         "serve": Pool(nodes=2, gpus_per_node=8, gpu_type="a100"),
-        ...         "sim":   Pool(nodes=4, cpus_per_node=96, partition="cpu"),
+        ...         "learn": Pool(nodes=2, gpus_per_node=8, gpu_type="h100"),
         ...     },
         ... )
     """
@@ -402,8 +402,15 @@ class Topology:
                     f"{type(pool).__name__}"
                 )
 
-        if self.default_pool is None and len(self.pools) == 1:
-            # Auto-resolve the default for single-pool topologies.
+        if len(self.pools) > 1:
+            raise ValueError(
+                "Multi-pool topologies (heterogeneous Slurm jobs) are not "
+                "supported in this release; declare a single Pool. "
+                "See fable_plan.md."
+            )
+
+        if self.default_pool is None:
+            # Auto-resolve the default for the single pool.
             object.__setattr__(self, "default_pool", next(iter(self.pools.keys())))
 
         if self.default_pool is not None and self.default_pool not in self.pools:

@@ -7,8 +7,10 @@ point:
 - Symmetric peers (no ``leader=``) — every peer must succeed.
 - Leader + sidecars (``leader=True`` on the primary) — sidecars shut down
   gracefully when the leader exits.
-- Heterogeneous multi-pool topologies (``topology=Topology(pools=...)``) —
-  different peers on different node types via Slurm hetjobs.
+
+A submission targets a single pool (``topology=Topology(pools={...})`` with
+exactly one pool, or the implicit default pool). Multi-pool heterogeneous
+topologies are not supported in this release.
 
 See ``unified_design_parallel_tasks.md`` at the repo root for the full design.
 """
@@ -212,10 +214,10 @@ def parallel(
         *peers: Peer declarations. Each is a :class:`Peer`, a ``SlurmTask``
             (auto-wrapped in a singleton peer), or a ``BoundTask`` (from
             :meth:`SlurmTask.partial`).
-        topology: Optional :class:`Topology` for heterogeneous multi-pool
-            deployments. When ``None``, the SDK infers a single implicit pool
+        topology: Optional :class:`Topology` declaring the single pool to
+            allocate in. When ``None``, the SDK infers a single implicit pool
             sized from the peers' resource claims.
-        time: Default walltime applied to every pool that doesn't override it.
+        time: Default walltime applied to the pool when it doesn't override it.
         account: ``#SBATCH --account=...`` default.
         qos: ``#SBATCH --qos=...`` default.
         reservation: ``#SBATCH --reservation=...`` default.
@@ -224,8 +226,8 @@ def parallel(
             shutdown. Default 10.
         after: Optional upstream Job / ArrayJob / ParallelJob (or a list
             thereof). When provided, Slurm only schedules this allocation
-            once every upstream job has completed successfully — every
-            hetjob component carries ``#SBATCH --dependency=afterok:...``.
+            once every upstream job has completed successfully — the
+            allocation carries ``#SBATCH --dependency=afterok:...``.
             Equivalent to calling ``.after(...)`` on the returned handle
             but avoids the cancel-and-resubmit round-trip.
         **named_peers: Peer declarations keyed by name. The keyword becomes
@@ -239,8 +241,7 @@ def parallel(
         TopologyError: If any peer/pool/placement/resource constraint is
             violated. The error aggregates every problem found.
         NotImplementedError: If the submission uses functionality that ships
-            in a later phase (replica sets, multi-pool topologies, per-peer
-            packaging).
+            in a later phase.
         RuntimeError: If called outside a :class:`Cluster` context.
 
     Example:

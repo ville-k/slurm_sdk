@@ -161,14 +161,10 @@ def test_peer_references_unknown_pool():
         )
 
 
-def test_multi_pool_missing_default_and_explicit_pool():
-    top = Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=4), "cpu": Pool(nodes=2)})
-    with _expect_topology_error("no pool and no default pool"):
-        parallel(
-            Peer(_train.partial(cfg={"lr": 0.001})),  # no pool= and no default
-            Peer(_monitor, pool="cpu"),
-            topology=top,
-        )
+def test_multi_pool_topology_rejected():
+    """Multi-pool topologies (hetjobs) are rejected at construction time."""
+    with pytest.raises(ValueError, match="Multi-pool"):
+        Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=4), "cpu": Pool(nodes=2)})
 
 
 # ---------------------------------------------------------------------------
@@ -222,14 +218,9 @@ def test_pool_gpu_overflow_reported():
 
 
 def test_gpu_peer_in_cpu_only_pool_flagged():
-    """Phase 6: peer requesting GPUs in a CPU-only pool should be flagged as 'wrong pool'."""
-    top = Topology(
-        pools={
-            "gpu": Pool(nodes=1, gpus_per_node=8),
-            "cpu": Pool(nodes=1, cpus_per_node=32),
-        }
-    )
-    with _expect_topology_error("wrong pool", "'cpu'", "Pools with GPUs"):
+    """A peer requesting GPUs in a CPU-only pool is flagged as 'wrong pool'."""
+    top = Topology(pools={"cpu": Pool(nodes=1, cpus_per_node=32)})
+    with _expect_topology_error("wrong pool", "'cpu'", "No pool"):
         parallel(
             Peer(_inference, pool="cpu"),
             topology=top,
@@ -237,13 +228,8 @@ def test_gpu_peer_in_cpu_only_pool_flagged():
 
 
 def test_gpu_peer_in_correct_pool_accepted():
-    top = Topology(
-        pools={
-            "gpu": Pool(nodes=1, gpus_per_node=4, cpus_per_node=32),
-            "cpu": Pool(nodes=1, cpus_per_node=32),
-        }
-    )
-    # inference needs gpus_per_task=2 — placing it in gpu pool fits.
+    top = Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=4, cpus_per_node=32)})
+    # inference needs gpus_per_task=2 — placing it in the gpu pool fits.
     err = _run_parallel(
         Peer(_inference, pool="gpu"),
         topology=top,
