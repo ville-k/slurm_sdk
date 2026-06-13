@@ -78,31 +78,6 @@ def install_shutdown_handler() -> None:
     _signal.signal(_signal.SIGTERM, _handler)
 
 
-def _reserve_ephemeral_port() -> int:
-    """Bind an ephemeral socket with SO_REUSEADDR, read the port, close.
-
-    The bind/close dance leaves a short window where another process can
-    grab the same port. This is by design: the point of ``"auto"`` ports is
-    convenient discovery in dev / test, not bulletproof allocation. Fixed
-    integer ports are the right choice for production services.
-
-    ``SO_REUSEADDR`` is set so user code can re-bind the same port
-    immediately after the reservation socket closes without hitting
-    ``TIME_WAIT`` on the OS side. Errors during bind/close propagate so
-    callers see the real socket failure instead of a mystery ``0`` port.
-    """
-    import socket
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("0.0.0.0", 0))  # nosec B104 - ephemeral reservation socket
-        port = s.getsockname()[1]
-    finally:
-        s.close()
-    return int(port)
-
-
 def resolve_current_hostname(
     job_context: "JobContext",
     *,
@@ -201,36 +176,11 @@ class JobContext:
     # ``None`` for non-parallel runs.
     _registry_path: Optional[Path] = None
 
-    # Resolved ports for this peer — populated at runner startup by binding
-    # any ``"auto"`` ports declared in ``@task(ports=...)``. Empty outside a
-    # parallel allocation and when the task declared no ports. The frozen
-    # JobContext stores a ``dict`` here; ``my_ports`` exposes a read-only
-    # :class:`MappingProxyType` view to callers.
-    _my_ports: Dict[str, int] = field(default_factory=dict)
-
     # ``$JOB_DIR/shared/`` when the supervisor exported ``SLURM_SDK_SHARED_DIR``
     # (populated by :func:`build_job_context`); ``None`` for non-parallel
     # runs. Bootstrap creates the directory before any peer launches so
     # cross-peer reads race against neither bootstrap nor sibling writes.
     shared_dir: Optional[Path] = None
-
-    @property
-    def my_ports(self) -> Mapping[str, int]:
-        """Ports reserved for this peer.
-
-        Populated from two sources:
-
-        - Fixed (``int``) ports declared via ``@task(ports=...)`` — echoed
-          straight through.
-        - ``"auto"`` ports — resolved to concrete integers at runner startup
-          by :func:`_reserve_ephemeral_port` and written into the peer's
-          registry entry so other peers can discover them.
-
-        Mid-function reservations via :meth:`reserve_port` also land here.
-        The returned mapping is read-only; callers wanting to mutate must
-        go through ``reserve_port``.
-        """
-        return MappingProxyType(self._my_ports)
 
     @property
     def shutdown_requested(self) -> bool:
@@ -247,57 +197,6 @@ class JobContext:
         flag is always ``False``.
         """
         return _SHUTDOWN_EVENT.is_set()
-
-    def reserve_port(self, name: str) -> int:
-        """Reserve an ephemeral port mid-function and publish it.
-
-        Binds a short-lived socket to grab a free port, closes it, records
-        the number in :attr:`my_ports`, and (when running under the
-        supervisor) stores it in the peer's registry entry under ``ports``
-        so other peers can discover it via
-        ``ctx.peers["<name>"].first.ports["<label>"]``.
-
-        Same race caveat as ``"auto"`` ports: the window between closing
-        the reservation socket and the caller's own ``bind()`` is narrow
-        but non-zero. Fixed-port designs avoid the issue entirely.
-
-        Args:
-            name: Logical label for the reserved port. Overwrites any
-                existing entry with the same name.
-
-        Returns:
-            The reserved port number.
-
-        Raises:
-            OSError: If the OS cannot allocate an ephemeral port.
-        """
-        port = _reserve_ephemeral_port()
-        # ``_my_ports`` is stored on the frozen dataclass; we mutate the
-        # underlying dict in place. The JobContext is frozen, not hashed —
-        # mutating a contained dict matches how ``environment`` is managed.
-        self._my_ports[name] = port
-        if self._registry_path is not None and self.peer_name is not None:
-            from .parallel.registry import update_peer_ports
-
-            replica = self.replica_index or 0
-            try:
-                update_peer_ports(
-                    self._registry_path,
-                    self.peer_name,
-                    replica,
-                    ports=dict(self._my_ports),
-                )
-            except (FileNotFoundError, KeyError, IndexError, OSError) as exc:
-                # Best-effort: if the registry is momentarily unavailable,
-                # the local cache still reflects the reservation. Peer
-                # discovery will miss the port until a subsequent
-                # ``reserve_port`` / ``announce`` re-publishes.
-                logger.debug(
-                    "reserve_port(%s): failed to update registry: %s",
-                    name,
-                    exc,
-                )
-        return port
 
     @property
     def peers(self) -> Mapping[str, "PeerGroup"]:

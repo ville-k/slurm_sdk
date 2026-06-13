@@ -25,7 +25,6 @@ from .types import (
     OnFailurePolicy,
     Peer,
     Pool,
-    PortValue,
     Topology,
     _ParallelSpec,
 )
@@ -45,7 +44,6 @@ __all__ = [
     "FailureCallback",
     "NodeRef",
     "OnFailurePolicy",
-    "PortValue",
 ]
 
 

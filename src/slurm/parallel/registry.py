@@ -78,7 +78,7 @@ def _with_registry_lock(path: "str | Path") -> Iterator[None]:
     """Hold an exclusive advisory lock on ``<path>.lock`` for this block.
 
     Used around every read-modify-write sequence on the registry so that
-    ``announce_peer_metadata``, ``update_peer_ports``, ``update_peer_entry``,
+    ``announce_peer_metadata``, ``update_peer_entry``,
     and any future mutators serialize against each other across threads
     *and* processes. Without the lock two writers could both read the same
     state, each mutate their own copy, each rename-write — and the later
@@ -553,28 +553,6 @@ def announce_peer_metadata(
     return registry
 
 
-def update_peer_ports(
-    path: "str | Path",
-    peer_name: str,
-    replica_index: int,
-    *,
-    ports: Mapping[str, int],
-) -> dict:
-    """Atomically replace a peer's ``ports`` map.
-
-    Split from :func:`update_peer_entry` because ``ports`` is one of the
-    reserved keys that :func:`announce_peer_metadata` refuses to touch —
-    only the runner / supervisor is allowed to rewrite it (initial binding
-    at startup, mid-function :meth:`JobContext.reserve_port` calls).
-    Replaces rather than merges so callers pass a full desired map and we
-    never leave stale entries behind.
-    """
-    with _locked_peer_entry(path, peer_name, replica_index) as (registry, _, entry):
-        # JSON keys must be strings; values must be ints — the writer clamps here.
-        entry["ports"] = {str(k): int(v) for k, v in ports.items()}
-    return registry
-
-
 def update_peer_entry(
     path: "str | Path",
     peer_name: str,
@@ -614,7 +592,6 @@ __all__ = [
     "nodes_from_registry",
     "update_peer_entry",
     "update_peer_hostinfo",
-    "update_peer_ports",
     "announce_peer_metadata",
     "load_peer_groups",
     "load_node_group",

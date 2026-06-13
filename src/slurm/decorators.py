@@ -131,7 +131,6 @@ def task(
     func: Optional[Callable[..., Any]] = None,
     *,
     packaging: str = "auto",
-    ports: Optional[Dict[str, Any]] = None,
     **sbatch_kwargs: Any,
 ) -> Union[SlurmTask, Callable[[Callable[..., Any]], SlurmTask]]:
     """Decorator for defining a Python function as a Slurm task.
@@ -283,7 +282,6 @@ def task(
             inner,
             effective_options,
             effective_packaging,
-            ports=ports,
         )
 
     if callable(func):

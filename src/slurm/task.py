@@ -104,49 +104,6 @@ def normalize_sbatch_options(options: Dict[str, Any] | None) -> Dict[str, Any]:
     return normalized
 
 
-def _validate_ports_spec(ports: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Validate ``ports=`` on the @task decorator.
-
-    Accepts ``None`` / ``{}`` for no reservations. Otherwise every value must
-    be either a fixed ``int`` or the literal string ``"auto"`` — mixed is
-    fine. Any other value raises ``ValueError`` at decoration time so port
-    typos surface before submission.
-
-    Returns a fresh dict so mutations on the input do not leak onto the task.
-    """
-    if not ports:
-        return {}
-    if not isinstance(ports, dict):
-        raise ValueError(f"@task(ports=...) must be a dict; got {type(ports).__name__}")
-    validated: Dict[str, Any] = {}
-    for name, value in ports.items():
-        if not isinstance(name, str) or not name:
-            raise ValueError(
-                f"@task(ports=...) keys must be non-empty strings; got {name!r}"
-            )
-        # bool is an int subclass; reject to avoid {"rpc": True} silently passing.
-        if isinstance(value, bool):
-            raise ValueError(
-                f"@task(ports=...): {name}={value!r} is not a valid port "
-                "value. Use a positive int or the literal string 'auto'."
-            )
-        if isinstance(value, int):
-            if value < 1 or value > 65535:
-                raise ValueError(
-                    f"@task(ports=...): {name}={value!r} is out of range. "
-                    "Ports must be 1..65535."
-                )
-            validated[name] = value
-        elif isinstance(value, str) and value == "auto":
-            validated[name] = "auto"
-        else:
-            raise ValueError(
-                f"@task(ports=...): {name}={value!r} is not a valid port "
-                "value. Use an int (1..65535) or the literal string 'auto'."
-            )
-    return validated
-
-
 class SlurmTask:
     """A wrapper around a Python function that can be executed on a Slurm cluster.
 
@@ -220,7 +177,6 @@ class SlurmTask:
         func: _NamedCallable,
         sbatch_options: Dict[str, Any] | None = None,
         packaging: Dict[str, Any] | None = None,
-        ports: Optional[Dict[str, Any]] = None,
     ):
         """Initialize a SlurmTask (typically done via @task decorator).
 
@@ -229,15 +185,9 @@ class SlurmTask:
             sbatch_options: SBATCH directive dictionary (will be normalized).
             packaging: Packaging configuration. Defaults to
                 `{"type": "wheel", "build_tool": "uv"}`.
-            ports: Optional port reservations for parallel-peer use. Keys are
-                logical port names; values are either a fixed ``int`` port or
-                the literal string ``"auto"`` to request an ephemeral
-                reservation made by the runner before user code starts.
 
         Raises:
             TypeError: If func is not callable.
-            ValueError: If ``ports`` contains invalid values (non-``int`` and
-                not the literal string ``"auto"``).
         """
         if not callable(func):
             raise TypeError(
@@ -247,7 +197,6 @@ class SlurmTask:
         self.func: _NamedCallable = func
         self.sbatch_options = normalize_sbatch_options(sbatch_options)
         self.packaging = packaging or {"type": "wheel", "build_tool": "uv"}
-        self.ports: Dict[str, Any] = _validate_ports_spec(ports)
         functools.update_wrapper(self, func)
 
         # Track explicit dependencies set via .after() (before task is called)
@@ -500,7 +449,6 @@ class SlurmTask:
             func=self.func,
             sbatch_options=self.sbatch_options.copy(),
             packaging=self.packaging.copy() if self.packaging else None,
-            ports=dict(self.ports) if self.ports else None,
         )
 
         if self._pending_dependencies:
@@ -576,7 +524,6 @@ class SlurmTask:
             func=self.func,
             sbatch_options=merged_sbatch,
             packaging=merged_packaging,
-            ports=dict(self.ports) if self.ports else None,
         )
         new_task._pending_dependencies = self._pending_dependencies.copy()
         new_task._container_dependencies = self._container_dependencies.copy()
@@ -705,7 +652,6 @@ class SlurmTask:
             func=self.func,
             sbatch_options=self.sbatch_options.copy(),
             packaging=self.packaging.copy() if self.packaging else None,
-            ports=dict(self.ports) if self.ports else None,
         )
         new_task._pending_dependencies = self._pending_dependencies.copy()
         new_task._container_dependencies = list(tasks)

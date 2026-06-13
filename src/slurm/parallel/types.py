@@ -44,11 +44,6 @@ OnFailurePolicy = Literal["kill", "continue", "restart", "callback"]
   returns ``"kill"`` or ``"continue"``.
 """
 
-PortValue = Union[int, Literal["auto"]]
-"""Port spec in ``@task(ports={...})``. Integer = fixed port; ``"auto"`` =
-ephemeral reservation recorded in the peer registry before user code runs.
-"""
-
 ArgsSpec = Union[Sequence[Any], Callable[[int], Any], range, None]
 """How per-replica args are generated in :meth:`Peer.replicas`.
 

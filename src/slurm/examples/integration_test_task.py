@@ -203,7 +203,7 @@ def parallel_replica_identity_task(ctx: JobContext) -> dict:
     }
 
 
-@task(time="00:02:00", mem="100M", ports={"rpc": "auto"})
+@task(time="00:02:00", mem="100M")
 def parallel_coordinator_task(ctx: JobContext) -> dict:
     """Coordinator — announces its endpoint, then exits.
 
@@ -211,7 +211,7 @@ def parallel_coordinator_task(ctx: JobContext) -> dict:
     we don't need to actually serve traffic; the ``announce()`` itself is
     the scheduler-agnostic surface we care about.
     """
-    port = ctx.my_ports["rpc"]
+    port = 29555
     endpoint = (
         f"tcp://{ctx.node.hostname}:{port}" if ctx.node else f"tcp://local:{port}"
     )

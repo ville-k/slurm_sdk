@@ -80,11 +80,9 @@ class PlanPeer:
     on_node: Optional["str | int"] = None
     on_nodes: Optional[Tuple["str | int", ...]] = None
     colocate_with: Optional[str] = None
-    # Port spec from the peer task's ``@task(ports=...)`` declaration. Each
-    # value is either a fixed ``int`` (passed through at startup) or the
-    # literal ``"auto"`` string (runner binds an ephemeral socket and
-    # publishes the port into the registry before user code runs). Empty
-    # dict = no ports declared; omitted from JSON round-trip unless set.
+    # Inert ports map retained for forward-compatible plan/registry schema.
+    # Always empty now that port reservation has been removed; kept so the
+    # JSON round-trip stays stable for older readers.
     ports: Dict[str, Union[int, str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
