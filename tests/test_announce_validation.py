@@ -37,10 +37,7 @@ def _registry(tmp_path: Path, peer: str = "worker", replicas: int = 1) -> Path:
             "hostname": f"h-{i}",
             "hostnames": [f"h-{i}"],
             "metadata": {},
-            "ports": {},
             "state": STATE_PENDING,
-            "restart_count": 0,
-            "component_index": 0,
         }
         for i in range(replicas)
     ]

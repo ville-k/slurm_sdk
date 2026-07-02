@@ -17,9 +17,9 @@ lockstep with the SDK version that wrote them.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import List
 
 
 @dataclass
@@ -50,10 +50,6 @@ class PlanPeer:
     # produced by :meth:`Peer.replicas`. The bootstrap uses this to size
     # the registry skeleton (``count`` entries per replica peer).
     replica_count: int = 1
-    # Inert ports map retained for forward-compatible plan/registry schema.
-    # Always empty now that port reservation has been removed; kept so the
-    # JSON round-trip stays stable for older readers.
-    ports: Dict[str, Union[int, str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -63,18 +59,10 @@ class PlanPeer:
             "on_failure": self.on_failure,
             "srun_command_line": self.srun_command_line,
             "replica_count": self.replica_count,
-            "ports": dict(self.ports),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "PlanPeer":
-        raw_ports = data.get("ports") or {}
-        ports: Dict[str, Union[int, str]] = {}
-        for k, v in raw_ports.items():
-            if isinstance(v, str) and v == "auto":
-                ports[str(k)] = "auto"
-            else:
-                ports[str(k)] = int(v)
         return cls(
             name=data["name"],
             pool=data["pool"],
@@ -82,7 +70,6 @@ class PlanPeer:
             on_failure=data["on_failure"],
             srun_command_line=data["srun_command_line"],
             replica_count=int(data.get("replica_count", 1)),
-            ports=ports,
         )
 
 

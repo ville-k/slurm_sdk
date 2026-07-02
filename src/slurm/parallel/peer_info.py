@@ -10,11 +10,8 @@ Design notes:
 - **Snapshots, not live views.** Construction copies the relevant registry
   entries into immutable containers. Call :meth:`PeerGroup.refresh` to pick
   up updates — readers never hold open handles, and never mutate the file.
-- **Node labels follow the node inventory.** ``PeerInfo.node_label`` is
-  resolved from the node section by hostname when available, so stale
-  cached labels in peer entries do not leak into discovery views.
-- **Mappings are read-only.** ``ports`` and ``metadata`` ship as
-  :class:`types.MappingProxyType` over private dicts, so callers cannot
+- **Mappings are read-only.** ``metadata`` ships as
+  :class:`types.MappingProxyType` over a private dict, so callers cannot
   mutate shared state by accident.
 - **``wait_all`` polls with exponential backoff.** Starts at 50ms, doubles
   up to 1s, emits a DEBUG log every few seconds so hung waits are
@@ -35,7 +32,7 @@ logger = logging.getLogger("slurm.parallel.peer_info")
 
 
 _PeerState = Literal["pending", "ready", "failed"]
-_TOP_LEVEL_WAIT_FIELDS = frozenset({"hostname", "step_id", "node_label", "ports"})
+_TOP_LEVEL_WAIT_FIELDS = frozenset({"hostname", "step_id"})
 
 
 @dataclass(frozen=True)
@@ -43,8 +40,8 @@ class PeerInfo:
     """One peer replica as visible to user code.
 
     Mirrors :class:`~slurm.parallel.registry.PeerRegistryEntry` but is
-    frozen, with read-only mappings for ``ports`` and ``metadata``. Peer
-    code should treat a :class:`PeerInfo` as a snapshot — call
+    frozen, with a read-only mapping for ``metadata``. Peer code should
+    treat a :class:`PeerInfo` as a snapshot — call
     :meth:`PeerGroup.refresh` on the containing group to pick up changes.
 
     Attributes:
@@ -55,25 +52,14 @@ class PeerInfo:
         hostname: Canonical hostname for this replica (usually
             ``hostnames[0]``).
         hostnames: Every host the replica's step spans.
-        node_label: Pool-local label assigned to this replica's node, if
-            any. Discovery resolves it from the node inventory when the
-            hostname is known, falling back to the stored peer entry only
-            when no matching node entry exists.
         step_id: Slurm step id (``<jobid>.<stepid>``) once the peer has
             started — ``None`` during the pending window.
-        ports: Declared ports; populated by Phase 9 port reservation. For
-            now always empty.
         metadata: Arbitrary user-announced key/value pairs merged from
             :meth:`Peer.announce` (static) and :meth:`JobContext.announce`
             (runtime).
         state: ``"pending"``, ``"ready"``, or ``"failed"``. Other values
             (``"shutdown_by_leader"`` etc.) map to ``"failed"`` so user
             code stays simple.
-        restart_count: Number of times the supervisor has re-launched this
-            replica.
-        component_index: Inert registry-schema field retained for
-            forward-compatibility. Always ``0`` — multi-pool (heterogeneous)
-            submissions are not supported.
     """
 
     name: str
@@ -82,13 +68,9 @@ class PeerInfo:
     pool: str
     hostname: str
     hostnames: Tuple[str, ...]
-    node_label: Optional[str]
     step_id: Optional[str]
-    ports: Mapping[str, int]
     metadata: Mapping[str, Any]
     state: _PeerState
-    restart_count: int
-    component_index: int
 
     @classmethod
     def from_entry(cls, data: Mapping[str, Any]) -> "PeerInfo":
@@ -111,13 +93,9 @@ class PeerInfo:
             pool=str(data.get("pool", "")),
             hostname=str(data.get("hostname", "")),
             hostnames=tuple(data.get("hostnames") or ()),
-            node_label=data.get("node_label"),
             step_id=data.get("step_id"),
-            ports=MappingProxyType(dict(data.get("ports") or {})),
             metadata=MappingProxyType(dict(data.get("metadata") or {})),
             state=state,
-            restart_count=int(data.get("restart_count", 0)),
-            component_index=int(data.get("component_index", 0)),
         )
 
 
@@ -202,13 +180,13 @@ class PeerGroup:
         reach ``"ready"``. When provided, each key is interpreted as either:
 
         - one of the supported top-level runtime fields
-          (``hostname``, ``step_id``, ``node_label``, ``ports``), or
+          (``hostname``, ``step_id``), or
         - a user-announced metadata key
 
         For the top-level fields, the wait succeeds once the field is
-        populated (non-empty string, non-``None``, or non-empty mapping).
-        Metadata keys preserve the existing semantics: presence in
-        ``metadata`` is the signal, regardless of the value.
+        populated (non-empty string or non-``None``). Metadata keys
+        preserve the existing semantics: presence in ``metadata`` is the
+        signal, regardless of the value.
 
         Polling starts at 50ms and doubles up to 1s. A DEBUG log fires
         every ~3 seconds of waiting so hung waits are diagnosable without
@@ -217,9 +195,9 @@ class PeerGroup:
         Args:
             keys: Field names every replica must have published. ``None``
                 means wait for ``state == "ready"`` instead. Supported
-                top-level runtime fields are ``hostname``, ``step_id``,
-                ``node_label``, and ``ports``; any other key is matched
-                against the replica's ``metadata`` mapping.
+                top-level runtime fields are ``hostname`` and ``step_id``;
+                any other key is matched against the replica's ``metadata``
+                mapping.
             timeout: Seconds before raising :class:`TimeoutError`. ``None``
                 waits forever.
 
@@ -313,11 +291,7 @@ def _replica_field_is_populated(replica: PeerInfo, key: str) -> bool:
     if key in _TOP_LEVEL_WAIT_FIELDS:
         if key == "hostname":
             return replica.hostname != ""
-        if key == "step_id":
-            return replica.step_id is not None
-        if key == "node_label":
-            return replica.node_label is not None
-        return bool(replica.ports)
+        return replica.step_id is not None
     return key in replica.metadata
 
 

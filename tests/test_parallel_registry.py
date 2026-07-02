@@ -26,12 +26,9 @@ def test_peer_registry_entry_round_trip():
         replica_count=1,
         hostname="gpu-01",
         hostnames=["gpu-01"],
-        node_label="head",
         step_id="12345.0",
-        ports={"rpc": 50051},
         metadata={"model_version": "r3"},
         state=STATE_READY,
-        restart_count=0,
     )
     restored = PeerRegistryEntry.from_dict(entry.to_dict())
     assert restored == entry

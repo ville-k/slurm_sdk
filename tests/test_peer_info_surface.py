@@ -32,13 +32,9 @@ def _skeleton_registry(peer_name: str = "worker", replica_count: int = 3) -> dic
                 "replica_count": replica_count,
                 "hostname": f"node-{i}",
                 "hostnames": [f"node-{i}"],
-                "node_label": None,
                 "step_id": None,
-                "ports": {},
                 "metadata": {},
                 "state": STATE_PENDING,
-                "restart_count": 0,
-                "component_index": 0,
             }
         )
     return {"peers": {peer_name: entries}, "nodes": {}}
@@ -52,26 +48,18 @@ def test_peer_info_from_entry_materializes_all_fields():
         "replica_count": 1,
         "hostname": "gpu-01",
         "hostnames": ["gpu-01", "gpu-02"],
-        "node_label": "head",
         "step_id": "12345.0",
-        "ports": {"rpc": 50051},
         "metadata": {"model_version": "r3"},
         "state": "ready",
-        "restart_count": 2,
-        "component_index": 1,
     }
     info = PeerInfo.from_entry(entry)
     assert info.name == "learner"
     assert info.pool == "gpu"
     assert info.hostname == "gpu-01"
     assert info.hostnames == ("gpu-01", "gpu-02")
-    assert info.node_label == "head"
     assert info.step_id == "12345.0"
-    assert dict(info.ports) == {"rpc": 50051}
     assert dict(info.metadata) == {"model_version": "r3"}
     assert info.state == "ready"
-    assert info.restart_count == 2
-    assert info.component_index == 1
 
 
 def test_peer_info_state_collapses_internal_states_to_failed():
@@ -87,11 +75,7 @@ def test_peer_info_state_pending_covers_pending_and_running():
 
 
 def test_peer_info_mappings_are_read_only():
-    info = PeerInfo.from_entry(
-        {"name": "x", "pool": "p", "ports": {"a": 1}, "metadata": {"k": "v"}}
-    )
-    with pytest.raises(TypeError):
-        info.ports["b"] = 2  # type: ignore[index]
+    info = PeerInfo.from_entry({"name": "x", "pool": "p", "metadata": {"k": "v"}})
     with pytest.raises(TypeError):
         info.metadata["k2"] = "v2"  # type: ignore[index]
 
@@ -153,31 +137,6 @@ def test_peer_group_refresh_picks_up_new_metadata(tmp_path):
     group.refresh()
     assert group[0].metadata == {"foo": "bar"}
     assert group[0].state == "ready"
-
-
-def test_load_peer_groups_reads_stored_node_label(tmp_path):
-    path = tmp_path / "registry.json"
-    write_registry(
-        path,
-        {
-            "peers": {
-                "worker": [
-                    {
-                        "name": "worker",
-                        "pool": "gpu",
-                        "replica_index": 0,
-                        "replica_count": 1,
-                        "hostname": "gpu-99",
-                        "hostnames": ["gpu-99"],
-                        "node_label": "cached-label",
-                    }
-                ]
-            },
-        },
-    )
-
-    group = load_peer_groups(path)["worker"]
-    assert group[0].node_label == "cached-label"
 
 
 def test_load_peer_groups_missing_registry_returns_empty(tmp_path):

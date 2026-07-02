@@ -202,8 +202,7 @@ class JobContext:
 
         Returns a mapping keyed by peer name. Each value is a
         :class:`~slurm.parallel.peer_info.PeerGroup` exposing the peer's
-        replicas, their hostnames, declared ports, announced metadata,
-        and lifecycle state.
+        replicas, their hostnames, announced metadata, and lifecycle state.
 
         Always returns a real :class:`Mapping` — outside a parallel
         allocation (no registry path set) the mapping is empty instead of

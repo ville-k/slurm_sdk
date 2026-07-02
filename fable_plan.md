@@ -48,17 +48,20 @@ breaks:
 
 1. **`topology=` stays optional.** The default (no `topology=`) remains a single
    implicit pool sized from peer claims. Multi-pool is purely additive.
-2. **Single-pool rendering is the `component_index=None` path.** Hetjob rendering
-   must remain a strict superset — the single-component script the core emits today
-   must be byte-stable when no multi-pool topology is supplied.
+2. **Single-pool rendering is the baseline.** Hetjob rendering, when it returns,
+   must be a strict superset — the single-component script the core emits today
+   must stay byte-stable when no multi-pool topology is supplied.
 3. **`on_failure` is an open enum.** `kill` / `continue` keep their exact semantics;
    `restart` / `callback` are additions, never redefinitions.
 4. **`JobContext` only grows.** `ctx.peers`, `ctx.announce`, `ctx.shared_dir`,
-   `ctx.shutdown_requested` are stable. `ctx.nodes` / `ctx.node` / `ctx.my_ports`
-   return empty/None today and become populated later — reading them must never
-   raise.
-5. **The registry schema is append-only.** New fields (node labels, ports, restart
-   counts) are optional and ignored by older readers.
+   `ctx.shutdown_requested` are stable. Re-add phases add `ctx.nodes` / `ctx.node`
+   / `ctx.my_ports` back as new attributes — existing peer code keeps working.
+5. **The registry/plan schema is ephemeral, not append-only.** `registry.json`
+   and `plan.json` live only inside a single job's `$JOB_DIR` for that job's
+   lifetime, so there is no persisted schema to stay compatible with. The inert
+   fields once retained for re-add (`ports`, `restart_count`, `node_label`,
+   `component_index`) have been purged; each re-add phase simply reintroduces the
+   field it needs and repopulates it. Readers tolerate missing keys.
 6. **`Peer` / `Pool` constructors accept-and-ignore future kwargs gracefully** where
    feasible, or add them as no-ops first, so user code can adopt them before the
    runtime honors them.

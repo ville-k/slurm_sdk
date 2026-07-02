@@ -96,12 +96,9 @@ def _write_registry_with_outcomes(
                 "replica_count": 1,
                 "hostname": "",
                 "hostnames": [],
-                "node_label": None,
                 "step_id": None,
-                "ports": {},
                 "metadata": {},
                 "state": data.get("state", "success"),
-                "restart_count": data.get("restart_count", 0),
                 "outcome": data.get("outcome"),
                 "final_exit_code": data.get("final_exit_code"),
                 "message": data.get("message"),
@@ -141,14 +138,11 @@ def test_peer_outcomes_returns_entry_per_peer(tmp_path: Path):
         target_job_dir=str(tmp_path),
     )
     outcomes = job.peer_outcomes()
-    assert outcomes["a"] == PeerOutcome(status="success", exit_code=0, restart_count=0)
-    assert outcomes["b"] == PeerOutcome(
-        status="shutdown_by_leader", exit_code=143, restart_count=0
-    )
+    assert outcomes["a"] == PeerOutcome(status="success", exit_code=0)
+    assert outcomes["b"] == PeerOutcome(status="shutdown_by_leader", exit_code=143)
     assert outcomes["c"] == PeerOutcome(
         status="continue_on_failure",
         exit_code=5,
-        restart_count=0,
         message="tolerated",
     )
 

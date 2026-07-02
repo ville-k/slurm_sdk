@@ -54,7 +54,6 @@ def test_build_registry_skeleton_marks_peers_pending():
         assert entry["pool"] == "default"
         assert entry["hostname"] == ""
         assert entry["hostnames"] == ["gpu-01", "gpu-02"]
-        assert entry["restart_count"] == 0
 
 
 def test_build_registry_skeleton_handles_empty_nodelist():

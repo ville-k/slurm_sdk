@@ -187,8 +187,8 @@ class Peer:
         announce: Static registry metadata written at launch, before user
             code runs. Visible as
             ``ctx.peers["<name>"][i].metadata``. Reserved keys
-            (``name``, ``replica_index``, ``hostname``, ``step_id``, ``ports``,
-            ``state``, ``pool``, ``node_label``, ``restart_count``, ``hostnames``)
+            (``name``, ``replica_index``, ``replica_count``, ``hostname``,
+            ``hostnames``, ``step_id``, ``state``, ``pool``, ``metadata``)
             are rejected.
         count: Replica count. ``1`` for singletons (use :meth:`Peer.replicas`
             for ``count > 1``).

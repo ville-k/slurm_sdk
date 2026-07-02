@@ -61,15 +61,12 @@ class PeerOutcome:
               before this peer's Popen fired.
         exit_code: Final process exit code, or ``None`` when the peer never
             ran.
-        restart_count: Inert retry counter retained for forward-compatible
-            registry schema; always 0 in the current release.
         message: Free-form diagnostic string from the supervisor. ``None``
             for plain success.
     """
 
     status: str
     exit_code: Optional[int]
-    restart_count: int
     message: Optional[str] = None
 
 
@@ -79,12 +76,10 @@ def _outcome_from_entry(entry: Dict[str, Any]) -> "PeerOutcome":
     exit_code = entry.get("final_exit_code")
     if exit_code is not None:
         exit_code = int(exit_code)
-    restart_count = int(entry.get("restart_count", 0) or 0)
     message = entry.get("message")
     return PeerOutcome(
         status=outcome_str,
         exit_code=exit_code,
-        restart_count=restart_count,
         message=message,
     )
 

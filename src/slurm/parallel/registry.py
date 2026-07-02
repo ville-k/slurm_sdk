@@ -8,15 +8,15 @@ their runner publishes the real hostname and ``SLURM_STEP_ID`` via
 entries as peers start / fail / finish. User-facing APIs like
 ``ctx.peers`` read the same file.
 
-Peer entries own runtime state: hostname, step id, ports, restart
-counts, outcomes, and user metadata.
+Peer entries own runtime state: hostname, step id, outcomes, and user
+metadata.
 
 Concurrency model: atomic writes via ``tmp + os.replace`` so readers
 always see a consistent file, plus an ``fcntl.flock`` on a sibling
 ``<registry>.lock`` held across every read-modify-write so concurrent
-announces / ports updates / supervisor state changes never overwrite
-each other's fields. Readers are lock-free — the atomic rename
-guarantees they see either the full old file or the full new one.
+announces / supervisor state changes never overwrite each other's
+fields. Readers are lock-free — the atomic rename guarantees they see
+either the full old file or the full new one.
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ logger = logging.getLogger("slurm.parallel.registry")
 
 # Cross-process exclusion for read-modify-write cycles. Writers hold an
 # exclusive advisory lock on ``<registry>.lock`` across the read → mutate →
-# rename sequence, so concurrent announces / ports updates / supervisor
-# state changes never overwrite each other's fields. Readers remain
+# rename sequence, so concurrent announces / supervisor state changes never
+# overwrite each other's fields. Readers remain
 # lock-free — ``os.replace`` makes the swap atomic from their point of view.
 #
 # We use ``fcntl.flock`` which is supported on Linux and macOS (Slurm is
@@ -130,12 +130,8 @@ _RESERVED_ANNOUNCE_KEYS = frozenset(
         "pool",
         "hostname",
         "hostnames",
-        "node_label",
         "step_id",
-        "ports",
         "state",
-        "restart_count",
-        "component_index",
         "metadata",
     }
 )
@@ -155,7 +151,6 @@ STATE_SUCCESS = "success"
 # :class:`slurm.parallel_job.PeerOutcome` for user-facing semantics.
 OUTCOME_SUCCESS = "success"
 OUTCOME_CONTINUE_ON_FAILURE = "continue_on_failure"
-OUTCOME_RESTARTED = "restarted"
 OUTCOME_FATAL = "fatal"
 OUTCOME_SHUTDOWN_BY_LEADER = "shutdown_by_leader"
 OUTCOME_NOT_STARTED = "not_started"
@@ -165,8 +160,7 @@ OUTCOME_NOT_STARTED = "not_started"
 class PeerRegistryEntry:
     """One peer (or replica) as seen by the runtime registry.
 
-    Fields mirror the design doc so later phases extend without breaking
-    the JSON shape: ``ports`` / ``metadata`` stay empty in Phase 3; ``state``
+    ``metadata`` starts empty and is filled by peer announcements; ``state``
     transitions are driven by the supervisor.
     """
 
@@ -176,13 +170,9 @@ class PeerRegistryEntry:
     replica_count: int = 1
     hostname: str = ""
     hostnames: List[str] = field(default_factory=list)
-    node_label: Optional[str] = None
     step_id: Optional[str] = None
-    ports: Dict[str, int] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     state: str = STATE_PENDING
-    restart_count: int = 0
-    component_index: int = 0
     outcome: Optional[str] = None
     final_exit_code: Optional[int] = None
     message: Optional[str] = None
@@ -195,13 +185,9 @@ class PeerRegistryEntry:
             "replica_count": self.replica_count,
             "hostname": self.hostname,
             "hostnames": list(self.hostnames),
-            "node_label": self.node_label,
             "step_id": self.step_id,
-            "ports": dict(self.ports),
             "metadata": dict(self.metadata),
             "state": self.state,
-            "restart_count": self.restart_count,
-            "component_index": self.component_index,
             "outcome": self.outcome,
             "final_exit_code": self.final_exit_code,
             "message": self.message,
@@ -217,13 +203,9 @@ class PeerRegistryEntry:
             replica_count=int(data.get("replica_count", 1)),
             hostname=data.get("hostname", ""),
             hostnames=list(data.get("hostnames", [])),
-            node_label=data.get("node_label"),
             step_id=data.get("step_id"),
-            ports=dict(data.get("ports", {})),
             metadata=dict(data.get("metadata", {})),
             state=data.get("state", STATE_PENDING),
-            restart_count=int(data.get("restart_count", 0)),
-            component_index=int(data.get("component_index", 0)),
             outcome=data.get("outcome"),
             final_exit_code=int(exit_code_raw) if exit_code_raw is not None else None,
             message=data.get("message"),
@@ -352,8 +334,7 @@ def update_peer_hostinfo(
 
     Bootstrap seeds each peer entry with ``hostname=""`` (pending) — it
     cannot know which node Slurm will pick until the ``srun`` step actually
-    launches. The runner calls this helper at startup, right after resolving
-    any declared ports, so service discovery
+    launches. The runner calls this helper at startup so service discovery
     (``ctx.peers[...].first.hostname``) returns the *actual* host rather
     than bootstrap's speculation.
 
@@ -492,7 +473,6 @@ __all__ = [
     "STATE_SUCCESS",
     "OUTCOME_SUCCESS",
     "OUTCOME_CONTINUE_ON_FAILURE",
-    "OUTCOME_RESTARTED",
     "OUTCOME_FATAL",
     "OUTCOME_SHUTDOWN_BY_LEADER",
     "OUTCOME_NOT_STARTED",

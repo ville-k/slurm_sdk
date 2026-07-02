@@ -33,10 +33,7 @@ def _registry(tmp_path: Path, peer: str = "worker", replicas: int = 2) -> Path:
             "hostname": f"h-{i}",
             "hostnames": [f"h-{i}"],
             "metadata": {},
-            "ports": {},
             "state": STATE_PENDING,
-            "restart_count": 0,
-            "component_index": 0,
         }
         for i in range(replicas)
     ]
@@ -116,10 +113,7 @@ def test_wait_all_with_hostname_field_waits_for_runtime_publish(tmp_path):
                         "hostname": "",
                         "hostnames": [],
                         "metadata": {},
-                        "ports": {},
                         "state": STATE_PENDING,
-                        "restart_count": 0,
-                        "component_index": 0,
                         "step_id": None,
                     },
                     {
@@ -130,10 +124,7 @@ def test_wait_all_with_hostname_field_waits_for_runtime_publish(tmp_path):
                         "hostname": "",
                         "hostnames": [],
                         "metadata": {},
-                        "ports": {},
                         "state": STATE_PENDING,
-                        "restart_count": 0,
-                        "component_index": 0,
                         "step_id": None,
                     },
                 ]
@@ -172,10 +163,7 @@ def test_wait_all_with_step_id_field_waits_for_runtime_publish(tmp_path):
                         "hostname": "host-0",
                         "hostnames": ["host-0"],
                         "metadata": {},
-                        "ports": {},
                         "state": STATE_PENDING,
-                        "restart_count": 0,
-                        "component_index": 0,
                         "step_id": None,
                     },
                     {
@@ -186,10 +174,7 @@ def test_wait_all_with_step_id_field_waits_for_runtime_publish(tmp_path):
                         "hostname": "host-1",
                         "hostnames": ["host-1"],
                         "metadata": {},
-                        "ports": {},
                         "state": STATE_PENDING,
-                        "restart_count": 0,
-                        "component_index": 0,
                         "step_id": None,
                     },
                 ]

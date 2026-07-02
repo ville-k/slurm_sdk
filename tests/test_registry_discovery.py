@@ -25,10 +25,7 @@ def _entries(name: str) -> list[dict]:
             "hostname": f"{name}-host",
             "hostnames": [f"{name}-host"],
             "metadata": {},
-            "ports": {},
             "state": STATE_PENDING,
-            "restart_count": 0,
-            "component_index": 0,
         }
     ]
 
