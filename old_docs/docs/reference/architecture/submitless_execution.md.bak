@@ -1,0 +1,589 @@
+# Submitless Execution Architecture
+
+## Overview
+
+Submitless execution is a revolutionary change to the Slurm SDK that transforms how tasks are invoked. Instead of explicitly calling `.submit()`, decorated functions automatically return `Job` futures when called within a cluster or workflow context. This makes workflow code more fluent, Pythonic, and similar to regular function composition.
+
+## Design Philosophy
+
+**Key Insight**: If a function is decorated with `@task` or `@workflow`, it's meant for distributed execution. Calling it should naturally return a Future representing that distributed computation.
+
+This is analogous to how `async def` functions always return coroutines—the decoration fundamentally changes the semantics.
+
+## Core Concepts
+
+### Context-Based Behavior
+
+Tasks exhibit different behavior depending on the execution context:
+
+```python
+@task(time="00:30:00")
+def process(data: str) -> Result:
+    return expensive_computation(data)
+
+# Outside context: Raises RuntimeError
+try:
+    job = process("data.csv")  # ❌ Error!
+except RuntimeError as e:
+    print(e)  # "@task decorated function 'process' must be called within a Cluster context..."
+
+# Inside cluster context: Returns Job
+with Cluster.from_env() as cluster:
+    job = process("data.csv")  # ✅ Returns Job[Result]
+    result = job.get_result()  # Returns Result
+
+# Local testing: Use .unwrapped
+result = process.unwrapped("data.csv")  # ✅ Runs locally, returns Result
+```
+
+### Context Tracking
+
+The SDK uses Python's `contextvars` module for async-safe, thread-safe context management:
+
+```python
+import contextvars
+from typing import Optional, Union
+
+_cluster_context: contextvars.ContextVar[
+    Optional[Union[Cluster, WorkflowContext]]
+] = contextvars.ContextVar('cluster_context', default=None)
+```
+
+**Benefits of contextvars:**
+- ✅ **Async/await support**: Context preserved across `await` points
+- ✅ **Thread-safe**: Automatic inheritance to child threads
+- ✅ **Better isolation**: Nested contexts work correctly
+- ✅ **Token-based reset**: Prevents accidental context corruption
+
+### Context Lifecycle
+
+```python
+# Context is set when entering cluster
+with Cluster.from_env() as cluster:
+    # _cluster_context.set(cluster) called in __enter__
+
+    job = task("arg")  # Uses active context
+
+    # _cluster_context.reset(token) called in __exit__
+```
+
+## Implementation Details
+
+### Cluster as Context Manager
+
+`Cluster` implements the context manager protocol:
+
+```python
+class Cluster:
+    def __enter__(self) -> "Cluster":
+        """Enter cluster context - enables submitless execution."""
+        from .context import set_active_context
+        self._context_token = set_active_context(self)
+        return self
+
+    def __exit__(self, *args) -> bool:
+        """Exit cluster context - restore previous context."""
+        from .context import reset_active_context
+        if hasattr(self, "_context_token"):
+            reset_active_context(self._context_token)
+            delattr(self, "_context_token")
+        return False
+```
+
+### Task Call Transformation
+
+`SlurmTask.__call__` checks for active context:
+
+```python
+def __call__(self, *args, **kwargs):
+    """Call task - returns Job in context, raises outside."""
+    from .context import get_active_context
+    from .job import Job
+
+    # Check if we're in a cluster or workflow context
+    ctx = get_active_context()
+    if ctx is None:
+        raise RuntimeError(
+            f"@task decorated function '{self.func.__name__}' must be "
+            "called within a Cluster context or @workflow.\n"
+            f"For local execution, use: {self.func.__name__}.unwrapped(...)"
+        )
+
+    # Get the cluster from context
+    from .cluster import Cluster
+    if isinstance(ctx, Cluster):
+        cluster = ctx
+    else:
+        # WorkflowContext has .cluster attribute
+        cluster = getattr(ctx, "cluster", None)
+
+    # Extract Job dependencies from arguments
+    job_dependencies = []
+    for arg in args:
+        if isinstance(arg, Job):
+            job_dependencies.append(arg)
+    for value in kwargs.values():
+        if isinstance(value, Job):
+            job_dependencies.append(value)
+
+    # Submit the task using the cluster's submit method
+    submit_kwargs = {}
+    if job_dependencies:
+        submit_kwargs["after"] = job_dependencies
+
+    submitter = cluster.submit(self, **submit_kwargs)
+    job = submitter(*args, **kwargs)
+
+    return job
+```
+
+### Automatic Dependency Tracking
+
+Jobs passed as arguments are automatically extracted and converted to dependencies:
+
+```python
+@task
+def preprocess(data: str) -> str:
+    return clean_data(data)
+
+@task
+def train(data: str, config: dict) -> Model:
+    return train_model(data, config)
+
+with Cluster.from_env() as cluster:
+    # Preprocess data
+    prep_job = preprocess("raw_data.csv")
+
+    # Train automatically depends on prep_job
+    train_job = train(prep_job, {"lr": 0.01})
+
+    # Equivalent to:
+    # train_job = train.submit(cluster=cluster, after=prep_job)(prep_job, {"lr": 0.01})
+```
+
+The dependency is created via the `after` parameter:
+
+```python
+# In cluster.submit()
+if after is not None:
+    job_ids = []
+    if isinstance(after, list):
+        job_ids = [job.id for job in after]
+    else:
+        job_ids = [after.id]
+
+    if job_ids:
+        dependency_str = "afterok:" + ":".join(job_ids)
+        normalized_overrides["dependency"] = dependency_str
+```
+
+## Local Testing
+
+The `.unwrapped` property provides access to the original function:
+
+```python
+@task(time="01:00:00")
+def process(data: str) -> Result:
+    return expensive_computation(data)
+
+# Unit test
+def test_process():
+    result = process.unwrapped("test_data.csv")
+    assert result.status == "success"
+```
+
+## Runtime Option Override
+
+The `.with_options()` method enables dynamic resource allocation:
+
+```python
+@workflow
+def adaptive_workflow(ctx: WorkflowContext):
+    # Determine resource needs at runtime
+    data_size = get_data_size()
+
+    if data_size > 1_000_000:
+        # Use GPU for large data
+        gpu_process = process.with_options(partition="gpu", gpus=1)
+        job = gpu_process("large_data.csv")
+    else:
+        # Use standard CPU
+        job = process("small_data.csv")
+
+    return job.get_result()
+```
+
+Implementation:
+
+```python
+def with_options(self, **sbatch_options):
+    """Create a variant of this task with different SBATCH options."""
+    def wrapper(*args, **kwargs):
+        ctx = get_active_context()
+        if ctx is None:
+            raise RuntimeError(...)
+
+        # Get cluster from context
+        cluster = ctx if isinstance(ctx, Cluster) else ctx.cluster
+
+        # Extract dependencies
+        job_dependencies = [...]
+
+        # Merge with overrides
+        submit_kwargs = dict(sbatch_options)
+        if job_dependencies:
+            submit_kwargs["after"] = job_dependencies
+
+        # Submit with overridden options
+        submitter = cluster.submit(self, **submit_kwargs)
+        job = submitter(*args, **kwargs)
+
+        return job
+
+    wrapper.__name__ = self.func.__name__
+    wrapper.__doc__ = self.func.__doc__
+    return wrapper
+```
+
+## Workflow Context
+
+Workflows automatically set context for nested task calls:
+
+```python
+@workflow(time="02:00:00")
+def my_workflow(data: list[str], ctx: WorkflowContext):
+    # ctx is set as active context by runner
+    # Tasks called here automatically use ctx.cluster
+
+    jobs = [process(item) for item in data]
+    return [job.get_result() for job in jobs]
+```
+
+The workflow context is a dataclass:
+
+```python
+@dataclass
+class WorkflowContext:
+    cluster: Cluster
+    workflow_job_id: str
+    workflow_job_dir: Path
+    shared_dir: Path
+    local_mode: bool = False
+```
+
+When a workflow executes, the runner:
+1. Creates a WorkflowContext instance
+2. Sets it as the active context
+3. Calls the workflow function
+4. Resets the context on completion
+
+## Nested Contexts
+
+Contexts can be nested—inner contexts take precedence:
+
+```python
+cluster1 = Cluster(backend="ssh", hostname="cluster1")
+cluster2 = Cluster(backend="ssh", hostname="cluster2")
+
+with cluster1:
+    job1 = task1()  # Submits to cluster1
+
+    with cluster2:
+        job2 = task2()  # Submits to cluster2
+
+    job3 = task3()  # Back to cluster1
+```
+
+This works because `contextvars` maintains a context stack internally.
+
+## Error Handling
+
+### Outside Context
+```python
+@task
+def process(data: str) -> Result:
+    return expensive_computation(data)
+
+# Calling outside context raises with helpful message
+try:
+    job = process("data.csv")
+except RuntimeError as e:
+    print(e)
+    # "@task decorated function 'process' must be called within a Cluster
+    #  context or @workflow.
+    #  For local execution, use: process.unwrapped(...)
+    #  For cluster execution, use: with Cluster.from_env() as cluster: ..."
+```
+
+### Invalid Context
+```python
+class FakeContext:
+    pass
+
+with set_active_context(FakeContext()):
+    try:
+        job = process("data.csv")
+    except RuntimeError as e:
+        print(e)
+        # "Context FakeContext does not have a cluster attribute"
+```
+
+## Compatibility
+
+### Backward Compatibility
+
+The legacy explicit submission pattern still works:
+
+```python
+# Old style (still supported)
+cluster = Cluster.from_env()
+job = task.submit(cluster=cluster)("data.csv")
+result = job.get_result()
+
+# New style (recommended)
+with Cluster.from_env() as cluster:
+    job = task("data.csv")
+    result = job.get_result()
+```
+
+### Migration Strategy
+
+Existing code doesn't need to change—both patterns work:
+
+1. **Keep using `.submit()` if you prefer explicit control**
+2. **Gradually adopt submitless for new code**
+3. **Use `.unwrapped` for existing unit tests**
+
+## Performance Considerations
+
+### Overhead
+
+The context check in `__call__` has minimal overhead:
+- Single dictionary lookup in contextvars (O(1))
+- Type check (isinstance)
+- List comprehension for dependency extraction
+
+This is negligible compared to network I/O for job submission.
+
+### Optimization
+
+For tight loops, pre-extract the cluster:
+
+```python
+with Cluster.from_env() as cluster:
+    # This is fine - cluster is cached
+    jobs = [process(item) for item in large_list]
+
+    # Or explicitly pass cluster (legacy pattern)
+    submitter = process.submit(cluster=cluster)
+    jobs = [submitter(item) for item in large_list]
+```
+
+## Type Safety
+
+### Current Implementation
+
+Tasks return `Job` objects:
+
+```python
+@task
+def process(data: str) -> Result:
+    return expensive_computation(data)
+
+with Cluster.from_env() as cluster:
+    job = process("data.csv")  # Type: Job
+    result = job.get_result()  # Type: Any (for now)
+```
+
+### Future Enhancement (v0.6.1+)
+
+Using `TYPE_CHECKING`, we can provide proper generic types:
+
+```python
+from typing import TYPE_CHECKING, ParamSpec, TypeVar
+
+P = ParamSpec('P')
+R = TypeVar('R')
+
+if TYPE_CHECKING:
+    # Type checkers see Job[R] return type
+    def task(func: Callable[P, R], **options) -> Callable[P, Job[R]]:
+        ...
+else:
+    # Runtime implementation
+    def task(func=None, **options):
+        if func is None:
+            return lambda f: task(f, **options)
+        return SlurmTask(func, options)
+```
+
+This would enable:
+
+```python
+@task
+def process(data: str) -> Result:
+    return expensive_computation(data)
+
+# Type checker sees: process: (data: str) -> Job[Result]
+job = process("data.csv")  # Type: Job[Result]
+result = job.get_result()   # Type: Result ✅
+```
+
+## Comparison with Other Frameworks
+
+### Dask
+```python
+# Dask delayed
+@delayed
+def process(data):
+    return expensive_computation(data)
+
+result = process(data).compute()
+```
+
+### Ray
+```python
+# Ray remote
+@ray.remote
+def process(data):
+    return expensive_computation(data)
+
+future = process.remote(data)
+result = ray.get(future)
+```
+
+### Slurm SDK (Submitless)
+```python
+# Slurm SDK submitless
+@task
+def process(data):
+    return expensive_computation(data)
+
+with Cluster.from_env() as cluster:
+    job = process(data)
+    result = job.get_result()
+```
+
+**Key Differences:**
+- **Explicit context**: Must use `with Cluster...` (no global state)
+- **Testable**: `.unwrapped` for local execution
+- **Native Slurm**: Direct integration with Slurm scheduler
+- **Type-safe**: Proper type hints (upcoming)
+
+## Debugging
+
+### Context Issues
+
+Debug context problems with `get_active_context()`:
+
+```python
+from slurm import get_active_context
+
+with Cluster.from_env() as cluster:
+    ctx = get_active_context()
+    print(f"Active context: {ctx}")  # Active context: <Cluster ...>
+
+    job = task("data.csv")
+
+# Outside context
+ctx = get_active_context()
+print(f"Active context: {ctx}")  # Active context: None
+```
+
+### Dependency Tracking
+
+Debug dependency extraction:
+
+```python
+@task
+def task_with_deps(job1: Job, job2: Job, data: str):
+    # Dependencies are automatically extracted
+    pass
+
+# In __call__, you can add logging:
+job_dependencies = []
+for arg in args:
+    if isinstance(arg, Job):
+        print(f"Found dependency: {arg.id}")
+        job_dependencies.append(arg)
+```
+
+## Best Practices
+
+### ✅ Do
+
+1. **Use context managers for cluster access**
+   ```python
+   with Cluster.from_env() as cluster:
+       job = task(args)
+   ```
+
+2. **Use `.unwrapped` for unit tests**
+   ```python
+   def test_task():
+       result = task.unwrapped(test_data)
+       assert result == expected
+   ```
+
+3. **Pass Jobs as arguments for dependencies**
+   ```python
+   job1 = preprocess(data)
+   job2 = train(job1, config)  # Automatic dependency
+   ```
+
+4. **Use `.with_options()` for dynamic resources**
+   ```python
+   if large_data:
+       job = task.with_options(mem="32GB")(data)
+   ```
+
+### ❌ Don't
+
+1. **Don't call tasks outside context**
+   ```python
+   # ❌ Wrong
+   job = task(args)
+
+   # ✅ Right
+   with Cluster.from_env() as cluster:
+       job = task(args)
+   ```
+
+2. **Don't mix submitless and explicit patterns unnecessarily**
+   ```python
+   # ❌ Confusing
+   with Cluster.from_env() as cluster:
+       job1 = task1(args)  # Submitless
+       job2 = task2.submit(cluster=cluster)(args)  # Explicit
+
+   # ✅ Consistent
+   with Cluster.from_env() as cluster:
+       job1 = task1(args)
+       job2 = task2(args)
+   ```
+
+3. **Don't forget `.unwrapped` in tests**
+   ```python
+   # ❌ Wrong - tries to submit in test
+   def test_task():
+       with Cluster.from_env() as cluster:
+           result = task(test_data)
+
+   # ✅ Right - runs locally
+   def test_task():
+       result = task.unwrapped(test_data)
+   ```
+
+## Summary
+
+Submitless execution transforms the Slurm SDK into a more Pythonic, fluent framework for distributed computing:
+
+- ✅ **Intuitive**: Tasks look like regular function calls
+- ✅ **Safe**: Explicit context requirements
+- ✅ **Testable**: `.unwrapped` for local execution
+- ✅ **Powerful**: Automatic dependency tracking
+- ✅ **Flexible**: Runtime option overrides
+- ✅ **Async-safe**: Built on contextvars
+- ✅ **Backward compatible**: Legacy patterns still work
+
+The feature enables workflow code that reads like sequential Python while executing distributed computations on Slurm clusters.

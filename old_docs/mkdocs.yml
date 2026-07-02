@@ -1,0 +1,103 @@
+site_name: SLURM SDK
+site_url: https://ville-k.github.io/slurm
+site_description: "Python SDK for packaging and submitting tasks to SLURM clusters."
+repo_url: https://github.com/ville-k/slurm
+repo_name: ville-k/slurm
+nav:
+  - Home: README.md
+  - Getting Started: guides/getting_started.md
+  - Tutorials:
+      - tutorials/README.md
+      - PyTorch Tutorial: tutorials/pytorch_distributed/README.md
+      - Dataprep Tutorial: tutorials/data_processing/README.md
+  - Guides:
+      - guides/README.md
+      - Configure Cluster: guides/configure_cluster.md
+      - Use Hydra Configurations: guides/hydra_config.md
+      - Cross-platform PyTorch: guides/pytorch_cross_platform.md
+      - Rich Console UX: guides/rich_console.md
+      - Job Context: guides/job_context.md
+      - Author Callbacks: guides/authoring_callbacks.md
+  - Reference:
+      - reference/README.md
+      - API Reference: reference/api.md
+      - Architecture:
+          - reference/architecture/index.md
+          - Overview: reference/architecture/architecture.md
+          - Callback Architecture: reference/architecture/callbacks.md
+          - Configuration: reference/architecture/configuration.md
+          - Runner Architecture: reference/architecture/runner.md
+theme:
+  name: material
+  language: en
+  icon:
+    logo: material/library-shelves
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: lime
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: lime
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: "Inter"
+    code: "JetBrains Mono"
+  features:
+    - navigation.indexes
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.indexes
+    - toc.follow
+    - toc.integrate
+    - content.code.copy
+
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+            members_order: alphabetical
+            filters:
+              - '!^_'
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ville-k/slurm
+      name: GitHub
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true

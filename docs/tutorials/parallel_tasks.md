@@ -139,10 +139,9 @@ with cluster:
     print(job.get_results())
 ```
 
-`.partial(...)` returns a `BoundTask` — a handle you can pass to `parallel`,
-`Peer`, or `task.with_sidecars(...)`. A `BoundTask` is **not** directly
-callable; calling it raises `TypeError` to nudge you toward the multi-peer
-primitives.
+`.partial(...)` returns a `BoundTask` — a handle you can pass to `parallel`
+or `Peer`. A `BoundTask` is **not** directly callable; calling it raises
+`TypeError` to nudge you toward the multi-peer primitives.
 
 ## 4) Add a leader and a sidecar
 
@@ -196,28 +195,7 @@ Key things to note:
   expected and non-fatal." Without it, a sidecar crashing would abort the
   job.
 
-## 5) The `with_sidecars(...)` shortcut
-
-The leader + helpers shape deserves a one-liner. `SlurmTask.with_sidecars(...)`
-desugars to the same `parallel(Peer(..., leader=True), Peer(..., on_failure="continue"))`:
-
-```python
-with cluster:
-    job = train.with_sidecars(metrics)(steps=20)
-    print(job.leader_result)
-```
-
-- The receiver (`train`) becomes `leader=True`.
-- Every sidecar becomes `on_failure="continue"` unless you pre-wrap it in a
-  `Peer(...)` with an explicit policy.
-- Calling the returned bundle (`(steps=20)`) submits the allocation; the
-  args you pass go to the leader.
-
-Use `with_sidecars` when the shape fits; drop back to a hand-written
-`parallel(Peer(...), ...)` call when you need multiple leader candidates or
-custom per-peer directives.
-
-## 6) Fan out with `Peer.replicas(...)`
+## 5) Fan out with `Peer.replicas(...)`
 
 A replica set is N copies of the same task running concurrently. Each
 replica gets its own index so you can shard work without writing a loop:
@@ -257,7 +235,7 @@ What changed:
 Replica peers are never leaders — their failure policy applies per-replica,
 not per-group.
 
-## 7) Discover other peers at runtime
+## 6) Discover other peers at runtime
 
 Peers can find each other at runtime through `ctx.peers`. This is how a
 worker dials a coordinator without any hardcoded hostname.
@@ -311,7 +289,7 @@ In this snippet the worker finishes first and the coordinator keeps
 running. Add a small self-terminating coordinator or promote a worker to
 leader if you want a more realistic shape.
 
-## 8) Run a verified smoke test
+## 7) Run a verified smoke test
 
 You've just written your own local-mode parallel job. The SDK ships a
 curated smoke example you can run to confirm the pipeline is healthy on
@@ -355,8 +333,7 @@ tutorial should run on your machine too.
   peers.
 - Pre-binding arguments with `.partial(...)` and why `BoundTask` is not
   callable.
-- The leader + sidecar shape with `Peer(..., leader=True)` + `on_failure=`
-  and the `with_sidecars(...)` shortcut.
+- The leader + sidecar shape with `Peer(..., leader=True)` + `on_failure=`.
 - Fan-out with `Peer.replicas(count=N, args=...)` and the list-shape result.
 - Service discovery with `ctx.peers`, `ctx.announce(...)`, and
   `wait_all(...)`.

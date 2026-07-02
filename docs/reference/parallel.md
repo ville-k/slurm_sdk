@@ -30,8 +30,6 @@ the public surface exported from `slurm.parallel` and `slurm.parallel_job`.
 
 ::: slurm.parallel.peer_info.PeerGroup
 
-## Bound tasks and sidecar sugar
+## Bound tasks
 
 ::: slurm.task.BoundTask
-
-::: slurm.task.BoundLeaderBundle

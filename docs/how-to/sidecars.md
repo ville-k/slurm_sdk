@@ -12,13 +12,12 @@ them to exit promptly when training exits.
 
 ## Solution
 
-Use `SlurmTask.with_sidecars(...)` — it desugars into
-`parallel(Peer(train, leader=True), Peer(helper, on_failure="continue"), ...)`.
-The training task drives the allocation; sidecars ride along and die with the
-leader.
+Declare the training task as a leader and every helper as a
+`Peer(on_failure="continue")` in a single `parallel(...)` call. The training
+task drives the allocation; sidecars ride along and die with the leader.
 
 ```python
-from slurm import Cluster, JobContext, task
+from slurm import Cluster, JobContext, Peer, parallel, task
 
 
 @task(gpus_per_node=4, time="04:00:00", mem="32G")
@@ -47,16 +46,18 @@ def tensorboard(ctx: JobContext) -> None:
 
 
 with Cluster.from_env("prod") as cluster:
-    job = train.with_sidecars(metrics, tensorboard)(config={"lr": 1e-3})
+    job = parallel(
+        Peer(train.partial(config={"lr": 1e-3}), leader=True),
+        Peer(metrics, on_failure="continue"),
+        Peer(tensorboard, on_failure="continue"),
+    )
     accuracy = job.leader_result
 ```
 
 ### Why this works
 
-- `with_sidecars(metrics, tensorboard)` returns a `BoundLeaderBundle`.
-  Calling it with the leader's arguments (`config={"lr": 1e-3}`) submits
-  one allocation with `train` as the leader and every sidecar wrapped in
-  `Peer(on_failure="continue")`.
+- One `parallel(...)` call submits a single allocation with `train` as the
+  leader and each sidecar tolerated via `on_failure="continue"`.
 - When `train` returns, the supervisor flags shutdown, sends `SIGTERM` to
   every sidecar's step, waits `grace_period_seconds` (default 10s), then
   hard-cancels.
@@ -82,44 +83,27 @@ default.
 Override the SIGTERM→SIGKILL window when sidecars need longer to drain:
 
 ```python
-bundle = train.with_sidecars(
-    metrics,
-    tensorboard,
+job = parallel(
+    Peer(train.partial(config={"lr": 1e-3}), leader=True),
+    Peer(metrics, on_failure="continue"),
+    Peer(tensorboard, on_failure="continue"),
     grace_period_seconds=30,
 )
-job = bundle(config={"lr": 1e-3})
 ```
 
-## Keep a sidecar running on failure (same-pool only)
+## Make a sidecar's failure fatal
 
-If a sidecar's crash should be fatal, keep the call fluent by passing a
-pre-built `Peer` — `with_sidecars` respects explicit policies instead of
-forcing `on_failure="continue"`:
+Sidecars default to nothing — you choose each peer's policy explicitly. If a
+helper's crash *should* abort the job, give it `on_failure="kill"` (the
+default) instead of `"continue"`:
 
 ```python
-from slurm import Peer
-
-bundle = train.with_sidecars(
-    Peer(metrics, on_failure="kill"),
-    tensorboard,
+job = parallel(
+    Peer(train.partial(config={"lr": 1e-3}), leader=True),
+    Peer(metrics, on_failure="kill"),        # a metrics crash aborts the job
+    Peer(tensorboard, on_failure="continue"),
 )
 ```
-
-Any sidecar passed as a `Peer(...)` passes through untouched. Bare
-`SlurmTask` / `BoundTask` values still default to `on_failure="continue"`.
-
-## When to drop back to `parallel(...)`
-
-`with_sidecars(...)` is sugar for one specific shape. Switch to the explicit
-`parallel(...)` form when you need:
-
-- Multiple leader candidates (rare, but valid — e.g. a parameter-server
-  replica set where any replica's exit is "done").
-- Per-peer packaging (different container image per sidecar).
-- Per-peer `srun_args`.
-
-Anything more structured than "leader + helpers on one node" belongs in
-`parallel(Peer(...), Peer(...))`.
 
 ## Verification
 
@@ -134,6 +118,6 @@ Anything more structured than "leader + helpers on one node" belongs in
 - [Your first multi-peer job](../tutorials/parallel_tasks.md#4-add-a-leader-and-a-sidecar)
   — tutorial-style walkthrough.
 - [Parallel reference](../reference/parallel.md) — the `Peer` / `parallel`
-  / `BoundLeaderBundle` docstrings.
+  docstrings.
 - [How parallel allocations work](../explanation/slurm_allocations.md) —
   why `SIGTERM` propagates through `scancel` rather than a direct `kill`.

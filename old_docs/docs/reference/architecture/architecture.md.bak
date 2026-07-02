@@ -1,0 +1,474 @@
+# Architecture
+
+## Overview
+The Slurm SDK provides a Pythonic interface for submitting Python functions as SLURM jobs. The SDK has evolved to support **submitless execution** with automatic context tracking, **hierarchical directory structures**, **workflow orchestration**, and **fluent array job APIs**. Tasks are decorated with `@task` or `@workflow` and automatically return `Job` futures when called within a cluster context, eliminating explicit `.submit()` calls.
+
+## Core Design Principles
+
+1. **Submitless Execution**: Tasks return Jobs automatically when called in cluster/workflow context
+2. **Pythonic API**: Feels like regular Python function composition
+3. **Type-Safe**: Proper type hints for IDE support
+4. **Testable**: `.unwrapped` property for local execution
+5. **Hierarchical**: Jobs organized by task name with sortable timestamps
+6. **Async-Safe**: Context tracking uses Python's contextvars
+
+## Public API Surface
+
+### Core Exports
+`slurm.__init__` now exports:
+- **Decorators**: `task`, `workflow`
+- **Core Classes**: `Job`, `ArrayJob`, `Cluster`, `SlurmTask`
+- **Context**: `JobContext`, `WorkflowContext`
+- **Context Management**: `get_active_context`, `set_active_context`, `reset_active_context`
+
+### Usage Pattern (Submitless)
+
+**New Pattern (v0.5.0+):**
+```python
+from slurm import task, workflow, Cluster
+from slurm.workflow import WorkflowContext
+
+@task(time="00:30:00", mem="4GB")
+def process(data: str) -> Result:
+    return expensive_computation(data)
+
+@workflow(time="02:00:00")
+def my_workflow(files: list[str], ctx: WorkflowContext):
+    # Tasks return Jobs automatically
+    jobs = [process(file) for file in files]
+    return [job.get_result() for job in jobs]
+
+# Context manager enables submitless execution
+with Cluster.from_env() as cluster:
+    workflow_job = my_workflow(["a.csv", "b.csv", "c.csv"])
+    results = workflow_job.get_result()
+```
+
+**Legacy Pattern (still supported):**
+```python
+cluster = Cluster.from_env()
+job = process.submit(cluster=cluster)("data.csv")
+result = job.get_result()
+```
+
+## Modules and Responsibilities
+
+### `slurm.decorators`
+- **`task(...)`**: Decorator for regular tasks
+  - Collects SBATCH options and packaging config
+  - Returns `SlurmTask` wrapper
+  - Default resources: nodes=1, ntasks=1, mem=1G, time=00:10:00
+
+- **`workflow(...)`**: Decorator for workflow orchestrators
+  - Wraps `@task` with workflow-specific defaults
+  - Marks task with `_is_workflow=True` flag
+  - Default time: 01:00:00
+  - Enables WorkflowContext injection
+
+### `slurm.task.SlurmTask`
+Core task wrapper with multiple execution modes:
+
+**Methods:**
+- **`__call__(*args, **kwargs) -> Job`**: Submitless execution
+  - Checks for active context (Cluster or WorkflowContext)
+  - Raises `RuntimeError` if called outside context
+  - Automatically extracts Job dependencies from arguments
+  - Returns Job future immediately
+
+- **`unwrapped`** (property): Access original function for local testing
+  - Returns unwrapped function
+  - Use for unit tests: `task.unwrapped(args)`
+
+- **`with_options(**sbatch_options)`**: Runtime option override
+  - Returns callable with modified options
+  - Useful for dynamic resource allocation
+  - Example: `task.with_options(partition="gpu")(args)`
+
+- **`map(items, max_concurrent=None) -> ArrayJob`**: Fluent array submission
+  - Creates ArrayJob for batch processing
+  - Items can be values, tuples, or dicts
+  - Returns ArrayJob with `.after()` and `.get_results()` methods
+
+- **`submit(cluster=..., **kwargs)`**: Legacy explicit submission
+  - Returns submitter callable
+  - Still supported for backward compatibility
+
+### `slurm.context`
+**New Module (v0.5.0):** Context tracking for submitless execution
+
+Uses Python's `contextvars` for async-safe, thread-safe context management:
+
+```python
+import contextvars
+from typing import Optional, Union
+
+_cluster_context: contextvars.ContextVar[
+    Optional[Union[Cluster, WorkflowContext]]
+] = contextvars.ContextVar('cluster_context', default=None)
+```
+
+**Functions:**
+- **`get_active_context()`**: Returns current Cluster or WorkflowContext
+- **`set_active_context(context)`**: Sets context, returns token for reset
+- **`reset_active_context(token)`**: Restores previous context
+
+**Benefits:**
+- ✅ Async/await support (context preserved across await)
+- ✅ Thread-safe (automatic inheritance to child threads)
+- ✅ Nested contexts (proper stack management)
+- ✅ Token-based reset (prevents corruption)
+
+### `slurm.cluster.Cluster`
+Enhanced with context manager support:
+
+**New Methods:**
+- **`__enter__()`**: Enters cluster context, enables submitless execution
+  - Sets cluster as active context using contextvars
+  - Returns self for `with` statement
+
+- **`__exit__(...)`**: Exits cluster context, restores previous context
+  - Resets context using token
+  - Returns False (doesn't suppress exceptions)
+
+**Directory Structure (v0.5.1):**
+- Jobs organized hierarchically: `{job_base_dir}/{task_name}/{timestamp}_{unique_id}/`
+- Timestamp format: `YYYYMMDD_HHMMSS` (sortable, human-readable)
+- Task name sanitization: lowercase, replace special chars with underscores
+- Workflow nesting: `{workflow_dir}/tasks/{task_name}/{timestamp}_{unique_id}/`
+
+**Dependency Tracking (v0.5.0):**
+- `submit()` now accepts `after` parameter for job dependencies
+- Converts Job or List[Job] to `--dependency=afterok:id1:id2`
+- Automatic extraction from task arguments
+
+**Metadata Generation (v0.5.1):**
+- Creates `metadata.json` in each job directory
+- Contains: job_id, pre_submission_id, task_name, timestamp, status
+- Tracks parent_workflow for nested structure
+- Includes is_workflow flag
+
+### `slurm.workflow.WorkflowContext`
+**New Class (v0.6.0):** Context for workflow orchestrators
+
+**Attributes:**
+- `cluster`: Cluster instance for submitting tasks
+- `workflow_job_id`: Job ID of the orchestrator
+- `workflow_job_dir`: Workflow's own directory
+- `shared_dir`: Shared data directory (`workflow_job_dir/shared/`)
+- `local_mode`: Boolean flag for local testing
+
+**Directory Properties:**
+- `result_path`: Path to workflow result (`workflow_job_dir/result.pkl`)
+- `metadata_path`: Path to metadata (`workflow_job_dir/metadata.json`)
+- `tasks_dir`: Directory for worker tasks (`workflow_job_dir/tasks/`)
+
+**Context Symmetry Methods:**
+Enable easy consumption of task/workflow outputs:
+
+- **`get_task_output_dir(task_name)`**: Get directory for all runs of a task
+- **`list_task_runs(task_name)`**: List run directories, newest first
+- **`get_latest_task_result(task_name)`**: Load result from most recent run
+- **`load_workflow_result(workflow_path)`**: Load result from another workflow
+
+**Initialization:**
+- Auto-creates `shared/` and `tasks/` directories
+- Converts paths to Path objects
+- Called via `__post_init__` dataclass hook
+
+### `slurm.array_job.ArrayJob`
+**New Class (v0.6.0):** Fluent array job API
+
+**Grouped Directory Structure:**
+```
+{task_name}/{timestamp}_{id}/
+├── array_metadata.json       # Array-level metadata
+├── tasks/                    # Individual array tasks
+│   ├── 000/                  # Array index 0
+│   ├── 001/                  # Array index 1
+│   └── 002/                  # Array index 2
+└── results/                  # Aggregated results
+```
+
+**Methods:**
+- **`__len__()`**: Number of tasks in array
+- **`__getitem__(index)`**: Get Job for specific array element
+- **`__iter__()`**: Iterate over jobs
+- **`after(*jobs)`**: Add dependencies (fluent API)
+- **`get_results(timeout=None)`**: Wait and collect all results
+- **`get_results_dir()`**: Path to aggregated results directory
+- **`wait(timeout=None)`**: Wait for all tasks to complete
+
+**Item Types:**
+- **Single values**: Passed as first positional argument
+- **Tuples**: Unpacked as positional arguments
+- **Dicts**: Unpacked as keyword arguments
+
+### `slurm.job.Job`
+Represents a submitted job; unchanged core functionality but now:
+- Created automatically by submitless `__call__`
+- Supports automatic dependency extraction
+- Works with ArrayJob for batch operations
+- `target_job_dir` now follows hierarchical structure
+
+**Status & Result Methods:**
+- `is_running()`, `is_completed()`, `is_successful()`
+- `wait(timeout=None)`, `cancel()`
+- `get_result(timeout=None)`: Downloads and unpickles result
+- `get_status()`: Queries scheduler state
+
+### `slurm.rendering`
+Enhanced to support new features:
+
+**Job Script Rendering:**
+- Includes `#SBATCH` directives from task options
+- Supports dependency parameter (`--dependency=afterok:...`)
+- Defaults output/error to hierarchical job directory
+- Defines `JOB_DIR` environment variable
+- Injects packaging setup/cleanup commands
+- Serializes args/kwargs/callbacks with pickle
+
+**New Directory Path Construction:**
+- Generates timestamp and unique ID
+- Sanitizes task name for filesystem
+- Builds hierarchical paths
+- Supports workflow nesting
+
+### `slurm.runner`
+Entry point executed on compute nodes:
+
+**Workflow Context Injection (v0.6.0):**
+- Inspects function signature for `WorkflowContext` parameter
+- Auto-injects context if parameter type-annotated
+- Sets active context for nested task calls
+- Properly resets context on completion
+
+**Execution Flow:**
+1. Restores `sys.path` from pickled value
+2. Loads args/kwargs/callbacks
+3. Imports task module
+4. Injects WorkflowContext if needed
+5. Invokes function
+6. Pickles result to output file
+7. Runs completion callbacks
+
+### `slurm.runtime`
+- **`JobContext`**: Runtime metadata from SLURM environment
+  - Now includes `job_dir` and `shared_dir` properties
+  - Symmetry with WorkflowContext
+
+- **`current_job_context()`**: Lazily builds context from environment
+- **`bind_job_context()`**: Auto-injects context via signature inspection
+
+### `slurm.callbacks`
+Callback system remains unchanged:
+- `BaseCallback` with context-based lifecycle hooks
+- Execution loci: client/runner/both
+- Optional polling via `poll_interval_secs`
+- Built-in: `LoggerCallback`, `RichLoggerCallback`, `BenchmarkCallback`
+
+### `slurm.api`
+Backend abstraction:
+- **`BackendBase`**: Abstract interface
+- **`SSHCommandBackend`**: SSH/SFTP implementation
+  - Resolves remote `job_base_dir` (`~/slurm_jobs`)
+  - Uploads scripts, ensures directories
+  - Parses job IDs from sbatch output
+  - Status/queue/cancel via scontrol/squeue/scancel
+
+### `slurm.packaging`
+Packaging strategies:
+- **`NonePackagingStrategy`**: No-op
+- **`WheelPackagingStrategy`**: Builds wheel with uv/pip
+- **`ContainerPackagingStrategy`**: Container images with Enroot/Pyxis
+
+## Architecture Evolution
+
+### Phase 1: Explicit Submission (v0.1.0 - v0.4.x)
+```python
+cluster = Cluster.from_env()
+job = task.submit(cluster=cluster)(*args)
+```
+
+### Phase 2: Submitless Execution (v0.5.0+)
+```python
+with Cluster.from_env() as cluster:
+    job = task(*args)  # Returns Job automatically
+```
+
+### Phase 3: Workflows & Arrays (v0.6.0+)
+```python
+@workflow
+def pipeline(data: list, ctx: WorkflowContext):
+    jobs = process.map(data)  # Fluent array API
+    return jobs.get_results()
+
+with Cluster.from_env() as cluster:
+    results = pipeline(data)
+```
+
+## Directory Structure Examples
+
+### Regular Task
+```
+~/slurm_jobs/
+└── train_model/
+    ├── 20250107_143022_a1b2c3d4/
+    │   ├── job.sh
+    │   ├── job.out
+    │   ├── job.err
+    │   ├── result.pkl
+    │   └── metadata.json
+    └── 20250108_092301_e5f6g7h8/
+```
+
+### Workflow with Nested Tasks
+```
+~/slurm_jobs/
+└── hyperparameter_search/
+    └── 20250107_140000_w1x2y3z4/
+        ├── workflow.sh
+        ├── workflow.out
+        ├── result.pkl
+        ├── metadata.json
+        ├── shared/                  # ctx.shared_dir
+        │   └── configs.pkl
+        └── tasks/                   # ctx.tasks_dir
+            ├── train_model/
+            │   ├── 20250107_140102_t1a2b3c4/
+            │   └── 20250107_140103_t5d6e7f8/
+            └── evaluate_model/
+                └── 20250107_141530_e1j2k3l4/
+```
+
+### Array Job (Grouped Structure)
+```
+~/slurm_jobs/
+└── process_chunk/
+    └── 20250107_143022_a1b2c3d4/
+        ├── array_metadata.json
+        ├── tasks/
+        │   ├── 000/
+        │   │   ├── job.sh
+        │   │   ├── result.pkl
+        │   │   └── metadata.json
+        │   ├── 001/
+        │   └── 002/
+        └── results/
+            └── aggregated.pkl
+```
+
+## Notable Features and Behaviors
+
+### Submitless Execution
+- ✅ Tasks must be called within cluster/workflow context
+- ✅ Raises `RuntimeError` if called outside context
+- ✅ Use `.unwrapped` for local testing
+- ✅ Automatic dependency tracking from Job arguments
+
+### Context Management
+- ✅ Thread-safe and async-safe (contextvars)
+- ✅ Automatic inheritance to child threads
+- ✅ Nested contexts supported
+- ✅ Token-based reset prevents corruption
+
+### Hierarchical Directories
+- ✅ Human-friendly organization by task name
+- ✅ Sortable timestamps (YYYYMMDD_HHMMSS)
+- ✅ Workflow nesting under tasks/ subdirectory
+- ✅ Metadata files for programmatic querying
+
+### Workflow Orchestration
+- ✅ Workflows submit other tasks
+- ✅ Context injection via function parameters
+- ✅ Shared directories for data exchange
+- ✅ Context symmetry for consuming outputs
+
+### Array Jobs
+- ✅ Fluent `.map()` API
+- ✅ Grouped directory structure
+- ✅ Dependencies via `.after()` chaining
+- ✅ Batch result collection
+
+### Type Safety
+- ✅ Proper type hints throughout
+- ✅ Generic Job[T] and ArrayJob[T] types
+- ✅ TYPE_CHECKING guards for circular imports
+- ⏳ Advanced ParamSpec typing (deferred)
+
+## Limitations and Future Work
+
+### Current Limitations
+- Only SSH backend implemented (no local or REST)
+- Array jobs submit individual tasks (not native Slurm arrays yet)
+- Advanced TYPE_CHECKING signatures deferred
+- No automatic Job unwrapping in Union types
+
+### Planned Enhancements
+- Native Slurm array job submission
+- Local backend for testing
+- REST backend for remote clusters
+- Enhanced type signatures with ParamSpec
+- Workflow visualization tools
+- Performance optimizations (batching, caching)
+
+## Extension Points
+
+### Custom Callbacks
+Implement `BaseCallback` for lifecycle hooks:
+- `on_begin_package_ctx`, `on_end_package_ctx`
+- `on_begin_submit_job_ctx`, `on_end_submit_job_ctx`
+- `on_begin_run_job_ctx`, `on_end_run_job_ctx`
+- `on_job_status_update_ctx`, `on_completed_ctx`
+
+### Custom Packaging Strategies
+Implement `PackagingStrategy`:
+- `prepare(task, cluster)`: Setup logic
+- `generate_setup_commands(...)`: Bash commands
+- `generate_cleanup_commands(...)`: Teardown
+
+### Custom Backends
+Implement `BackendBase`:
+- `submit_job(...)`: Job submission
+- `get_job_status(...)`: Status queries
+- `cancel_job(...)`: Cancellation
+- `get_queue()`, `get_cluster_info()`
+
+## External Dependencies
+- **paramiko**: SSH/SFTP communication
+- **rich**: Optional UI enhancements
+- **Standard library**: contextvars, pickle, base64, logging, subprocess
+
+## Version History
+
+### v0.1.0 - v0.4.x: Foundation
+- Basic task decoration and submission
+- SSH backend
+- Packaging strategies
+- Callback system
+
+### v0.5.0: Submitless Execution
+- Context tracking with contextvars
+- Automatic Job returns
+- `.unwrapped` for testing
+- `.with_options()` for runtime overrides
+- Automatic dependency tracking
+
+### v0.5.1: Hierarchical Directories
+- Task-based directory organization
+- Timestamp + unique ID generation
+- Workflow nesting
+- Metadata file generation
+
+### v0.6.0: Workflows & Arrays
+- `@workflow` decorator
+- WorkflowContext with parameter injection
+- Context symmetry methods
+- Fluent `.map()` API
+- ArrayJob implementation
+- Grouped array directory structure
+
+### v0.6.1: Type Safety (Partial)
+- Basic type annotations
+- Generic Job[T] and ArrayJob[T]
+- TYPE_CHECKING guards
+- Advanced signatures deferred

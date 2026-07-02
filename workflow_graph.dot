@@ -1,0 +1,7 @@
+digraph workflow {
+  rankdir=TB;  // Top to bottom layout
+  node [style=filled];
+
+  "67" [label="ml_pipeline" shape=box fillcolor=lightblue];
+
+}

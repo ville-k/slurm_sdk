@@ -1,0 +1,562 @@
+# Hierarchical Directory Structure
+
+## Overview
+
+The Slurm SDK organizes job outputs in a hierarchical, human-friendly directory structure. Jobs are grouped by task name with sortable timestamps, making it easy to find and manage job outputs.
+
+## Design Philosophy
+
+**Goals:**
+1. **Human-friendly**: Easy to navigate with standard tools (`ls`, `cd`)
+2. **Sortable**: Chronological order with `ls -l`
+3. **Queryable**: Metadata files for scripting
+4. **Hierarchical**: Workflows nest their worker tasks
+5. **Scalable**: Works for 1 job or 10,000 jobs
+
+## Directory Layout
+
+### Basic Structure
+
+```
+{job_base_dir}/{task_name}/{timestamp}_{unique_id}/
+```
+
+**Components:**
+- `job_base_dir`: Base directory (default: `~/slurm_jobs`)
+- `task_name`: Sanitized task name (lowercase, underscores)
+- `timestamp`: `YYYYMMDD_HHMMSS` format
+- `unique_id`: 8-character hex string
+
+### Regular Task Example
+
+```
+~/slurm_jobs/
+└── train_model/
+    ├── 20250107_143022_a1b2c3d4/
+    │   ├── job.sh              # Submitted script
+    │   ├── job.out             # Standard output
+    │   ├── job.err             # Standard error
+    │   ├── result.pkl          # Pickled result
+    │   └── metadata.json       # Job metadata
+    ├── 20250107_151445_e5f6g7h8/
+    └── 20250108_092301_i9j0k1l2/
+```
+
+**Benefits:**
+- All runs of `train_model` in one directory
+- Newest runs sort last (`ls -lt`)
+- Easy to find specific run by date
+
+### Workflow Structure
+
+Workflows create nested directories for their worker tasks:
+
+```
+~/slurm_jobs/
+└── hyperparameter_search/
+    └── 20250107_140000_w1x2y3z4/
+        ├── workflow.sh         # Orchestrator script
+        ├── workflow.out
+        ├── workflow.err
+        ├── result.pkl          # Final workflow result
+        ├── metadata.json
+        ├── shared/             # Shared data (ctx.shared_dir)
+        │   ├── configs.pkl
+        │   └── intermediate_results/
+        └── tasks/              # Worker tasks (ctx.tasks_dir)
+            ├── train_model/
+            │   ├── 20250107_140102_t1a2b3c4/
+            │   │   ├── job.sh
+            │   │   ├── result.pkl
+            │   │   └── metadata.json
+            │   └── 20250107_140103_t5d6e7f8/
+            └── evaluate_model/
+                └── 20250107_141530_e1j2k3l4/
+```
+
+**Benefits:**
+- Workflow is one logical unit
+- Easy to delete entire workflow
+- Clear parent-child relationships
+- Shared directory for data exchange
+
+### Array Job Structure (Grouped)
+
+Array jobs use a grouped structure:
+
+```
+~/slurm_jobs/
+└── process_chunk/
+    └── 20250107_143022_a1b2c3d4/      # Array submission
+        ├── array_metadata.json         # Array-level metadata
+        ├── tasks/                      # Individual array tasks
+        │   ├── 000/                    # Array index 0
+        │   │   ├── job.sh
+        │   │   ├── result.pkl
+        │   │   └── metadata.json
+        │   ├── 001/                    # Array index 1
+        │   ├── 002/                    # Array index 2
+        │   └── 099/                    # Array index 99
+        └── results/                    # Aggregated results
+            └── all_results.pkl
+```
+
+**Benefits:**
+- Array submission is one logical unit
+- Easy cleanup: `rm -rf 20250107_143022_a1b2c3d4/`
+- Natural place for array-level metadata
+- Scales well (10 to 10,000 tasks)
+- No directory clutter
+
+## Implementation
+
+### Timestamp and ID Generation
+
+```python
+from datetime import datetime
+import uuid
+
+def _generate_timestamp_id() -> tuple[str, str]:
+    """Generate timestamp and unique ID for hierarchical directory structure.
+
+    Returns:
+        tuple: (timestamp, unique_id) where timestamp is YYYYMMDD_HHMMSS format
+            and unique_id is an 8-character hex string.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_id = uuid.uuid4().hex[:8]
+    return timestamp, unique_id
+```
+
+**Timestamp Format:**
+- `YYYYMMDD_HHMMSS`: Year, month, day, hour, minute, second
+- Lexicographically sortable
+- Human-readable at a glance
+- No special characters
+- Second precision (sufficient with unique IDs)
+
+**Unique ID:**
+- 8 hex characters (32 bits)
+- Collision-resistant for same-second submissions
+- Short enough to be memorable
+- Long enough for uniqueness
+
+### Task Name Sanitization
+
+```python
+import re
+
+def _sanitize_task_name(name: str) -> str:
+    """Sanitize task name for filesystem use.
+
+    Args:
+        name: Raw task name.
+
+    Returns:
+        Sanitized task name safe for filesystem paths.
+
+    Examples:
+        >>> _sanitize_task_name("Train Model")
+        'train_model'
+        >>> _sanitize_task_name("model:v2")
+        'model_v2'
+        >>> _sanitize_task_name("TrainModel")
+        'trainmodel'
+    """
+    name = name.lower()
+    name = re.sub(r'[^\w\-]', '_', name)  # Replace non-alphanumeric with _
+    name = re.sub(r'_+', '_', name)        # Collapse multiple underscores
+    name = name.strip('_')                 # Remove leading/trailing underscores
+    return name or "task"
+```
+
+**Rules:**
+1. Convert to lowercase
+2. Replace special characters with underscores
+3. Collapse multiple underscores
+4. Strip leading/trailing underscores
+5. Default to "task" if empty
+
+### Path Construction
+
+Regular task:
+
+```python
+import os
+
+# Generate timestamp and ID
+timestamp, unique_id = _generate_timestamp_id()
+pre_submission_id = f"{timestamp}_{unique_id}"
+
+# Get and sanitize task name
+task_name = task.sbatch_options.get("job_name", task.func.__name__)
+sanitized_task_name = _sanitize_task_name(task_name)
+
+# Build hierarchical path
+target_job_dir = os.path.join(
+    job_base_dir,
+    sanitized_task_name,
+    f"{timestamp}_{unique_id}"
+)
+# Result: ~/slurm_jobs/train_model/20250107_143022_a1b2c3d4/
+```
+
+Workflow-nested task:
+
+```python
+from .context import get_active_context
+from .workflow import WorkflowContext
+
+ctx = get_active_context()
+if isinstance(ctx, WorkflowContext):
+    # Nested in workflow: {workflow_dir}/tasks/{task_name}/{timestamp}_{unique_id}/
+    target_job_dir = os.path.join(
+        str(ctx.workflow_job_dir),
+        "tasks",
+        sanitized_task_name,
+        f"{timestamp}_{unique_id}"
+    )
+else:
+    # Regular task: {job_base_dir}/{task_name}/{timestamp}_{unique_id}/
+    target_job_dir = os.path.join(
+        job_base_dir,
+        sanitized_task_name,
+        f"{timestamp}_{unique_id}"
+    )
+```
+
+## Metadata Files
+
+### Job Metadata
+
+Each job directory contains `metadata.json`:
+
+```json
+{
+  "job_id": "12345",
+  "pre_submission_id": "20250107_143022_a1b2c3d4",
+  "task_name": "train_model",
+  "timestamp": "20250107_143022",
+  "submitted_at": 1736259022.5,
+  "status": "PENDING",
+  "is_workflow": false,
+  "parent_workflow": null
+}
+```
+
+**Fields:**
+- `job_id`: Slurm job ID (assigned by scheduler)
+- `pre_submission_id`: SDK-generated ID (before submission)
+- `task_name`: Sanitized task name
+- `timestamp`: Timestamp part of pre_submission_id
+- `submitted_at`: Unix timestamp
+- `status`: Job status (PENDING, RUNNING, COMPLETED, etc.)
+- `is_workflow`: Boolean flag
+- `parent_workflow`: Parent workflow job ID (if nested)
+
+### Workflow Metadata
+
+Workflow metadata includes additional fields:
+
+```json
+{
+  "job_id": "12346",
+  "pre_submission_id": "20250107_140000_w1x2y3z4",
+  "task_name": "hyperparameter_search",
+  "timestamp": "20250107_140000",
+  "submitted_at": 1736258000.0,
+  "status": "COMPLETED",
+  "is_workflow": true,
+  "parent_workflow": null
+}
+```
+
+### Array Metadata
+
+Array jobs have an additional `array_metadata.json` at the array level:
+
+```json
+{
+  "array_job_id": "12347",
+  "num_tasks": 100,
+  "task_name": "process_chunk",
+  "submitted_at": 1736259100.0,
+  "status": "RUNNING",
+  "completed_tasks": 45,
+  "failed_tasks": 0
+}
+```
+
+### Metadata Generation
+
+Metadata is generated immediately after job submission:
+
+```python
+import json
+import time
+
+# Generate metadata
+is_workflow = getattr(task_func, "_is_workflow", False)
+metadata = {
+    "job_id": job_id,
+    "pre_submission_id": pre_submission_id,
+    "task_name": sanitized_task_name,
+    "timestamp": timestamp,
+    "submitted_at": time.time(),
+    "status": "PENDING",
+    "is_workflow": is_workflow,
+}
+
+# Check for parent workflow
+ctx = get_active_context()
+if isinstance(ctx, WorkflowContext):
+    metadata["parent_workflow"] = ctx.workflow_job_id
+else:
+    metadata["parent_workflow"] = None
+
+# Write metadata file
+metadata_path = os.path.join(target_job_dir, "metadata.json")
+with open(metadata_path, "w") as f:
+    json.dump(metadata, f, indent=2)
+```
+
+## Workflow Context Integration
+
+### WorkflowContext Properties
+
+```python
+@dataclass
+class WorkflowContext:
+    workflow_job_dir: Path
+    shared_dir: Path
+
+    @property
+    def tasks_dir(self) -> Path:
+        """Directory where submitted worker tasks are stored."""
+        return self.workflow_job_dir / "tasks"
+
+    @property
+    def result_path(self) -> Path:
+        """Path to this workflow's result file."""
+        return self.workflow_job_dir / "result.pkl"
+
+    @property
+    def metadata_path(self) -> Path:
+        """Path to this workflow's metadata file."""
+        return self.workflow_job_dir / "metadata.json"
+```
+
+### Directory Access Methods
+
+```python
+def get_task_output_dir(self, task_name: str) -> Path:
+    """Get directory containing all runs of a task."""
+    return self.tasks_dir / task_name
+
+def list_task_runs(self, task_name: str) -> List[Path]:
+    """List all run directories for a task, newest first."""
+    task_dir = self.get_task_output_dir(task_name)
+    if not task_dir.exists():
+        return []
+
+    # List all subdirectories with timestamp_id format
+    runs = [p for p in task_dir.iterdir() if p.is_dir()]
+    # Sort by name (timestamp_id) in reverse (newest first)
+    runs.sort(reverse=True)
+    return runs
+
+def get_latest_task_result(self, task_name: str) -> Any:
+    """Load result from most recent run of a task."""
+    runs = self.list_task_runs(task_name)
+    if not runs:
+        raise FileNotFoundError(f"No runs found for task '{task_name}'")
+
+    latest_run = runs[0]
+    result_file = latest_run / "result.pkl"
+
+    with open(result_file, "rb") as f:
+        return pickle.load(f)
+```
+
+## Querying Jobs
+
+### Find Latest Run
+
+```bash
+# Find latest run of a task
+ls -t ~/slurm_jobs/train_model/ | head -1
+# Output: 20250108_092301_i9j0k1l2
+```
+
+### Find Runs by Date
+
+```bash
+# Find runs from specific date
+ls ~/slurm_jobs/train_model/ | grep "^20250107"
+# Output:
+# 20250107_143022_a1b2c3d4
+# 20250107_151445_e5f6g7h8
+```
+
+### Query Metadata
+
+```python
+import json
+from pathlib import Path
+
+def find_failed_jobs(task_name: str) -> list:
+    """Find all failed jobs for a task."""
+    task_dir = Path.home() / "slurm_jobs" / task_name
+
+    failed_jobs = []
+    for run_dir in task_dir.iterdir():
+        if not run_dir.is_dir():
+            continue
+
+        metadata_file = run_dir / "metadata.json"
+        if not metadata_file.exists():
+            continue
+
+        with open(metadata_file) as f:
+            metadata = json.load(f)
+
+        if metadata.get("status") == "FAILED":
+            failed_jobs.append({
+                "run_dir": str(run_dir),
+                "job_id": metadata["job_id"],
+                "submitted_at": metadata["submitted_at"],
+            })
+
+    return failed_jobs
+```
+
+### Workflow Queries
+
+```python
+def find_workflow_tasks(workflow_dir: Path) -> dict:
+    """Find all tasks submitted by a workflow."""
+    tasks_dir = workflow_dir / "tasks"
+
+    tasks = {}
+    for task_name_dir in tasks_dir.iterdir():
+        if not task_name_dir.is_dir():
+            continue
+
+        task_name = task_name_dir.name
+        runs = [r for r in task_name_dir.iterdir() if r.is_dir()]
+
+        tasks[task_name] = {
+            "num_runs": len(runs),
+            "runs": sorted([r.name for r in runs], reverse=True),
+        }
+
+    return tasks
+```
+
+## Cleanup and Maintenance
+
+### Delete Old Runs
+
+```bash
+# Delete runs older than 7 days
+find ~/slurm_jobs/train_model/ -type d -mtime +7 -exec rm -rf {} +
+```
+
+### Delete Failed Jobs
+
+```bash
+# Delete failed jobs (requires jq)
+for dir in ~/slurm_jobs/train_model/*/; do
+  status=$(jq -r .status "$dir/metadata.json" 2>/dev/null)
+  if [ "$status" = "FAILED" ]; then
+    echo "Deleting $dir"
+    rm -rf "$dir"
+  fi
+done
+```
+
+### Archive Completed Workflows
+
+```bash
+# Archive completed workflows
+for workflow in ~/slurm_jobs/*/20*; do
+  if [ -f "$workflow/result.pkl" ]; then
+    tar -czf "$workflow.tar.gz" "$workflow"
+    rm -rf "$workflow"
+  fi
+done
+```
+
+## Best Practices
+
+### ✅ Do
+
+1. **Use consistent task names**
+   ```python
+   @task(job_name="train_model")  # ✅ Explicit name
+   def train(...):
+       pass
+   ```
+
+2. **Query metadata for programmatic access**
+   ```python
+   with open(job_dir / "metadata.json") as f:
+       metadata = json.load(f)
+   ```
+
+3. **Use workflow shared directories**
+   ```python
+   @workflow
+   def pipeline(ctx: WorkflowContext):
+       # Save to shared directory
+       output = ctx.shared_dir / "intermediate.pkl"
+       save(output, data)
+   ```
+
+4. **Clean up old runs periodically**
+   ```bash
+   find ~/slurm_jobs -type d -mtime +30 -delete
+   ```
+
+### ❌ Don't
+
+1. **Don't hardcode job directory paths**
+   ```python
+   # ❌ Wrong
+   result = pickle.load(open("~/slurm_jobs/job_123/result.pkl"))
+
+   # ✅ Right
+   result = job.get_result()
+   ```
+
+2. **Don't modify directory structure manually**
+   ```bash
+   # ❌ Wrong
+   mv ~/slurm_jobs/train_model/20250107_143022_a1b2c3d4/ ~/slurm_jobs/old/
+
+   # ✅ Right - use cleanup scripts that preserve structure
+   ```
+
+3. **Don't rely on directory names for job IDs**
+   ```python
+   # ❌ Wrong
+   job_id = job_dir.name
+
+   # ✅ Right
+   with open(job_dir / "metadata.json") as f:
+       job_id = json.load(f)["job_id"]
+   ```
+
+## Summary
+
+The hierarchical directory structure provides:
+
+- ✅ **Human-friendly navigation** with standard tools
+- ✅ **Chronological organization** with sortable timestamps
+- ✅ **Task grouping** for easy management
+- ✅ **Workflow nesting** for clear relationships
+- ✅ **Metadata queries** for scripting
+- ✅ **Scalability** from 1 to 10,000+ jobs
+- ✅ **Cleanup-friendly** structure
+
+The structure makes it trivial to find, query, and manage job outputs, whether manually with shell commands or programmatically with Python scripts.

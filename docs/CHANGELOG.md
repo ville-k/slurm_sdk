@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `parallel(...)` ships its single-pool core: one Slurm allocation runs N
   peer tasks as concurrent `srun` steps. Includes a leader peer whose exit
   cascades graceful shutdown to the rest (`Peer(leader=True)`,
-  `grace_period_seconds`, `job.leader_result`), `with_sidecars(...)` sugar,
+  `grace_period_seconds`, `job.leader_result`),
   `kill` / `continue` failure policies surfaced through `peer_outcomes()`,
   replica sets (`Peer.replicas(count=N, args=...)`), and runtime peer
   discovery (`ctx.peers`, `ctx.announce(...)`, `PeerGroup.wait_all(...)`,
@@ -113,14 +113,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supervisor's grace window. Peer Popens now run under
   `start_new_session=True` so SIGTERM propagates through the peer's process
   group to any tools the peer launched (tensorboard, node-exporter, ...)
-
-- `SlurmTask.with_sidecars(*sidecars, grace_period_seconds=10)` — sugar for
-  the common leader+sidecars shape. Returns a `BoundLeaderBundle`; calling
-  the bundle with the leader's args desugars to the full `parallel(...)`
-  call with `Peer(leader=True)` on the leader and
-  `Peer(on_failure="continue")` defaults on each sidecar. Accepts
-  `SlurmTask`, `BoundTask`, or `Peer` sidecars; an explicit user-provided
-  `Peer(..., on_failure="kill")` keeps its policy
 
 - Peer service-discovery runtime API — peer functions can now inspect every
   other peer in the allocation via `ctx.peers["<name>"]`, a read-only mapping

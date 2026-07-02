@@ -1,0 +1,24 @@
+# Slurmfile for PyTorch distributed training tutorial
+
+# Production cluster configuration (update with your cluster details)
+[production.cluster]
+backend = "ssh"
+job_base_dir = "~/slurm_jobs"
+
+[production.cluster.backend_config]
+hostname = "cluster.example.com"  # UPDATE: Your cluster hostname
+username = "your_username"        # UPDATE: Your username
+
+[production.packaging]
+type = "container"
+platform = "linux/amd64"
+dockerfile = "Dockerfile"
+context = "."
+name = "pytorch-training"
+tag = "latest"
+registry = "registry.example.com" # UPDATE: Your container registry
+
+[production.submit]
+partition = "gpu"                  # UPDATE: Your GPU partition name
+account = "research"               # UPDATE: Your account name
+

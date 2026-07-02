@@ -534,8 +534,8 @@ class SlurmTask:
 
         Returns a :class:`BoundTask` wrapping this task plus the given args.
         A ``BoundTask`` is the canonical way to hand a pre-configured task to
-        ``parallel(...)``, ``task.with_sidecars(...)``, or ``Peer(...)`` — it
-        captures args without triggering a submission.
+        ``parallel(...)`` or ``Peer(...)`` — it captures args without
+        triggering a submission.
 
         Args:
             *args: Positional arguments to bind.
@@ -555,71 +555,6 @@ class SlurmTask:
             ... )
         """
         return BoundTask(task=self, args=args, kwargs=kwargs)
-
-    def with_sidecars(
-        self,
-        *sidecars: Any,
-        grace_period_seconds: int = 10,
-    ) -> "BoundLeaderBundle":
-        """Declare this task as a leader with one or more sidecars.
-
-        Returns a :class:`BoundLeaderBundle` that, when called with the
-        leader's arguments, desugars to a ``parallel(...)`` submission with
-        this task as ``Peer(leader=True)`` and every sidecar as
-        ``Peer(on_failure="continue")``.
-
-        Sidecar coercion:
-
-        - A bare :class:`SlurmTask` becomes ``Peer(task, on_failure="continue")``.
-        - A :class:`BoundTask` becomes ``Peer(bound, on_failure="continue")``.
-        - A pre-built ``Peer`` passes through untouched — a user who has
-          already set ``on_failure="kill"`` on a sidecar keeps that policy.
-
-        Args:
-            *sidecars: Sidecar tasks. May be :class:`SlurmTask`,
-                :class:`BoundTask`, or :class:`~slurm.parallel.types.Peer`.
-            grace_period_seconds: Window between SIGTERM and SIGKILL during
-                the leader-triggered cascading shutdown. Defaults to 10s.
-
-        Returns:
-            A :class:`BoundLeaderBundle`. Call the bundle with the leader's
-            args to submit the parallel job.
-
-        Raises:
-            TypeError: If ``sidecars`` is empty or contains an unsupported
-                type.
-
-        Example:
-            >>> @task(gpus=1, time="01:00:00")
-            ... def train(cfg: dict): ...
-            >>> @task(time="01:00:00")
-            ... def metrics_scraper(): ...
-            >>> job = train.with_sidecars(metrics_scraper)(cfg={"lr": 0.001})
-        """
-        from .parallel.types import Peer
-
-        if not sidecars:
-            raise TypeError(
-                "SlurmTask.with_sidecars() requires at least one sidecar. "
-                "Call the task directly if you don't need sidecars."
-            )
-
-        coerced: List[Peer] = []
-        for item in sidecars:
-            if isinstance(item, Peer):
-                coerced.append(item)
-            elif isinstance(item, (SlurmTask, BoundTask)):
-                coerced.append(Peer(task=item, on_failure="continue"))
-            else:
-                raise TypeError(
-                    "with_sidecars() items must be SlurmTask, BoundTask, or "
-                    f"Peer; got {type(item).__name__}"
-                )
-        return BoundLeaderBundle(
-            leader=self,
-            sidecars=tuple(coerced),
-            grace_period_seconds=grace_period_seconds,
-        )
 
     def with_dependencies(self, tasks: List["SlurmTask"]) -> "SlurmTask":
         """Specify tasks that need their containers pre-built before this workflow runs.
@@ -690,7 +625,7 @@ class BoundTask:
 
     ``BoundTask`` is returned by :meth:`SlurmTask.partial`. It captures args
     without triggering submission — the canonical way to hand a pre-configured
-    task to a multi-peer API (``parallel``, ``task.with_sidecars``, ``Peer``).
+    task to a multi-peer API (``parallel``, ``Peer``).
 
     A ``BoundTask`` is **not directly callable**. Calling it raises a
     ``TypeError`` steering the caller toward either the multi-peer primitives
@@ -769,93 +704,9 @@ class BoundTask:
         raise TypeError(
             f"BoundTask for {self.task.func.__name__!r} is not directly "
             "callable. Use it inside parallel(Peer(bound_task, ...), ...), "
-            "task.with_sidecars(...), or call the underlying SlurmTask "
-            "for a single-job submission."
+            "or call the underlying SlurmTask for a single-job submission."
         )
 
     def __repr__(self) -> str:
         name = self.task.func.__name__
         return f"BoundTask({name}, args={self.args!r}, kwargs={self.kwargs!r})"
-
-
-class BoundLeaderBundle:
-    """A leader task plus its sidecars, awaiting the leader's args.
-
-    Returned by :meth:`SlurmTask.with_sidecars`. A :class:`BoundLeaderBundle`
-    is a frozen container around the leader :class:`SlurmTask` and a
-    normalised tuple of sidecar :class:`~slurm.parallel.types.Peer` s. Calling
-    the bundle (``bundle(arg1, arg2, kwarg=val)``) desugars to the full
-    ``parallel(...)`` call:
-
-    .. code-block:: python
-
-        parallel(
-            Peer(leader.partial(arg1, arg2, kwarg=val), leader=True),
-            Peer(sidecar_a, on_failure="continue"),
-            Peer(sidecar_b, on_failure="continue"),
-            grace_period_seconds=grace_period_seconds,
-        )
-
-    Topology overrides are intentionally not supported — a user who needs
-    explicit pools should write the full ``parallel(...)`` call. The sugar
-    exists to keep the single-pool leader+sidecars shape concise.
-
-    Attributes:
-        leader: The leader :class:`SlurmTask`.
-        sidecars: Tuple of :class:`~slurm.parallel.types.Peer` s (already
-            coerced with ``on_failure="continue"`` defaults applied).
-        grace_period_seconds: Propagated to ``parallel(...)``.
-    """
-
-    __slots__ = ("leader", "sidecars", "grace_period_seconds")
-
-    def __init__(
-        self,
-        *,
-        leader: "SlurmTask",
-        sidecars: tuple,
-        grace_period_seconds: int = 10,
-    ) -> None:
-        if not isinstance(leader, SlurmTask):
-            raise TypeError(
-                "BoundLeaderBundle leader must be a SlurmTask; got "
-                f"{type(leader).__name__}"
-            )
-        self.leader = leader
-        self.sidecars = tuple(sidecars)
-        self.grace_period_seconds = int(grace_period_seconds)
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Bind ``args`` / ``kwargs`` to the leader and submit via ``parallel``.
-
-        Raises:
-            TypeError: If ``topology=`` (or any other ``parallel``-level
-                keyword) is passed — use ``parallel(...)`` directly when the
-                leader+sidecars sugar isn't enough.
-        """
-        if "topology" in kwargs:
-            raise TypeError(
-                "SlurmTask.with_sidecars(...) does not accept topology=. "
-                "Call parallel(...) directly if you need explicit pools."
-            )
-        from .parallel import parallel
-        from .parallel.types import Peer
-
-        leader_peer = Peer(task=self.leader.partial(*args, **kwargs), leader=True)
-        return parallel(
-            leader_peer,
-            *self.sidecars,
-            grace_period_seconds=self.grace_period_seconds,
-        )
-
-    def __repr__(self) -> str:
-        leader_name = self.leader.func.__name__
-        sidecar_names = [
-            type(s).__name__ + "(" + (s.resolved_name or "?") + ")"
-            for s in self.sidecars
-        ]
-        return (
-            f"BoundLeaderBundle(leader={leader_name}, "
-            f"sidecars=[{', '.join(sidecar_names)}], "
-            f"grace_period_seconds={self.grace_period_seconds})"
-        )
