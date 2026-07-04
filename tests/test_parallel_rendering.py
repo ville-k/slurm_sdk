@@ -242,3 +242,120 @@ def test_plan_metadata_round_trips(tmp_path):
     assert plan.grace_period_seconds == 7
     assert plan.pool_names == ["default"]
     assert plan.pre_submission_id == "abc123"
+
+
+# ---------------------------------------------------------------------------
+# #SBATCH header sizing — regression tests for the review findings
+# ---------------------------------------------------------------------------
+
+
+def _header_lines(script: str) -> list[str]:
+    """All #SBATCH directives — srun steps live base64-encoded in the plan
+    heredoc, so plain-text lines are the batch header only."""
+    return [ln for ln in script.splitlines() if ln.startswith("#SBATCH ")]
+
+
+def test_header_requests_pool_budget_not_ntasks_multiple(tmp_path):
+    """Regression: header must not request ntasks x pool budget.
+
+    The old header emitted --cpus-per-task=<pool.cpus_per_node> together
+    with --ntasks=<sum of peer counts>; Slurm computes total CPUs as their
+    product, so a 2-peer job on an 8-CPU pool requested 16 CPUs and could
+    pend forever despite the validator approving the peers.
+    """
+    from slurm import Peer, Pool, Topology
+
+    spec = _make_spec(
+        Peer(_train.partial(cfg={})),  # cpus_per_task=4
+        Peer(_metrics, on_failure="continue"),  # cpus_per_task=1
+        topology=Topology(pools={"main": Pool(nodes=1, cpus_per_node=8)}),
+    )
+    # Simulate the production pipeline: the representative task's decorator
+    # defaults flow in as task_defaults and must not leak resource keys.
+    script = render_parallel_script(
+        spec=spec,
+        packaging_strategy=_DummyStrategy({}),
+        target_job_dir=str(tmp_path),
+        pre_submission_id="abc123",
+        cluster=None,
+        task_defaults={"cpus_per_task": 4, "mem": "8G"},
+        sbatch_overrides={},
+        callbacks=[BaseCallback()],
+    )
+    header = _header_lines(script)
+    assert "#SBATCH --nodes=1" in header
+    assert "#SBATCH --mincpus=8" in header  # pool budget, once
+    assert "#SBATCH --ntasks=2" in header  # step task slots
+    # The multiplicative combination is gone: no per-task CPU claim and no
+    # representative-task mem leak in the header.
+    assert not any("--cpus-per-task" in ln for ln in header)
+    assert not any(ln == "#SBATCH --mem=8G" for ln in header)
+
+
+def test_implicit_pool_header_sums_peer_claims_once(tmp_path):
+    """Implicit topology: header totals the peers' claims exactly once."""
+    from slurm import Peer
+
+    spec = _make_spec(
+        Peer(_train.partial(cfg={})),  # 4 CPUs
+        Peer(_metrics, on_failure="continue"),  # 1 CPU
+    )
+    script = _render(spec, tmp_path)
+    header = _header_lines(script)
+    assert "#SBATCH --mincpus=5" in header  # 4 + 1, not (4+1) x ntasks
+    assert "#SBATCH --ntasks=2" in header
+    assert not any("--cpus-per-task" in ln for ln in header)
+
+
+def test_pool_features_and_exclude_nodes_are_emitted(tmp_path):
+    """Regression: Pool.features / exclude_nodes were silently dropped."""
+    from slurm import Peer, Pool, Topology
+
+    spec = _make_spec(
+        Peer(_metrics, on_failure="continue"),
+        topology=Topology(
+            pools={
+                "main": Pool(
+                    nodes=1,
+                    cpus_per_node=4,
+                    constraint="nvlink",
+                    features=("h100", "ib"),
+                    exclude_nodes=("node01", "node02"),
+                )
+            }
+        ),
+    )
+    script = _render(spec, tmp_path)
+    header = _header_lines(script)
+    assert "#SBATCH --constraint=nvlink&h100&ib" in header
+    assert "#SBATCH --exclude=node01,node02" in header
+
+
+def test_gpu_type_emits_gres_only(tmp_path):
+    """Typed GPUs render as --gres only — emitting --gpus-per-node too makes
+    some Slurm versions reject the pair as conflicting GPU specs."""
+    from slurm import Peer, Pool, Topology
+
+    spec = _make_spec(
+        Peer(_metrics, on_failure="continue"),
+        topology=Topology(
+            pools={"gpu": Pool(nodes=1, gpus_per_node=8, gpu_type="h100")}
+        ),
+    )
+    script = _render(spec, tmp_path)
+    header = _header_lines(script)
+    assert "#SBATCH --gres=gpu:h100:8" in header
+    assert not any("--gpus-per-node" in ln for ln in header)
+
+
+def test_untyped_gpus_still_emit_gpus_per_node(tmp_path):
+    from slurm import Peer, Pool, Topology
+
+    spec = _make_spec(
+        Peer(_metrics, on_failure="continue"),
+        topology=Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=4)}),
+    )
+    script = _render(spec, tmp_path)
+    header = _header_lines(script)
+    assert "#SBATCH --gpus-per-node=4" in header
+    assert not any("--gres=" in ln for ln in header)

@@ -158,27 +158,56 @@ def _sbatch_params_from_pool(
 
     Precedence (lowest to highest):
 
-    1. Task-decorator defaults from the leader/first peer (``time``, ``mem``,
-       ``cpus_per_task``, etc.) — same source the single-job renderer uses.
-    2. Pool shape (``nodes``, ``cpus_per_node``, ``mem_per_node``,
-       ``gpus_per_node``, ``partition``, ``qos``, ``account``, …).
+    1. Task-decorator defaults from the leader/first peer (``time``,
+       ``job_name``, etc.) — with per-task *resource* keys stripped: the
+       pool owns allocation sizing, and per-peer claims are emitted on each
+       step's ``srun`` line instead.
+    2. Pool shape (``nodes``, ``cpus_per_node`` → ``--mincpus``,
+       ``mem_per_node``, ``gpus_per_node``, ``partition``, ``qos``,
+       ``account``, …).
     3. Spec-level overrides (``time``, ``account``, ``qos``, ``reservation``,
        ``network``).
     4. Ad-hoc ``sbatch_overrides`` from the submission pipeline.
     """
-    params: Dict[str, Any] = dict(task_defaults)
+    # The pool is authoritative for allocation sizing. Per-task resource
+    # claims from the representative task's decorator must not leak into
+    # the batch header: combined with the summed ``ntasks`` below they
+    # multiply (ntasks × cpus-per-task), requesting N× the pool's budget.
+    # Per-peer claims belong on each step's srun line, not the header.
+    _PER_TASK_RESOURCE_KEYS = {
+        "cpus_per_task",
+        "mem",
+        "mem_per_cpu",
+        "gpus",
+        "gpus_per_task",
+        "gpus_per_node",
+        "gres",
+        "nodes",
+        "ntasks",
+        "ntasks_per_node",
+        "mincpus",
+    }
+    params: Dict[str, Any] = {
+        k: v for k, v in task_defaults.items() if k not in _PER_TASK_RESOURCE_KEYS
+    }
 
     # Pool shape — only fields that the pool declares explicitly.
     params["nodes"] = pool.nodes
     if pool.cpus_per_node is not None:
-        # Translate to per-task for compatibility with existing rendering
-        # helpers. Single-peer step = 1 task, so cpus_per_task equals the
-        # pool's per-node budget in Phase 2.
-        params["cpus_per_node"] = pool.cpus_per_node
+        # Per-node CPU floor. ``--mincpus`` sizes the allocation to the
+        # pool's per-node budget without multiplying by ntasks the way
+        # ``--cpus-per-task`` would (total CPUs = ntasks × cpus-per-task).
+        params["mincpus"] = pool.cpus_per_node
     if pool.mem_per_node is not None:
         params["mem"] = pool.mem_per_node
     if pool.gpus_per_node is not None and pool.gpus_per_node > 0:
-        params["gpus_per_node"] = pool.gpus_per_node
+        if pool.gpu_type is None:
+            params["gpus_per_node"] = pool.gpus_per_node
+        else:
+            # Typed GPUs are expressed via --gres only; also emitting
+            # --gpus-per-node makes some Slurm versions reject the pair as
+            # conflicting GPU specifications.
+            params["gres"] = f"gpu:{pool.gpu_type}:{pool.gpus_per_node}"
     if pool.partition is not None:
         params["partition"] = pool.partition
     if pool.qos is not None:
@@ -187,16 +216,24 @@ def _sbatch_params_from_pool(
         params["account"] = pool.account
     if pool.constraint is not None:
         params["constraint"] = pool.constraint
+    if pool.features:
+        # Features AND-join into the constraint expression (design §5.3).
+        joined = "&".join(pool.features)
+        existing_constraint = params.get("constraint")
+        params["constraint"] = (
+            f"{existing_constraint}&{joined}" if existing_constraint else joined
+        )
+    if pool.exclude_nodes:
+        params["exclude"] = ",".join(pool.exclude_nodes)
     if pool.reservation is not None:
         params["reservation"] = pool.reservation
     if pool.time is not None:
         params["time"] = pool.time
     if pool.exclusive:
         params["exclusive"] = None
-    if pool.gpu_type is not None and pool.gpus_per_node:
-        params["gres"] = f"gpu:{pool.gpu_type}:{pool.gpus_per_node}"
     for key, value in pool.gres.items():
-        # gres= already set above from gpu_type → validator forbids both.
+        # gres= may already be set from gpu_type → validator forbids both
+        # for the "gpu" key, so this only ever appends distinct resources.
         existing = params.get("gres")
         addition = f"{key}:{value}"
         params["gres"] = f"{existing},{addition}" if existing else addition
@@ -795,12 +832,6 @@ def render_parallel_script(
     sbatch_params = _sbatch_params_from_pool(
         pool, spec, task_defaults, sbatch_overrides, pool_name=pool_name
     )
-    # "cpus_per_node" is a Pool concept; flatten to cpus_per_task so the
-    # shared sbatch emitter handles it without special-casing.
-    if "cpus_per_node" in sbatch_params and "cpus_per_task" not in sbatch_params:
-        sbatch_params["cpus_per_task"] = sbatch_params.pop("cpus_per_node")
-    else:
-        sbatch_params.pop("cpus_per_node", None)
 
     # Top-level output/error point at the batch script's stdout; Slurm directs
     # the supervisor's output here.
