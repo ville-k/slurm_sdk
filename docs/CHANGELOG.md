@@ -20,8 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the whole surface is testable without a cluster. Multi-pool
   heterogeneous topologies, named-node placement, colocation, node
   discovery (`ctx.nodes` / `ctx.node`), `restart` / `callback` failure
-  policies, and port auto-reservation are deferred to a future release; see
-  `fable_plan.md` for the re-introduction roadmap
+  policies, and port auto-reservation are deferred to a future release
 - Two-node containerized Slurm test cluster (`slurm-test` controller +
   `slurm-worker`) for integration tests that require multiple compute
   nodes; CI brings both up and hard-fails when the worker doesn't

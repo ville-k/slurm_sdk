@@ -430,7 +430,7 @@ def update_peer_entry(
 ) -> dict:
     """Atomically read ``registry.json``, update one peer entry, rewrite.
 
-    The registry is the system-of-record for restart counts, outcomes, and
+    The registry is the system-of-record for outcomes and
     final exit codes. When the supervisor changes any of these it must go
     through this helper so concurrent readers never see a torn write.
 

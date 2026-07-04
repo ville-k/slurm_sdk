@@ -238,10 +238,8 @@ def parallel(
         :class:`ParallelJob` representing the submitted allocation.
 
     Raises:
-        TopologyError: If any peer/pool/placement/resource constraint is
+        TopologyError: If any peer/pool/name/resource constraint is
             violated. The error aggregates every problem found.
-        NotImplementedError: If the submission uses functionality that ships
-            in a later phase.
         RuntimeError: If called outside a :class:`Cluster` context.
 
     Example:
@@ -252,15 +250,16 @@ def parallel(
             ...     Peer(metrics, on_failure="continue"),
             ... )
 
-        Heterogeneous topology:
+        Explicit pool shape with a replica set:
 
             >>> job = parallel(
-            ...     Peer(learner.partial(cfg=cfg), pool="gpu"),
-            ...     Peer.replicas(simulator, count=64, pool="cpu",
-            ...                   args=lambda i: {"env_id": i}),
+            ...     Peer(learner.partial(cfg=cfg), leader=True),
+            ...     Peer.replicas(simulator, count=16,
+            ...                   args=lambda i: {"env_id": i},
+            ...                   on_failure="continue"),
             ...     topology=Topology(pools={
-            ...         "gpu": Pool(nodes=1, gpus_per_node=8, gpu_type="h100"),
-            ...         "cpu": Pool(nodes=4, cpus_per_node=96),
+            ...         "main": Pool(nodes=1, cpus_per_node=96,
+            ...                      gpus_per_node=8, gpu_type="h100"),
             ...     }),
             ... )
     """

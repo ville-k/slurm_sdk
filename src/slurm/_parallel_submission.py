@@ -6,7 +6,7 @@ per-peer ``prepare_packaging_strategy`` → ``merge_sbatch_options`` → render 
 :class:`ParallelJob` — so callers reading both files can map concepts
 one-to-one.
 
-Per-peer packaging (Phase 10): each peer can carry its own
+Per-peer packaging: each peer can carry its own
 ``@task(packaging=...)`` declaration — different container images, wheels,
 or ``"none"`` bare-node steps. Configs are deduped by canonical key so
 shared images only run ``prepare()`` once; ``"inherit"`` peers are resolved
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Per-peer packaging preparation (Phase 10)
+# Per-peer packaging preparation
 # ---------------------------------------------------------------------------
 
 
@@ -256,7 +256,7 @@ def _resolve_replica_items(peer: "Peer") -> List[Any]:
 def _backend_will_bypass_sbatch(cluster: "Cluster") -> bool:
     """Return ``True`` when :meth:`LocalBackend._should_bypass_sbatch` would fire.
 
-    Used by the submission pipeline to decide whether to run the Phase 12
+    Used by the submission pipeline to decide whether to run the
     local-host capacity check. The check must only run when the cluster's
     backend is an actual :class:`LocalBackend` that will launch subprocesses
     here — not when a test or integration harness has installed a fake /
@@ -365,8 +365,8 @@ def submit_parallel_spec(
     effective_sbatch_options, stdout_path, stderr_path = merge_sbatch_options(
         cluster, task_defaults, {}, pre_submission_id, target_job_dir
     )
-    # stdout/stderr are shared at the batch level in Phase 2; per-peer
-    # plumbing lives in Phase 3. Silence unused-locals lints.
+    # stdout/stderr are shared at the batch level; per-step capture is not
+    # implemented. Silence unused-locals lints.
     del stdout_path, stderr_path
 
     submit_begin_ctx = SubmitBeginContext(
@@ -485,10 +485,10 @@ def submit_parallel_spec(
     # shares the same Slurm job id so dispatching the completion callback
     # from multiple peer Jobs would produce duplicate
     # :class:`CompletedContext` events. The representative poller fires
-    # exactly once for the whole allocation (Phase 11 contract).
+    # exactly once for the whole allocation.
     representative_name = representative_peer.resolved_name
     # Every per-peer Job points at the shared batch stdout/stderr — Slurm
-    # writes one pair for the batch step; per-step capture is a future phase.
+    # writes one pair for the batch step; per-step capture is not implemented.
     peer_stdout = f"{target_job_dir}/slurm_{pre_submission_id}.out"
     peer_stderr = f"{target_job_dir}/slurm_{pre_submission_id}.err"
 
@@ -583,7 +583,7 @@ def submit_parallel_spec(
     # Emit end-of-submit callback using the representative peer's Job so
     # existing callback consumers (loggers, benchmarks) continue to work.
     # A ParallelJob emits exactly one :class:`SubmitEndContext` for the
-    # whole allocation (Phase 11 contract).
+    # whole allocation because every peer shares one job id.
     submit_end_ctx = SubmitEndContext(
         job=peer_handles[representative_peer.resolved_name].representative_job,
         job_id=str(base_job_id),
@@ -596,11 +596,10 @@ def submit_parallel_spec(
     cluster._dispatch_callbacks("on_end_submit_job_ctx", submit_end_ctx)
 
     # A ParallelJob allocates one Slurm job id shared by every peer/replica.
-    # Starting one poller per peer (as Phase 2 did) would have every poller
-    # query the same job id and emit duplicate ``on_completed_ctx`` events.
-    # Phase 11: register exactly one poller — on the representative peer —
-    # and the single ``CompletedContext`` that fires represents the whole
-    # allocation. Per-peer callback consumers that need richer detail still
+    # Starting one poller per peer would have every poller query the same
+    # job id and emit duplicate ``on_completed_ctx`` events, so we register
+    # exactly one poller — on the representative peer — and the single
+    # ``CompletedContext`` that fires represents the whole allocation. Per-peer callback consumers that need richer detail still
     # have access to ``parallel_job.peer_outcomes()`` and
     # ``parallel_job.snapshot()``.
     cluster._maybe_start_job_poller(

@@ -376,7 +376,7 @@ def _check_outer_options(spec: _ParallelSpec, problems: list[str]) -> None:
 def _check_packaging_inheritance(spec: _ParallelSpec, problems: list[str]) -> None:
     """Reject ``packaging="inherit"`` when there is nothing to inherit from.
 
-    The Phase 10 inheritance rule: a peer using ``packaging="inherit"``
+    The packaging inheritance rule: a peer using ``packaging="inherit"``
     clones the leader's packaging; when no peer is ``leader=True`` the
     first-declared peer's packaging becomes the base. An ``"inherit"`` peer
     that *is* the first peer (and there is no leader) has no source, so the
@@ -404,7 +404,7 @@ def _check_packaging_inheritance(spec: _ParallelSpec, problems: list[str]) -> No
 
 
 # ---------------------------------------------------------------------------
-# Local-backend capacity validation (Phase 12)
+# Local-backend capacity validation
 # ---------------------------------------------------------------------------
 
 

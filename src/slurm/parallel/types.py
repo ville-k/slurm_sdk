@@ -405,8 +405,10 @@ class Topology:
         if len(self.pools) > 1:
             raise ValueError(
                 "Multi-pool topologies (heterogeneous Slurm jobs) are not "
-                "supported in this release; declare a single Pool. "
-                "See fable_plan.md."
+                "supported in this release — declare a single Pool. To run "
+                "peers on different node shapes today, submit one "
+                "parallel() allocation per shape and coordinate them with "
+                "after= dependencies."
             )
 
         if self.default_pool is None:

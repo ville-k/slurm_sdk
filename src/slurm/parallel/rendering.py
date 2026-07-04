@@ -466,11 +466,9 @@ def _emit_peer_srun_command(
 
     result_filename = f"slurm_job_{peer_pre_id}_{RESULT_FILENAME}"
 
-    # Prefer the conventional name but symlink/copy via a second filename so
-    # humans reading the directory see ``peer_<name>_result.pkl`` too. For
-    # Phase 2 we simply use the conventional name — Job.get_result() pulls
-    # from it, and the human-friendly alias can arrive later without breaking
-    # the read path.
+    # We simply use the conventional name — Job.get_result() pulls from it,
+    # and a human-friendly ``peer_<name>_result.pkl`` alias could be added
+    # later without breaking the read path.
     del result_basename  # reserved for future peer_<name>_result.pkl aliasing
 
     # The peer task's SlurmTask — needed for module / function names and for
@@ -801,7 +799,7 @@ def render_parallel_script(
             renderer emits one heredoc per replica index. Required for every
             replica peer in ``spec``; raises otherwise.
         peer_packaging_strategies: Optional ``{peer_name: PackagingStrategy}``
-            giving each peer its own strategy (Phase 10 heterogeneous
+            giving each peer its own strategy (heterogeneous
             packaging). Strategies are deduped by identity so the rendered
             script emits setup/cleanup once per unique strategy instance.
             When omitted every peer falls back to ``packaging_strategy``.

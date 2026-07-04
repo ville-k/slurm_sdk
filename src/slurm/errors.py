@@ -363,8 +363,8 @@ class PeerFailureError(Exception):
 class CompositeJobError(Exception):
     """Raised by :meth:`ParallelJob.get_results` when fatal peer(s) died.
 
-    "Fatal" means the peer's configured ``on_failure`` resolved to ``"kill"``
-    — either directly or after a restart budget was exhausted. Peers with
+    "Fatal" means the peer's configured ``on_failure`` resolved to ``"kill"``.
+    Peers with
     ``on_failure="continue"`` do **not** contribute to this error; they surface
     via ``ParallelJob.peer_outcomes()`` as tolerated failures and leave a
     ``None`` in the results dict.

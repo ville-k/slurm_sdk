@@ -226,28 +226,6 @@ def parallel_worker_task(ctx: JobContext) -> dict:
     }
 
 
-@task(time="00:02:00", mem="100M")
-def parallel_flaky_peer_task(ctx: JobContext) -> int:
-    """Fail once, then succeed — exercises supervisor restart under real Slurm.
-
-    Uses ``ctx.shared_dir`` as persistent state across the restart (both
-    invocations share the allocation). First call writes the marker and
-    exits non-zero; second call sees the marker and returns the restart
-    count that observed it.
-    """
-    import sys
-
-    if ctx.shared_dir is None:
-        raise RuntimeError("ctx.shared_dir is not set — bootstrap did not seed it")
-    marker = ctx.shared_dir / "flaky_marker"
-    if not marker.exists():
-        marker.write_text("first-attempt")
-        sys.exit(7)
-    # Restart observed the marker → succeed. Return a small dict mirroring
-    # what the test will assert against.
-    return 99
-
-
 @task(time="00:01:00", mem="100M")
 def parallel_upstream_token() -> str:
     """Produce a token used as proof of an upstream dependency running first."""

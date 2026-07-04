@@ -160,9 +160,6 @@ class JobContext:
     output_dir: Optional[Path] = None
 
     # Topology identity — populated for peers launched via ``parallel(...)``.
-    # Further discovery surfaces (``nodes``, ``shared_dir``,
-    # ``shutdown_requested``) arrive in later phases; ``peers`` and
-    # ``announce()`` are wired in Phase 7.
     peer_name: Optional[str] = None
     peer_pool: Optional[str] = None
     # Replica identity — populated only when the peer is a replica set

@@ -51,10 +51,11 @@ class RunnerArgs:
     stderr_path: Optional[str] = None
     pre_submission_id: Optional[str] = None
 
-    # Parallel-step dispatch. ``step`` is a selector like ``"peer:<name>"`` or
-    # (future) ``"peer:<name>:by-taskid"``. For Phase 2 it is informational —
-    # args come from ``--args-file`` / ``--kwargs-file`` just like regular jobs,
-    # so the peer path reuses :func:`_load_regular_task_arguments`.
+    # Parallel-step dispatch. ``step`` is a selector like ``"peer:<name>"``
+    # or ``"peer:<name>:by-taskid"``. For plain peer steps it is
+    # informational — args come from ``--args-file`` / ``--kwargs-file``
+    # just like regular jobs, so the peer path reuses
+    # :func:`_load_regular_task_arguments`.
     step: Optional[str] = None
 
     @property
@@ -72,7 +73,7 @@ class RunnerArgs:
         """Return the peer name parsed from ``--step peer:<name>[:...]``."""
         if not self.is_peer_step:
             return None
-        # step format: "peer:<name>" or "peer:<name>:by-taskid" (Phase 5+)
+        # step format: "peer:<name>" or "peer:<name>:by-taskid"
         assert self.step is not None
         parts = self.step.split(":", 2)
         if len(parts) >= 2 and parts[1]:
@@ -409,11 +410,11 @@ def _load_peer_task_arguments(
 ) -> Tuple[tuple, dict]:
     """Load arguments for a peer step inside a ``parallel(...)`` allocation.
 
-    For Phase 2, peer args are serialized to per-peer files and passed via the
-    standard ``--args-file`` / ``--kwargs-file`` flags, so this helper reuses
-    :func:`_load_regular_task_arguments` — it exists so the dispatch branch in
-    :func:`load_task_arguments` matches the plan and to give later phases
-    (by-taskid replica loading, registry lookup) an obvious hook.
+    Peer args are serialized to per-peer files and passed via the standard
+    ``--args-file`` / ``--kwargs-file`` flags, so this helper reuses
+    :func:`_load_regular_task_arguments` — it exists to give the dispatch
+    branch in :func:`load_task_arguments` an obvious hook for peer-specific
+    argument loading (e.g. registry lookup) should it ever diverge.
 
     Paths are resolved relative to ``job_dir`` when not absolute, mirroring the
     array-item helper.

@@ -7,11 +7,11 @@ shared job directory. This module provides the aggregate surface that users
 interact with — lookup by peer name, aggregate ``wait()``, aggregate
 ``get_results()``.
 
-Phase 4 adds :class:`PeerOutcome` and :meth:`ParallelJob.peer_outcomes`
-so callers can inspect exactly what happened to each peer (success,
-tolerated failure, fatal, shut down by leader, never started).
-When any peer's outcome is ``"fatal"``, :meth:`ParallelJob.get_results`
-now raises :class:`CompositeJobError` aggregating every fatal peer's
+:class:`PeerOutcome` and :meth:`ParallelJob.peer_outcomes` let callers
+inspect exactly what happened to each peer (success, tolerated failure,
+fatal, shut down by leader, never started). When any peer's outcome is
+``"fatal"``, :meth:`ParallelJob.get_results` raises
+:class:`CompositeJobError` aggregating every fatal peer's
 :class:`PeerFailureError`.
 """
 
@@ -92,15 +92,13 @@ class ReplicaGroup:
     underlying per-replica :class:`Job` objects plus aggregate
     :meth:`wait` / :meth:`get_results`.
 
-    **Outcome atomicity (Phase 5 limitation):** the Slurm step that runs a
-    replica peer is one ``srun --ntasks=<count>`` — the step has one exit
-    code for all replicas. Phase 5 records that exit code as a *group*
-    outcome: if it is non-zero and the peer's ``on_failure`` policy resolves
-    to ``kill``, every replica's registry entry reads ``OUTCOME_FATAL``;
-    on success, every replica reads ``OUTCOME_SUCCESS``. Per-replica
-    granular outcome recording (one replica succeeds, another fails inside
-    the same step) requires the runner to write per-task outcome sentinels
-    to the registry and is deferred to Phase 7.
+    **Outcome granularity:** in Slurm mode the step that runs a replica
+    peer is one ``srun --ntasks=<count>`` — the step has one exit code for
+    all replicas, and that exit code is recorded as a *group* outcome in
+    every replica's registry entry (all ``OUTCOME_FATAL`` on a non-zero
+    exit when the peer's ``on_failure`` policy resolves to ``kill``, all
+    ``OUTCOME_SUCCESS`` on success). In LOCAL mode each replica runs as
+    its own subprocess, so outcomes are recorded per replica.
 
     Attributes:
         peer_name: Name of the replica peer.
@@ -490,7 +488,7 @@ class ParallelJob:
     def get_results(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         """Collect each peer's result into a ``{peer_name: result}`` dict.
 
-        Outcome-driven behavior (Phase 4):
+        Outcome-driven behavior:
 
         - ``success`` — peer's result is returned normally.
         - ``continue_on_failure`` — slot is ``None``; the tolerated failure
