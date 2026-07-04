@@ -79,3 +79,29 @@ def test_download_error_path(tmp_path, monkeypatch):
     )
     with pytest.raises(DownloadError):
         j.get_result()
+
+
+class NoBaseDirBackend:
+    """Backend that forgot to resolve job_base_dir (BackendBase default)."""
+
+    job_base_dir = ""
+
+    def submit_job(self, *args, **kwargs):  # pragma: no cover - never reached
+        return "1"
+
+    def get_queue(self):
+        return []
+
+    def get_cluster_info(self):
+        return {}
+
+
+def test_empty_job_base_dir_raises_instead_of_relative_paths():
+    """Regression: an unset backend job_base_dir used to silently produce
+    relative job dirs scattered into the CWD; now it fails loudly."""
+    c = make_test_cluster(
+        backend=NoBaseDirBackend(),
+        backend_type="NoBaseDirBackend",
+    )
+    with pytest.raises(SubmissionError, match="job_base_dir"):
+        c.submit(echo, packaging="none")(1)

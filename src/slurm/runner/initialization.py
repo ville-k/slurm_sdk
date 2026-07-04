@@ -51,10 +51,100 @@ class RunnerArgs:
     stderr_path: Optional[str] = None
     pre_submission_id: Optional[str] = None
 
+    # Parallel-step dispatch. ``step`` is a selector like ``"peer:<name>"``
+    # or ``"peer:<name>:by-taskid"``. For plain peer steps it is
+    # informational — args come from ``--args-file`` / ``--kwargs-file``
+    # just like regular jobs, so the peer path reuses
+    # :func:`_load_regular_task_arguments`.
+    step: Optional[str] = None
+
     @property
     def is_array_job(self) -> bool:
         """Check if this is an array job based on arguments."""
         return self.array_index is not None
+
+    @property
+    def is_peer_step(self) -> bool:
+        """Check if this invocation runs a peer step of a ``parallel(...)`` job."""
+        return self.step is not None and self.step.startswith("peer:")
+
+    @property
+    def peer_name(self) -> Optional[str]:
+        """Return the peer name parsed from ``--step peer:<name>[:...]``."""
+        if not self.is_peer_step:
+            return None
+        # step format: "peer:<name>" or "peer:<name>:by-taskid"
+        assert self.step is not None
+        parts = self.step.split(":", 2)
+        if len(parts) >= 2 and parts[1]:
+            return parts[1]
+        return None
+
+    @property
+    def is_replica_peer_step(self) -> bool:
+        """Whether this invocation is a ``:by-taskid`` replica dispatch.
+
+        Replica peers run one ``srun --ntasks=N`` step. Each of the N Slurm
+        tasks inside that step invokes the runner with the same
+        ``--step peer:<name>:by-taskid`` selector; the runner then reads
+        ``SLURM_PROCID`` to pick its replica's args file.
+        """
+        if not self.is_peer_step:
+            return False
+        assert self.step is not None
+        parts = self.step.split(":", 2)
+        return len(parts) == 3 and parts[2] == "by-taskid"
+
+
+_REPLICA_RESULT_MARKER = "_result.pkl"
+
+
+def apply_replica_output_suffix(output_file: str, replica_index: int) -> str:
+    """Rewrite ``output_file`` to include the replica index.
+
+    In ``:by-taskid`` mode, every replica in an ``srun --ntasks=N`` step
+    runs this same runner binary with the same ``--output-file`` arg. If
+    we did not rewrite the filename per replica, all N tasks would race
+    onto the same pickle and ``ParallelJob``'s per-replica ``Job`` handles
+    (built in ``_parallel_submission.py`` as ``<peer_pre_id>_<idx>``) would
+    read garbage — or, worse, read whatever the last replica to finish
+    happened to write.
+
+    The transform inserts ``_replica<index>`` immediately before the
+    canonical ``_result.pkl`` suffix so the emitted filename matches what
+    :meth:`Job._result_filename` expects (``_parallel_submission`` builds
+    replica pre-submission ids with the same ``_replica<index>`` segment).
+    The explicit marker keeps replica files disjoint from singleton peers
+    whose *name* happens to end in ``_<digit>``.
+
+    ``slurm_job_foo_result.pkl`` + ``replica=3`` →
+    ``slurm_job_foo_replica3_result.pkl``
+
+    Non-canonical filenames (shouldn't happen in practice but we guard
+    against them) get the index appended as a trailing segment so nothing
+    silently collides.
+    """
+    if not output_file.endswith(_REPLICA_RESULT_MARKER):
+        return f"{output_file}.replica{replica_index}"
+    base = output_file[: -len(_REPLICA_RESULT_MARKER)]
+    return f"{base}_replica{replica_index}{_REPLICA_RESULT_MARKER}"
+
+
+def resolve_replica_output_file(args: "RunnerArgs") -> str:
+    """Return the runner's per-replica ``output_file`` for replica steps.
+
+    Callers outside ``:by-taskid`` mode get ``args.output_file`` unchanged.
+    Replica dispatch reads ``SLURM_PROCID`` (set by Slurm per task) and
+    rewrites the path so each replica writes to its own pickle.
+    """
+    if not args.is_replica_peer_step:
+        return args.output_file
+    procid_raw = os.environ.get("SLURM_PROCID", "0")
+    try:
+        procid = int(procid_raw)
+    except ValueError:
+        procid = 0
+    return apply_replica_output_suffix(args.output_file, procid)
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
@@ -107,7 +197,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--pre-submission-id",
         help="SDK pre-submission identifier associated with this run",
     )
-
+    parser.add_argument(
+        "--step",
+        help=(
+            "Parallel-step selector, e.g. 'peer:<name>'. Set by the "
+            "supervisor for steps inside a parallel(...) allocation."
+        ),
+    )
     return parser
 
 
@@ -138,6 +234,7 @@ def parse_args(argv: Optional[list[str]] = None) -> RunnerArgs:
         stdout_path=args.stdout_path,
         stderr_path=args.stderr_path,
         pre_submission_id=args.pre_submission_id,
+        step=args.step,
     )
 
 
@@ -167,6 +264,18 @@ def log_startup_info(args: RunnerArgs) -> None:
         logger.debug("Module=%s, Function=%s", args.module, args.function)
         logger.debug("Array index=%s", args.array_index)
         logger.debug("Array items file=%s", args.array_items_file)
+        logger.debug("Output file=%s", args.output_file)
+        logger.debug("Callbacks file=%s", args.callbacks_file)
+    elif args.is_peer_step:
+        logger.info(
+            "Starting peer step execution (step=%s, peer=%s, replica=%s)",
+            args.step,
+            args.peer_name,
+            args.is_replica_peer_step,
+        )
+        logger.debug("Module=%s, Function=%s", args.module, args.function)
+        logger.debug("Args file=%s", args.args_file)
+        logger.debug("Kwargs file=%s", args.kwargs_file)
         logger.debug("Output file=%s", args.output_file)
         logger.debug("Callbacks file=%s", args.callbacks_file)
     else:
@@ -214,6 +323,10 @@ def load_task_arguments(
     """
     if args.is_array_job:
         return _load_array_task_arguments(args, job_dir)
+    elif args.is_replica_peer_step:
+        return _load_peer_replica_arguments(args, job_dir)
+    elif args.is_peer_step:
+        return _load_peer_task_arguments(args, job_dir)
     else:
         return _load_regular_task_arguments(args)
 
@@ -292,6 +405,125 @@ def _load_array_task_arguments(
     return task_args, task_kwargs
 
 
+def _load_peer_task_arguments(
+    args: RunnerArgs, job_dir: Optional[str] = None
+) -> Tuple[tuple, dict]:
+    """Load arguments for a peer step inside a ``parallel(...)`` allocation.
+
+    Peer args are serialized to per-peer files and passed via the standard
+    ``--args-file`` / ``--kwargs-file`` flags, so this helper reuses
+    :func:`_load_regular_task_arguments` — it exists to give the dispatch
+    branch in :func:`load_task_arguments` an obvious hook for peer-specific
+    argument loading (e.g. registry lookup) should it ever diverge.
+
+    Paths are resolved relative to ``job_dir`` when not absolute, mirroring the
+    array-item helper.
+
+    Args:
+        args: Parsed runner arguments.
+        job_dir: Job directory for resolving relative paths.
+
+    Returns:
+        Tuple of (task_args, task_kwargs).
+    """
+    from .._serialization import read_pickled
+
+    if args.args_file is None or args.kwargs_file is None:
+        raise RuntimeError(
+            "Peer step invocation is missing --args-file or --kwargs-file. "
+            "This is an internal error in the parallel rendering pipeline."
+        )
+
+    args_path = args.args_file
+    kwargs_path = args.kwargs_file
+    if job_dir:
+        if not os.path.isabs(args_path):
+            args_path = os.path.join(job_dir, args_path)
+        if not os.path.isabs(kwargs_path):
+            kwargs_path = os.path.join(job_dir, kwargs_path)
+
+    logger.debug(
+        "Loading peer args from %s, kwargs from %s (peer=%s)",
+        args_path,
+        kwargs_path,
+        args.peer_name,
+    )
+    task_args = cast(tuple, read_pickled(args_path))
+    task_kwargs = cast(dict, read_pickled(kwargs_path))
+    return task_args, task_kwargs
+
+
+def _load_peer_replica_arguments(
+    args: RunnerArgs, job_dir: Optional[str] = None
+) -> Tuple[tuple, dict]:
+    """Load per-replica args for a ``:by-taskid`` peer step dispatch.
+
+    The replica index is read from ``SLURM_PROCID`` (0..count-1 within the
+    step). The per-replica pickle lives at ``peer_<name>_replica<i>_args.pkl``
+    in ``$JOB_DIR`` — written once per replica at submission time so the
+    runner only has to select and deserialise.
+
+    The pickle contains a single value whose type drives unpacking: ``dict``
+    becomes ``kwargs``, ``tuple`` becomes positional args, anything else is
+    passed as the first positional arg (same shape as array-item unpacking).
+
+    Args:
+        args: Parsed runner arguments — ``step == "peer:<name>:by-taskid"``.
+        job_dir: Job directory for resolving relative paths.
+
+    Returns:
+        ``(task_args, task_kwargs)`` ready for ``execute_task``.
+    """
+    from .._serialization import read_pickled
+    from slurm.array_items import unpack_item_to_args_kwargs
+
+    peer_name = args.peer_name
+    if not peer_name:
+        raise RuntimeError(
+            "Replica peer step invocation has no peer name; the runner "
+            "expected '--step peer:<name>:by-taskid'."
+        )
+
+    # SLURM_PROCID is the per-step task id Slurm assigns to each of the N
+    # tasks spawned by ``srun --ntasks=N``. Tests that exercise the loader
+    # out-of-band can set ``SLURM_PROCID`` manually.
+    procid_raw = os.environ.get("SLURM_PROCID")
+    if procid_raw is None:
+        raise RuntimeError(
+            "Replica peer step invocation requires SLURM_PROCID to select "
+            "the replica's args file. The supervisor / parallel renderer "
+            "should set this via ``srun --ntasks=<count>``."
+        )
+    try:
+        replica_index = int(procid_raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"SLURM_PROCID={procid_raw!r} is not a valid integer."
+        ) from exc
+    if replica_index < 0:
+        raise RuntimeError(f"SLURM_PROCID={replica_index} must be non-negative.")
+
+    from slurm.parallel.plan import PEER_REPLICA_ARGS_BASENAME
+
+    args_filename = PEER_REPLICA_ARGS_BASENAME.format(
+        name=peer_name, index=replica_index
+    )
+    args_path = args_filename
+    if job_dir and not os.path.isabs(args_path):
+        args_path = os.path.join(job_dir, args_path)
+
+    logger.debug(
+        "Loading replica args for peer=%s replica=%s from %s",
+        peer_name,
+        replica_index,
+        args_path,
+    )
+
+    item = read_pickled(args_path)
+    task_args, task_kwargs = unpack_item_to_args_kwargs(item)
+    return task_args, task_kwargs
+
+
 def load_callbacks(callbacks_file: str) -> List[BaseCallback]:
     """Load callbacks from a pickled file.
 
@@ -335,4 +567,6 @@ __all__ = [
     "restore_sys_path",
     "load_task_arguments",
     "load_callbacks",
+    "_load_peer_task_arguments",
+    "_load_peer_replica_arguments",
 ]

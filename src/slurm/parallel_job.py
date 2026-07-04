@@ -1,0 +1,851 @@
+"""Result type for ``parallel(...)`` submissions.
+
+A ``ParallelJob`` represents one Slurm allocation running N peer tasks as
+sibling ``srun`` steps. Peers share the Slurm job id but each has its own
+per-peer ``Job`` object whose result file lives next to the others under the
+shared job directory. This module provides the aggregate surface that users
+interact with — lookup by peer name, aggregate ``wait()``, aggregate
+``get_results()``.
+
+:class:`PeerOutcome` and :meth:`ParallelJob.peer_outcomes` let callers
+inspect exactly what happened to each peer (success, tolerated failure,
+fatal, shut down by leader, never started). When any peer's outcome is
+``"fatal"``, :meth:`ParallelJob.get_results` raises
+:class:`CompositeJobError` aggregating every fatal peer's
+:class:`PeerFailureError`.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union
+
+from .errors import CompositeJobError, PeerFailureError
+from .job import JobSnapshot
+from .parallel.registry import (
+    OUTCOME_CONTINUE_ON_FAILURE,
+    OUTCOME_NOT_STARTED,
+    OUTCOME_SHUTDOWN_BY_LEADER,
+    OUTCOME_SUCCESS,
+    read_registry,
+)
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .array_job import ArrayJob
+    from .cluster import Cluster
+    from .job import Job
+    from .parallel.types import _ParallelSpec
+
+
+@dataclass(frozen=True)
+class PeerOutcome:
+    """Terminal outcome of a single peer, derived from the supervisor's registry.
+
+    Attributes:
+        status: One of the outcome strings:
+
+            - ``"success"`` — exited 0 on first launch.
+            - ``"continue_on_failure"`` — failed but ``on_failure="continue"``
+              kept the group alive; the peer's result is ``None``.
+            - ``"fatal"`` — peer's failure aborted the group
+              (``on_failure="kill"``).
+            - ``"shutdown_by_leader"`` — another peer (leader or fatal) won
+              the shutdown race and this peer received SIGTERM before it
+              could complete.
+            - ``"not_started"`` — scheduled but never launched. Currently
+              only possible if an upstream failure aborted the allocation
+              before this peer's Popen fired.
+        exit_code: Final process exit code, or ``None`` when the peer never
+            ran.
+        message: Free-form diagnostic string from the supervisor. ``None``
+            for plain success.
+    """
+
+    status: str
+    exit_code: Optional[int]
+    message: Optional[str] = None
+
+
+def _outcome_from_entry(entry: Dict[str, Any]) -> "PeerOutcome":
+    """Build a :class:`PeerOutcome` from a raw registry entry dict."""
+    outcome_str = entry.get("outcome") or OUTCOME_NOT_STARTED
+    exit_code = entry.get("final_exit_code")
+    if exit_code is not None:
+        exit_code = int(exit_code)
+    message = entry.get("message")
+    return PeerOutcome(
+        status=outcome_str,
+        exit_code=exit_code,
+        message=message,
+    )
+
+
+class ReplicaGroup:
+    """Handle for the replicas of a single replica peer.
+
+    Returned by ``ParallelJob["<name>"]`` when ``<name>`` refers to a peer
+    created via :meth:`Peer.replicas`. Exposes list-like access to the
+    underlying per-replica :class:`Job` objects plus aggregate
+    :meth:`wait` / :meth:`get_results`.
+
+    **Outcome granularity:** in Slurm mode the step that runs a replica
+    peer is one ``srun --ntasks=<count>`` — the step has one exit code for
+    all replicas, and that exit code is recorded as a *group* outcome in
+    every replica's registry entry (all ``OUTCOME_FATAL`` on a non-zero
+    exit when the peer's ``on_failure`` policy resolves to ``kill``, all
+    ``OUTCOME_SUCCESS`` on success). In LOCAL mode each replica runs as
+    its own subprocess, so outcomes are recorded per replica.
+
+    Attributes:
+        peer_name: Name of the replica peer.
+        replica_jobs: Ordered list of per-replica :class:`Job` objects.
+    """
+
+    def __init__(self, peer_name: str, replica_jobs: List["Job"]) -> None:
+        if not replica_jobs:
+            raise ValueError(
+                f"ReplicaGroup for peer {peer_name!r} must contain at least "
+                "one replica Job"
+            )
+        self.peer_name = peer_name
+        self._jobs: List["Job"] = list(replica_jobs)
+
+    @property
+    def replica_jobs(self) -> List["Job"]:
+        """Shallow copy of the per-replica Job list (ordered by index)."""
+        return list(self._jobs)
+
+    def __len__(self) -> int:
+        return len(self._jobs)
+
+    def __iter__(self) -> Iterator["Job"]:
+        return iter(self._jobs)
+
+    def __getitem__(self, index: int) -> "Job":
+        return self._jobs[index]
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Wait for every replica to reach a terminal state.
+
+        Returns ``True`` if every replica completed within ``timeout``,
+        ``False`` otherwise. Replicas share one Slurm job id so they
+        terminate together — this loops for symmetry with
+        :meth:`ParallelJob.wait`.
+        """
+        for job in self._jobs:
+            if not job.wait(timeout=timeout):
+                return False
+        return True
+
+    def get_results(self, timeout: Optional[float] = None) -> List[Any]:
+        """Collect each replica's result in index order.
+
+        Raises whatever the per-replica :meth:`Job.get_result` raises — this
+        surface is deliberately thin. For outcome-aware reading (fatal vs.
+        shutdown-by-leader vs. continue) use
+        :meth:`ParallelJob.get_results`, which consults the registry.
+        """
+        return [job.get_result(timeout=timeout) for job in self._jobs]
+
+    def __repr__(self) -> str:
+        return f"ReplicaGroup(peer={self.peer_name!r}, count={len(self._jobs)})"
+
+
+@dataclass(frozen=True)
+class _ParallelPeerHandle:
+    """Internal owner of one peer's representative and replica jobs."""
+
+    name: str
+    # The sole callback/poller target for this peer. Moving lifecycle hooks off
+    # this Job without updating submission wiring reintroduces duplicate
+    # CompletedContext events for one shared allocation.
+    representative_job: "Job"
+    replica_jobs: Tuple["Job", ...] = ()
+
+    @property
+    def is_replica_set(self) -> bool:
+        return len(self.replica_jobs) > 0
+
+    @property
+    def ordered_jobs(self) -> Tuple["Job", ...]:
+        if self.replica_jobs:
+            return self.replica_jobs
+        return (self.representative_job,)
+
+    def replica_group(self) -> ReplicaGroup:
+        if not self.replica_jobs:
+            raise TypeError(
+                f"Peer {self.name!r} is not a replica set — use job[{self.name!r}] "
+                "without a replica index."
+            )
+        return ReplicaGroup(self.name, list(self.replica_jobs))
+
+
+class ParallelJob:
+    """Aggregate handle for a submitted ``parallel(...)`` allocation.
+
+    Every peer resolves to a :class:`Job` that shares the base Slurm job id but
+    points at its own per-peer result file. Access a peer with
+    ``job["<peer_name>"]`` and read its result with ``.get_result()``.
+    ``get_results()`` is the idiomatic aggregate — it returns a dict keyed by
+    peer name.
+
+    Deliberate non-inheritance from :class:`Job`: a parallel job has no single
+    return value, and pretending otherwise would force ``get_result()`` to pick
+    a peer arbitrarily. The plural nature is surfaced at the type level, the
+    same way :class:`ArrayJob` does.
+
+    Attributes:
+        cluster: The :class:`Cluster` the job was submitted through.
+        job_id: The base Slurm job id (shared by every peer step).
+        peer_jobs: Mapping from peer name to the per-peer :class:`Job`.
+
+    Example:
+        >>> job = parallel(
+        ...     ocean.partial(cfg=ocean_cfg),
+        ...     atmo.partial(cfg=atmo_cfg),
+        ... )
+        >>> job.wait()
+        >>> results = job.get_results()
+        >>> ocean_r, atmo_r = results["ocean"], results["atmo"]
+    """
+
+    def __init__(
+        self,
+        cluster: "Cluster",
+        job_id: str,
+        peer_jobs: Optional[Dict[str, "Job"]],
+        spec: "_ParallelSpec",
+        target_job_dir: Optional[str] = None,
+        peer_replica_jobs: Optional[Dict[str, List["Job"]]] = None,
+        peer_handles: Optional[Dict[str, _ParallelPeerHandle]] = None,
+    ) -> None:
+        handles = self._coerce_peer_handles(peer_jobs, peer_replica_jobs, peer_handles)
+        if not handles:
+            raise ValueError("ParallelJob requires at least one peer job")
+        self.cluster = cluster
+        self._job_id = job_id
+        self._peer_handles: Dict[str, _ParallelPeerHandle] = handles
+        self._spec = spec
+        # Snapshot the target job dir so ``peer_outcomes`` can find
+        # ``registry.json`` even if the per-peer Jobs get re-parented later.
+        self._target_job_dir = target_job_dir
+
+    @staticmethod
+    def _coerce_peer_handles(
+        peer_jobs: Optional[Dict[str, "Job"]],
+        peer_replica_jobs: Optional[Dict[str, List["Job"]]],
+        peer_handles: Optional[Dict[str, _ParallelPeerHandle]],
+    ) -> Dict[str, _ParallelPeerHandle]:
+        """Normalise constructor inputs into the authoritative handle map."""
+        if peer_handles is not None:
+            return dict(peer_handles)
+
+        if not peer_jobs:
+            return {}
+
+        replica_map = {
+            name: tuple(jobs) for name, jobs in (peer_replica_jobs or {}).items()
+        }
+        handles: Dict[str, _ParallelPeerHandle] = {}
+        for name, representative_job in peer_jobs.items():
+            handles[name] = _ParallelPeerHandle(
+                name=name,
+                representative_job=representative_job,
+                replica_jobs=replica_map.get(name, ()),
+            )
+        return handles
+
+    @property
+    def job_id(self) -> str:
+        """The base Slurm job id (shared by every peer step)."""
+        return self._job_id
+
+    @property
+    def peer_jobs(self) -> Dict[str, "Job"]:
+        """Read-only mapping from peer name to per-peer :class:`Job`."""
+        return {
+            name: handle.representative_job
+            for name, handle in self._peer_handles.items()
+        }
+
+    def __iter__(self):
+        return iter(handle.representative_job for handle in self._peer_handles.values())
+
+    def __len__(self) -> int:
+        return len(self._peer_handles)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._peer_handles
+
+    def __getitem__(
+        self, key: Union[str, Tuple[str, int]]
+    ) -> Union["Job", "ReplicaGroup"]:
+        """Look up a peer by name, or a specific replica by ``(name, index)``.
+
+        * ``job["name"]`` for a singleton peer → the peer's :class:`Job`.
+        * ``job["name"]`` for a replica peer → a :class:`ReplicaGroup`
+          wrapping the per-replica Jobs (iterate / index / ``.get_results()``).
+        * ``job["name", i]`` for a replica peer → the individual :class:`Job`
+          at replica index ``i``.
+
+        Raises:
+            KeyError: If ``name`` is not a peer in this allocation, or the
+                replica index is out of range.
+            TypeError: If ``(name, i)`` is passed for a non-replica peer.
+        """
+        if isinstance(key, tuple):
+            if (
+                len(key) != 2
+                or not isinstance(key[0], str)
+                or not isinstance(key[1], int)
+            ):
+                raise KeyError(
+                    "ParallelJob tuple indexing requires (peer_name, "
+                    f"replica_index); got {key!r}"
+                )
+            name, idx = key
+            handle = self._peer_handles.get(name)
+            if handle is None:
+                available = ", ".join(sorted(self._peer_handles.keys()))
+                raise KeyError(
+                    f"ParallelJob has no peer {name!r}. Available peers: {available}"
+                )
+            if not handle.is_replica_set:
+                raise TypeError(
+                    f"Peer {name!r} is not a replica set — use "
+                    f'job["{name}"] without an index.'
+                )
+            jobs = handle.replica_jobs
+            if idx < 0 or idx >= len(jobs):
+                raise KeyError(
+                    f"Replica index {idx} out of range for peer {name!r} "
+                    f"(count={len(jobs)})"
+                )
+            return jobs[idx]
+
+        # Plain string key — singleton Job or ReplicaGroup.
+        name = key
+        handle = self._peer_handles.get(name)
+        if handle is None:
+            available = ", ".join(sorted(self._peer_handles.keys()))
+            raise KeyError(
+                f"ParallelJob has no peer {name!r}. Available peers: {available}"
+            )
+        if handle.is_replica_set:
+            return handle.replica_group()
+        return handle.representative_job
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Block until the allocation has reached a terminal state.
+
+        Every peer/replica Job shares the same Slurm job id — the allocation
+        is one sbatch — so waiting on a single representative Job is
+        equivalent to waiting on all of them, without issuing one scheduler
+        query per peer.
+
+        Args:
+            timeout: Optional wall-clock timeout in seconds.
+
+        Returns:
+            ``True`` if the allocation completed successfully, ``False`` if
+            it failed, was cancelled, or the timeout elapsed — the same
+            contract as :meth:`Job.wait`.
+        """
+        first_handle = next(iter(self._peer_handles.values()), None)
+        if first_handle is None:
+            return True
+        return first_handle.representative_job.wait(timeout=timeout)
+
+    def _registry_path(self) -> Optional[str]:
+        """Locate ``registry.json`` for this job, preferring stored metadata.
+
+        We cache ``target_job_dir`` on construction because some Job objects
+        overload ``_target_job_dir`` at runtime (workflow driver) — reading
+        from the peer Job would give us a moving target.
+        """
+        if self._target_job_dir:
+            return os.path.join(self._target_job_dir, "registry.json")
+        # Fall back to the first peer's job directory.
+        first_job = next(
+            handle.representative_job for handle in self._peer_handles.values()
+        )
+        tdir = getattr(first_job, "_target_job_dir", None) or getattr(
+            first_job, "target_job_dir", None
+        )
+        if not tdir:
+            return None
+        return os.path.join(tdir, "registry.json")
+
+    def _read_registry_via_backend(self) -> Dict[str, Any]:
+        """Load ``registry.json`` for this allocation, local or remote.
+
+        Local-mode submissions keep the registry on the same filesystem as
+        the client, so a bare ``os.path.exists`` + ``read_registry`` does
+        the right thing. SSH-backed clusters put it on the remote host;
+        the client must go through the backend (``download_file`` or
+        ``read_file``) to see it. Returns an empty dict on any read
+        failure — callers treat "no registry" as "every peer is
+        ``not_started``" which is the honest pre-run / mid-run answer.
+        """
+        reg_path = self._registry_path()
+        if not reg_path:
+            return {}
+
+        backend = getattr(self.cluster, "backend", None) if self.cluster else None
+        is_remote = False
+        if backend is not None:
+            try:
+                is_remote = bool(backend.is_remote())
+            except Exception:  # pragma: no cover - defensive
+                is_remote = False
+
+        if not is_remote:
+            if os.path.exists(reg_path):
+                try:
+                    return read_registry(reg_path)
+                except (OSError, ValueError):
+                    return {}
+            return {}
+
+        # Remote backend — the registry lives on the cluster's filesystem.
+        # Stage it into a tempfile and parse locally. ``download_file`` is
+        # the one backend surface guaranteed to work for both SSH and
+        # (future) other remote transports. ``backend`` was already
+        # non-None above (is_remote returned True), but ty can't narrow
+        # through the try/except, so guard explicitly.
+        import tempfile
+
+        if backend is None:  # pragma: no cover - ty narrowing guard
+            return {}
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix="_registry.json", delete=False
+            ) as tmp:
+                local_path = tmp.name
+            try:
+                backend.download_file(reg_path, local_path)
+                return read_registry(local_path)
+            finally:
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
+        except (OSError, ValueError, FileNotFoundError):
+            return {}
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "peer_outcomes() could not download registry from %s: %s",
+                reg_path,
+                exc,
+            )
+            return {}
+
+    def peer_outcomes(self) -> Dict[str, PeerOutcome]:
+        """Return ``{peer_name: PeerOutcome}`` for every peer in the job.
+
+        Outcomes are derived from ``registry.json``, which the supervisor
+        updates atomically as peers exit. Peers whose registry entry has
+        no ``outcome`` field (because the supervisor is mid-run, or the
+        registry never materialised) map to ``"not_started"`` so callers
+        always see a fully-populated dict.
+
+        Replica peers are flattened to per-replica keys — a replica peer
+        named ``worker`` with ``count=3`` produces ``worker[0]``,
+        ``worker[1]``, ``worker[2]`` in the returned dict. That matches how
+        :class:`PeerFailureError` renders replica failures (``peer[i]``)
+        and lets callers write uniform handling against
+        ``peer_outcomes().values()``.
+
+        Returns:
+            A mapping with one entry per singleton peer and one entry per
+            replica of every replica peer, using ``<name>[<i>]`` keys for
+            replicas.
+        """
+        registry: Dict[str, Any] = self._read_registry_via_backend()
+
+        peers_section = registry.get("peers", {})
+        outcomes: Dict[str, PeerOutcome] = {}
+        for peer in self._spec.peers:
+            name = peer.resolved_name
+            entries = peers_section.get(name, [])
+            if peer.is_replica_set:
+                for replica_index in range(peer.count):
+                    entry = (
+                        entries[replica_index] if replica_index < len(entries) else {}
+                    )
+                    outcomes[f"{name}[{replica_index}]"] = _outcome_from_entry(entry)
+            else:
+                entry = entries[0] if entries else {}
+                outcomes[name] = _outcome_from_entry(entry)
+        return outcomes
+
+    def get_results(self, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """Collect each peer's result into a ``{peer_name: result}`` dict.
+
+        Outcome-driven behavior:
+
+        - ``success`` — peer's result is returned normally.
+        - ``continue_on_failure`` — slot is ``None``; the tolerated failure
+          does not abort ``get_results``.
+        - ``shutdown_by_leader`` — slot is ``None`` (the peer never finished
+          writing a result, but the group is not in an error state).
+        - ``fatal`` / ``not_started`` — contributes a :class:`PeerFailureError`
+          to a :class:`CompositeJobError` raised at the end. Every fatal peer
+          is reported, so the user sees the full failure surface.
+
+        Replica peers (``count > 1``) produce a ``list`` value of length
+        ``count``, one entry per replica. Singleton peers produce a scalar
+        value. The top-level dict mixes both when a job has both shapes.
+
+        Blocks until the allocation reaches a terminal state before reading
+        outcomes — a still-running peer must not be misread as
+        ``not_started`` just because a sibling already recorded its outcome.
+        The registry is then the system-of-record for per-peer verdicts:
+        a peer whose outcome is ``"success"`` has its result fetched even
+        when the shared Slurm job state is FAILED because a *different*
+        peer died. When no registry is available (tests using mocks that
+        bypass the supervisor), this falls back to per-job ``get_result``:
+        exceptions propagate for ``on_failure="kill"`` peers and map to
+        ``None`` for ``on_failure="continue"`` peers.
+
+        Args:
+            timeout: Optional seconds to wait for the allocation to reach a
+                terminal state before collecting.
+
+        Returns:
+            Dict keyed by peer name. Scalar value for singleton peers, list
+            value (length = replica count) for replica peers.
+
+        Raises:
+            TimeoutError: If the allocation is still running when ``timeout``
+                elapses.
+            CompositeJobError: If any peer outcome is ``"fatal"`` or
+                ``"not_started"``, or a successful peer's result cannot be
+                fetched.
+        """
+        first_handle = next(iter(self._peer_handles.values()), None)
+        if first_handle is not None:
+            self.wait(timeout=timeout)
+            if not first_handle.representative_job.is_completed():
+                raise TimeoutError(
+                    f"Parallel job {self.job_id} did not reach a terminal "
+                    f"state within timeout={timeout!r}; results are not "
+                    "collectable yet."
+                )
+
+        outcomes = self.peer_outcomes()
+        has_registry_data = any(
+            outcome.status != OUTCOME_NOT_STARTED for outcome in outcomes.values()
+        )
+
+        results: Dict[str, Any] = {}
+        failures: list[PeerFailureError] = []
+
+        for peer in self._spec.peers:
+            peer_name = peer.resolved_name
+            if peer.is_replica_set:
+                handle = self._peer_handles.get(peer_name)
+                replica_jobs = list(handle.replica_jobs) if handle is not None else []
+                replica_results: List[Any] = []
+                for replica_index in range(peer.count):
+                    outcome = outcomes.get(f"{peer_name}[{replica_index}]")
+                    rjob = (
+                        replica_jobs[replica_index]
+                        if replica_index < len(replica_jobs)
+                        else None
+                    )
+                    replica_results.append(
+                        self._collect_result(
+                            peer,
+                            rjob,
+                            outcome,
+                            has_registry_data,
+                            timeout,
+                            failures,
+                            replica_index=replica_index,
+                        )
+                    )
+                results[peer_name] = replica_results
+            else:
+                job = self._peer_handles[peer_name].representative_job
+                outcome = outcomes.get(peer_name)
+                results[peer_name] = self._collect_result(
+                    peer, job, outcome, has_registry_data, timeout, failures
+                )
+
+        if failures:
+            raise CompositeJobError(failures)
+
+        return results
+
+    def _collect_result(
+        self,
+        peer: Any,
+        job: Optional["Job"],
+        outcome: Optional[PeerOutcome],
+        has_registry_data: bool,
+        timeout: Optional[float],
+        failures: "list[PeerFailureError]",
+        replica_index: Optional[int] = None,
+    ) -> Any:
+        """Resolve one peer or replica result slot (see :meth:`get_results`).
+
+        ``replica_index`` is ``None`` for singleton peers and the 0-based
+        index for replica-set members; it only affects failure reporting.
+        ``job`` may be ``None`` for a replica whose Job handle is missing
+        (singletons always pass a real Job).
+        """
+        if has_registry_data and outcome is not None:
+            if outcome.status == OUTCOME_SUCCESS:
+                if job is None:
+                    return None
+                # The registry verdict is authoritative: fetch without the
+                # job-status success gate, because the shared Slurm job id
+                # reads FAILED whenever any *other* peer died fatally.
+                try:
+                    return job._fetch_result()
+                except Exception as exc:
+                    failures.append(
+                        PeerFailureError(
+                            peer_name=peer.resolved_name,
+                            replica_index=replica_index,
+                            exit_code=0,
+                            message=(
+                                "peer succeeded but its result could not be "
+                                f"fetched: {exc}"
+                            ),
+                        )
+                    )
+                    return None
+            if outcome.status in (
+                OUTCOME_CONTINUE_ON_FAILURE,
+                OUTCOME_SHUTDOWN_BY_LEADER,
+            ):
+                return None
+            failures.append(
+                PeerFailureError(
+                    peer_name=peer.resolved_name,
+                    replica_index=replica_index,
+                    exit_code=outcome.exit_code
+                    if outcome.exit_code is not None
+                    else -1,
+                    message=outcome.message or f"peer outcome: {outcome.status}",
+                )
+            )
+            return None
+
+        # Fallback path — no registry (mock-backed tests): rely on each
+        # job's own gated get_result.
+        if job is None:
+            return None
+        try:
+            return job.get_result(timeout=timeout)
+        except Exception:
+            if peer.on_failure == "continue":
+                return None
+            raise
+
+    def snapshot(
+        self, tail_lines: int = 80
+    ) -> Dict[str, Union[JobSnapshot, List[JobSnapshot]]]:
+        """Capture a per-peer :class:`JobSnapshot` for this allocation.
+
+        The returned dict carries one entry per peer:
+
+        * Singleton peer → ``JobSnapshot`` (the peer's one Job).
+        * Replica peer → ``list[JobSnapshot]`` (one entry per replica, in
+          index order).
+
+        Every snapshot is a point-in-time read of the underlying per-peer
+        :class:`Job`. Because every peer shares the same Slurm job id, the
+        ``state`` / ``exit_code`` / ``is_terminal`` fields will largely
+        agree across peers — the per-peer layer is meaningful for
+        ``stdout_tail`` / ``stderr_tail`` since each peer writes its own
+        step output, and for ``result_path`` accounting.
+
+        Args:
+            tail_lines: Forwarded to each underlying :meth:`Job.snapshot`
+                — the number of trailing stdout/stderr lines each snapshot
+                captures. Defaults to 80.
+
+        Returns:
+            Dict keyed by peer name. Replica peers map to a list of
+            snapshots indexed by replica position.
+        """
+        out: Dict[str, Union[JobSnapshot, List[JobSnapshot]]] = {}
+        for peer in self._spec.peers:
+            name = peer.resolved_name
+            if peer.is_replica_set:
+                handle = self._peer_handles.get(name)
+                replica_jobs = list(handle.replica_jobs) if handle is not None else []
+                out[name] = [
+                    job.snapshot(tail_lines=tail_lines) for job in replica_jobs
+                ]
+            else:
+                job = self._peer_handles[name].representative_job
+                out[name] = job.snapshot(tail_lines=tail_lines)
+        return out
+
+    @property
+    def leader_result(self) -> Any:
+        """Return the single ``leader=True`` peer's result.
+
+        Shorthand for the common "leader + helpers" pattern — the user
+        only cares about the leader's return value and treats helpers as
+        supporting services whose results are ``None``. Only legal when
+        the allocation has exactly one ``leader=True`` peer.
+
+        Returns:
+            The leader peer's deserialised return value.
+
+        Raises:
+            RuntimeError: If the allocation has zero or more than one
+                ``leader=True`` peer. The error message spells out the
+                actionable fix ("declare one leader" / "use
+                ``get_results()``").
+        """
+        leaders = [peer for peer in self._spec.peers if peer.leader]
+        if not leaders:
+            raise RuntimeError(
+                "ParallelJob.leader_result requires exactly one leader peer, "
+                "but none of the peers declared leader=True. Mark one peer "
+                "with Peer(..., leader=True) or call get_results() to collect "
+                "every peer's return value explicitly."
+            )
+        if len(leaders) > 1:
+            names = ", ".join(p.resolved_name for p in leaders)
+            raise RuntimeError(
+                "ParallelJob.leader_result is ambiguous: multiple leader "
+                f"peers declared (leader=True on {names}). A parallel "
+                "allocation should have at most one leader. Use "
+                "get_results() to collect every peer explicitly."
+            )
+        leader = leaders[0]
+        if leader.is_replica_set:
+            # A replica peer can't be a leader — the spec validator should
+            # have caught this, but belt-and-braces.
+            raise RuntimeError(
+                f"Leader peer {leader.resolved_name!r} is declared as a "
+                "replica set. A leader should be a singleton peer."
+            )
+        return self._peer_handles[leader.resolved_name].representative_job.get_result()
+
+    def after(self, *deps: "Job | ArrayJob | ParallelJob") -> "ParallelJob":
+        """Return a new :class:`ParallelJob` that waits for *deps* first.
+
+        Propagates ``#SBATCH --dependency=afterok:<id>[:<id>...]`` onto
+        the re-submitted allocation so Slurm only schedules the parallel
+        allocation after every upstream job has completed successfully.
+
+        Because :func:`parallel` submits eagerly, ``.after()`` cancels the
+        currently-queued allocation and submits a fresh one with the
+        dependency string wired in. Call ``.after()`` promptly after
+        ``parallel(...)`` — before any peer has started running — so the
+        cancel is a no-op in practice.
+
+        Args:
+            *deps: One or more upstream handles. Accepts :class:`Job`,
+                :class:`ArrayJob`, or :class:`ParallelJob`. ArrayJob is
+                flattened to its per-item Jobs; ParallelJob contributes
+                its base job id (every peer shares it, so one id per
+                allocation suffices).
+
+        Returns:
+            A new :class:`ParallelJob` whose Slurm job id is distinct
+            from the original. The original handle is cancelled.
+
+        Raises:
+            TypeError: If any element of ``deps`` is not a Job /
+                ArrayJob / ParallelJob.
+            RuntimeError: If the cluster is unavailable (shouldn't happen
+                in practice — the original submission required one).
+        """
+        from .array_job import ArrayJob
+        from .job import Job
+
+        if not deps:
+            # ``.after()`` with no args is ambiguous (do you want to
+            # re-submit with no deps? keep the original?). Fail loudly
+            # rather than silently no-op.
+            raise TypeError(
+                "ParallelJob.after() requires at least one upstream Job, "
+                "ArrayJob, or ParallelJob to depend on."
+            )
+
+        dep_ids: List[str] = []
+        for dep in deps:
+            if isinstance(dep, ParallelJob):
+                dep_ids.append(dep.job_id)
+            elif isinstance(dep, ArrayJob):
+                if not dep._submitted:
+                    dep._submit()
+                dep_ids.extend(j.id for j in dep._jobs)
+            elif isinstance(dep, Job):
+                dep_ids.append(dep.id)
+            else:
+                raise TypeError(
+                    "ParallelJob.after() expects Job, ArrayJob, or "
+                    f"ParallelJob arguments, got {type(dep).__name__}"
+                )
+
+        # Cancel the original allocation so we don't leak a second
+        # sbatch. Slurm's scancel on a still-pending job is free; if it
+        # has already started (unlikely for a fresh parallel() call),
+        # the original side-effects are the user's responsibility.
+        try:
+            self.cancel()
+        except Exception:
+            # Cancellation is best-effort — an unreachable scheduler
+            # will surface on the re-submit anyway.
+            pass
+
+        if self.cluster is None:
+            raise RuntimeError(
+                "ParallelJob.after() cannot re-submit because the "
+                "original handle has no cluster reference. This should "
+                "not happen for jobs created via parallel(...)."
+            )
+
+        from ._parallel_submission import submit_parallel_spec
+
+        return submit_parallel_spec(self.cluster, self._spec, dependency_ids=dep_ids)
+
+    def cancel(self) -> bool:
+        """Cancel the allocation via ``scancel``.
+
+        Every peer Job is constructed with the allocation's shared base
+        Slurm id. We iterate every peer handle's Job ids, collapse
+        duplicates, and call ``scancel`` once per unique id — in practice
+        one call per submission. Returns ``True`` iff every cancellation
+        succeeded.
+
+        In-flight allocations where the supervisor is already running
+        also get the cascade from inside the batch script; calling
+        ``cancel()`` before the supervisor starts is the more common
+        path (e.g. ``ParallelJob.after(...)`` re-submits with a
+        dependency and cancels the original).
+        """
+        seen_ids: set = set()
+        results: List[bool] = []
+        for handle in self._peer_handles.values():
+            for job in handle.ordered_jobs:
+                jid = getattr(job, "_job_id", None) or getattr(job, "id", None)
+                if jid is None or jid in seen_ids:
+                    continue
+                seen_ids.add(jid)
+                try:
+                    results.append(bool(job.cancel()))
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("cancel of %s failed: %s", jid, exc)
+                    results.append(False)
+        return all(results) if results else False
+
+    def __repr__(self) -> str:
+        peers = ", ".join(sorted(self._peer_handles.keys()))
+        return f"ParallelJob(job_id={self._job_id!r}, peers=[{peers}])"

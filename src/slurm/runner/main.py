@@ -27,6 +27,8 @@ from slurm.runtime import (
     _bind_job_context,
     _function_wants_job_context,
     current_job_context,
+    install_shutdown_handler,
+    resolve_current_hostname,
 )
 from slurm.workflow import WorkflowContext
 
@@ -37,6 +39,7 @@ from .initialization import (
     load_task_arguments,
     log_startup_info,
     parse_args,
+    resolve_replica_output_file,
     restore_sys_path,
 )
 from .callbacks import run_callbacks
@@ -53,6 +56,44 @@ from .workflow_builder import (
 )
 
 logger = logging.getLogger("slurm.runner")
+
+
+def _publish_initial_hostinfo(job_context: JobContext) -> None:
+    """Record the peer's actual hostname + step id in the registry.
+
+    Bootstrap seeds every peer entry with empty ``hostname`` / ``step_id``
+    because it runs *before* Slurm picks which node each unpinned srun
+    step lands on. The runner is the first process that knows the answer
+    (it's running on the chosen node), so we publish as soon as the
+    runner has a registry path and a peer identity.
+
+    For pinned peers the values are already correct after bootstrap;
+    :func:`update_peer_hostinfo` elides the write in that case.
+
+    Under local-mode (no srun) ``SLURM_STEP_ID`` is absent and the
+    helper stores ``None`` — still useful since the hostname publish is
+    what ``ctx.peers[...].first.hostname`` depends on.
+    """
+    if job_context.peer_name is None or job_context._registry_path is None:
+        return
+
+    hostname = resolve_current_hostname(job_context)
+    if hostname is None:
+        return
+    step_id = os.environ.get("SLURM_STEP_ID") or None
+    try:
+        from slurm.parallel.registry import update_peer_hostinfo
+
+        replica = job_context.replica_index or 0
+        update_peer_hostinfo(
+            job_context._registry_path,
+            job_context.peer_name,
+            replica,
+            hostname=hostname,
+            step_id=step_id,
+        )
+    except (FileNotFoundError, KeyError, IndexError, OSError) as exc:
+        logger.debug("Could not publish initial hostinfo: %s", exc)
 
 
 def get_job_id_from_env() -> Optional[str]:
@@ -237,6 +278,21 @@ def handle_workflow_context_injection(
     return task_args, task_kwargs, setup_result
 
 
+def _runs_as_parallel_peer(args) -> bool:
+    """Whether this runner invocation is a peer step of a parallel allocation.
+
+    Determined by the ``--step peer:<name>`` selector or the supervisor's
+    ``SLURM_SDK_PEER_NAME`` env export. Gates the SIGTERM shutdown handler:
+    only peers participate in the supervisor's graceful-shutdown protocol;
+    a single-task job must keep default SIGTERM semantics so ``scancel``
+    terminates it promptly.
+    """
+    return bool(
+        (getattr(args, "step", None) or "").startswith("peer:")
+        or os.environ.get("SLURM_SDK_PEER_NAME")
+    )
+
+
 def main():
     """Main entry point for the Slurm task runner.
 
@@ -246,12 +302,36 @@ def main():
     # Parse command-line arguments
     args = parse_args()
 
+    # Replica dispatch: per-task rewrite of ``--output-file`` so each replica
+    # writes to its own pickle. See ``apply_replica_output_suffix`` for the
+    # mechanics; in singleton / non-peer runs this is a no-op.
+    args.output_file = resolve_replica_output_file(args)
+
     # Configure logging
     configure_logging(args.loglevel)
     log_startup_info(args)
 
+    # Install the SIGTERM handler only for parallel peers, where the
+    # supervisor's graceful-shutdown protocol needs ``ctx.shutdown_requested``
+    # to flip instead of the process dying mid-flush. Single-task jobs keep
+    # the default disposition: swallowing SIGTERM there would turn every
+    # ``scancel`` into a silent wait for Slurm's SIGKILL after KillWait
+    # (~30s of wasted node time per cancellation). Must run in ``main()``
+    # because Python only allows ``signal.signal`` from the main thread.
+    if _runs_as_parallel_peer(args):
+        try:
+            install_shutdown_handler()
+        except ValueError:
+            # Not on the main thread (e.g. runner invoked under a test harness).
+            logger.debug("Could not install SIGTERM handler — not on main thread")
+
     # Get runtime context
     job_context: JobContext = current_job_context()
+
+    # Publish the peer's actual hostname + step id. Bootstrap cannot know
+    # these for unpinned peers until the ``srun`` step lands somewhere;
+    # this runner invocation is the first process that does.
+    _publish_initial_hostinfo(job_context)
     job_id = get_job_id_from_env()
     job_dir = args.job_dir or os.environ.get("JOB_DIR")
     stdout_path = args.stdout_path or os.environ.get("SLURM_STDOUT")

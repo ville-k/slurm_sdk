@@ -1,0 +1,432 @@
+"""Unit tests for parallel() spec validation.
+
+These tests go through the public ``parallel(...)`` entry point where possible
+— catching the ``NotImplementedError`` that guards Phase 1's unwired
+submission path — and fall back to the lower-level ``_build_spec`` +
+``validate_spec`` helpers for cases that can't be exercised via
+``parallel(...)`` alone.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+
+import pytest
+
+from slurm import Peer, Pool, Topology, task
+from slurm.errors import TopologyError
+from slurm.parallel import _build_spec, parallel
+from slurm.parallel.validation import validate_spec
+
+
+# ---------------------------------------------------------------------------
+# Shared task fixtures
+# ---------------------------------------------------------------------------
+
+
+@task(cpus_per_task=4, mem="16G")
+def _train(cfg: dict) -> dict:
+    return cfg
+
+
+@task(cpus_per_task=2, mem="4G")
+def _monitor() -> None:
+    pass
+
+
+@task(cpus_per_task=1, gpus_per_task=1)
+def _sim(env_id: int) -> int:
+    return env_id
+
+
+@task(cpus_per_task=8, gpus_per_task=2)
+def _inference(worker_id: int) -> None:
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _run_parallel(*peers, **kwargs):
+    """Call parallel() and return the TopologyError raised (if any).
+
+    ``parallel()`` runs validation first, then resolves the active Cluster,
+    then submits. A ``TopologyError`` means validation caught something;
+    anything later (``RuntimeError`` for missing cluster context,
+    ``NotImplementedError`` for scope boundaries) means validation was clean.
+    """
+    try:
+        parallel(*peers, **kwargs)
+    except TopologyError as e:
+        return e
+    except (NotImplementedError, RuntimeError):
+        return None
+    raise AssertionError("parallel() returned instead of raising")
+
+
+def _build(*peers, topology=None, **kwargs):
+    """Build a spec without calling validate_spec (for driving the validator
+    directly with hand-crafted malformed specs)."""
+    return _build_spec(
+        positional=tuple(peers),
+        named=kwargs.pop("named", {}),
+        topology=topology,
+        time=kwargs.pop("time", None),
+        account=kwargs.pop("account", None),
+        qos=kwargs.pop("qos", None),
+        reservation=kwargs.pop("reservation", None),
+        network=kwargs.pop("network", None),
+        grace_period_seconds=kwargs.pop("grace_period_seconds", 10),
+    )
+
+
+@contextmanager
+def _expect_topology_error(*substrings: str):
+    with pytest.raises(TopologyError) as exc_info:
+        yield
+    msg = str(exc_info.value)
+    for sub in substrings:
+        assert sub in msg, f"expected {sub!r} in error message: {msg}"
+
+
+# ---------------------------------------------------------------------------
+# Successful validation paths
+# ---------------------------------------------------------------------------
+
+
+def test_simple_two_peer_validates():
+    err = _run_parallel(_train.partial(cfg={"lr": 0.001}), _monitor)
+    assert err is None  # no TopologyError = validation passed
+
+
+def test_leader_sidecar_validates():
+    err = _run_parallel(
+        Peer(_train.partial(cfg={"lr": 0.001}), leader=True),
+        Peer(_monitor, on_failure="continue"),
+    )
+    assert err is None
+
+
+def test_explicit_topology_validates():
+    top = Topology(pools={"main": Pool(nodes=1, cpus_per_node=32)})
+    err = _run_parallel(
+        Peer(_train.partial(cfg={"lr": 0.001}), pool="main"),
+        Peer(_monitor, pool="main"),
+        topology=top,
+    )
+    assert err is None
+
+
+def test_named_peer_keyword_wins():
+    # parallel(my_name=peer) should make resolved_name == 'my_name'
+    spec = _build(named={"leader": _train.partial(cfg={"lr": 0.001})})
+    validate_spec(spec)
+    assert spec.peers[0].resolved_name == "leader"
+
+
+# ---------------------------------------------------------------------------
+# Name uniqueness
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_peer_names_rejected():
+    with _expect_topology_error("unique name", "'_train'"):
+        parallel(
+            _train.partial(cfg={"lr": 0.001}),
+            _train.partial(cfg={"lr": 0.01}),
+        )
+
+
+def test_duplicate_names_via_explicit_name_rejected():
+    with _expect_topology_error("unique name"):
+        parallel(
+            Peer(_train, name="x"),
+            Peer(_monitor, name="x"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Pool references
+# ---------------------------------------------------------------------------
+
+
+def test_peer_references_unknown_pool():
+    top = Topology(pools={"main": Pool(nodes=1)})
+    with _expect_topology_error("unknown pool", "'bogus'"):
+        parallel(
+            Peer(_train.partial(cfg={"lr": 0.001}), pool="bogus"),
+            topology=top,
+        )
+
+
+def test_multi_pool_topology_rejected():
+    """Multi-pool topologies (hetjobs) are rejected at construction time."""
+    with pytest.raises(ValueError, match="Multi-pool"):
+        Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=4), "cpu": Pool(nodes=2)})
+
+
+# ---------------------------------------------------------------------------
+# Replica args length
+# ---------------------------------------------------------------------------
+
+
+def test_replica_args_length_mismatch_list():
+    with _expect_topology_error("len 2", "count=4"):
+        parallel(
+            Peer.replicas(_sim, count=4, args=[{"env_id": 0}, {"env_id": 1}]),
+        )
+
+
+def test_replica_args_length_mismatch_range():
+    with _expect_topology_error("range", "len 3", "count=5"):
+        parallel(
+            Peer.replicas(_sim, count=5, args=range(3)),
+        )
+
+
+def test_replica_args_callable_is_skipped():
+    err = _run_parallel(
+        Peer.replicas(_sim, count=4, args=lambda i: {"env_id": i}),
+    )
+    assert err is None
+
+
+def test_replica_args_none_is_fine():
+    err = _run_parallel(
+        Peer.replicas(_sim, count=4),  # args=None; all replicas get identical args
+    )
+    assert err is None
+
+
+# ---------------------------------------------------------------------------
+# Capacity
+# ---------------------------------------------------------------------------
+
+
+def test_pool_gpu_overflow_reported():
+    top = Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=4, cpus_per_node=64)})
+    # 4 replicas × 2 gpus_per_task = 8 per node, but pool only has 4 gpus/node.
+    with _expect_topology_error("GPU overflow", "gpu", "demand"):
+        parallel(
+            Peer.replicas(
+                _inference, count=4, pool="gpu", args=lambda i: {"worker_id": i}
+            ),
+            topology=top,
+        )
+
+
+def test_gpu_peer_in_cpu_only_pool_flagged():
+    """A peer requesting GPUs in a CPU-only pool is flagged as 'wrong pool'."""
+    top = Topology(pools={"cpu": Pool(nodes=1, cpus_per_node=32)})
+    with _expect_topology_error("wrong pool", "'cpu'", "No pool"):
+        parallel(
+            Peer(_inference, pool="cpu"),
+            topology=top,
+        )
+
+
+def test_gpu_peer_in_correct_pool_accepted():
+    top = Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=4, cpus_per_node=32)})
+    # inference needs gpus_per_task=2 — placing it in the gpu pool fits.
+    err = _run_parallel(
+        Peer(_inference, pool="gpu"),
+        topology=top,
+    )
+    assert err is None
+
+
+def test_pool_cpu_overflow_reported():
+    top = Topology(pools={"cpu": Pool(nodes=1, cpus_per_node=8)})
+    # train(cpus_per_task=4) + monitor(cpus_per_task=2) + sim(cpus_per_task=1)
+    # = 7 CPUs per node, fits. Now add three more sim replicas sharing the node.
+    with _expect_topology_error("CPU overflow"):
+        parallel(
+            Peer.replicas(
+                _inference, count=2, pool="cpu", args=lambda i: {"worker_id": i}
+            ),  # 8*2 = 16 CPUs
+            topology=top,
+        )
+
+
+def test_capacity_partial_claims_not_checked():
+    # Pool declares capacity but no peer declares claims → no overflow.
+    @task()  # no cpus_per_task / gpus_per_task
+    def _nop():
+        pass
+
+    top = Topology(pools={"main": Pool(nodes=1, cpus_per_node=4)})
+    err = _run_parallel(
+        Peer(_nop, pool="main"),
+        topology=top,
+    )
+    assert err is None
+
+
+def test_capacity_fits_exactly():
+    top = Topology(pools={"gpu": Pool(nodes=1, gpus_per_node=8, cpus_per_node=32)})
+    err = _run_parallel(
+        Peer.replicas(_inference, count=4, pool="gpu", args=lambda i: {"worker_id": i}),
+        # count=4, cpus_per_task=8 × 4 = 32, gpus_per_task=2 × 4 = 8 → fits
+        topology=top,
+    )
+    assert err is None
+
+
+def test_pool_memory_overflow_reported():
+    """A peer declaring mem=64G pinned to a pool with mem_per_node=1G must fail."""
+    top = Topology(pools={"small": Pool(nodes=1, mem_per_node="1G")})
+    with _expect_topology_error("memory overflow", "'_train'"):
+        # _train is declared with mem="16G" (see fixtures above); pool
+        # only has 1G per node. 16 GiB > 1 GiB triggers the check.
+        parallel(
+            Peer(_train.partial(cfg={"lr": 0.001}), pool="small"),
+            topology=top,
+        )
+
+
+def test_pool_memory_fits_exactly():
+    top = Topology(pools={"ok": Pool(nodes=1, cpus_per_node=4, mem_per_node="16G")})
+    err = _run_parallel(
+        Peer(_train.partial(cfg={"lr": 0.001}), pool="ok"),
+        topology=top,
+    )
+    assert err is None
+
+
+def test_pool_memory_sum_across_peers_overflows():
+    """Two peers each declaring mem=16G overflow a 16G pool."""
+    top = Topology(
+        pools={"squeeze": Pool(nodes=1, cpus_per_node=32, mem_per_node="16G")}
+    )
+    with _expect_topology_error("memory overflow"):
+        parallel(
+            Peer(_train.partial(cfg={"a": 1}), pool="squeeze", name="a"),
+            Peer(_train.partial(cfg={"b": 2}), pool="squeeze", name="b"),
+            topology=top,
+        )
+
+
+def test_pool_memory_unknown_claims_not_checked():
+    """Pool declares memory but no peer does → no overflow."""
+
+    @task()  # no mem declared
+    def _nop():
+        pass
+
+    top = Topology(pools={"main": Pool(nodes=1, mem_per_node="1G")})
+    err = _run_parallel(
+        Peer(_nop, pool="main"),
+        topology=top,
+    )
+    assert err is None
+
+
+def test_implicit_topology_aggregates_memory():
+    """``parallel(...)`` without ``topology=`` sums peer mem into the default pool.
+
+    Before P2-1 this was documented but not implemented — the implicit
+    pool summed only CPUs and GPUs. Regression guard.
+    """
+    spec = _build(_train.partial(cfg={"x": 1}), _monitor)
+    pool = spec.topology.pools[spec.topology.default_pool or "default"]
+    # _train is mem="16G"; _monitor is mem="4G". Sum: 20 GiB = 20480 MiB.
+    assert pool.mem_per_node == f"{(16 + 4) * 1024}M"
+
+
+# ---------------------------------------------------------------------------
+# announce
+# ---------------------------------------------------------------------------
+
+
+def test_announce_reserved_key_rejected():
+    with _expect_topology_error("reserved key", "'hostname'"):
+        parallel(
+            Peer(_train.partial(cfg={"lr": 0.001}), announce={"hostname": "foo"}),
+        )
+
+
+def test_announce_non_reserved_key_ok():
+    err = _run_parallel(
+        Peer(_train.partial(cfg={"lr": 0.001}), announce={"model_version": "r3"}),
+    )
+    assert err is None
+
+
+# ---------------------------------------------------------------------------
+# Outer options
+# ---------------------------------------------------------------------------
+
+
+def test_grace_period_non_negative():
+    with _expect_topology_error("grace_period"):
+        parallel(
+            _train.partial(cfg={"lr": 0.001}),
+            grace_period_seconds=-1,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Aggregation: multiple errors reported at once
+# ---------------------------------------------------------------------------
+
+
+def test_multiple_problems_aggregated():
+    top = Topology(pools={"main": Pool(nodes=1)})
+    with pytest.raises(TopologyError) as exc_info:
+        parallel(
+            Peer(_train.partial(cfg={"lr": 0.001}), pool="bogus", name="a"),
+            Peer(_monitor, pool="main", name="a"),  # duplicate name + unknown pool
+            topology=top,
+        )
+    err = exc_info.value
+    # Expect at least 2 problems reported
+    assert len(err.problems) >= 2
+    assert "problem(s)" in err.message
+
+
+# ---------------------------------------------------------------------------
+# Empty parallel()
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_requires_at_least_one_peer():
+    with pytest.raises(TopologyError, match="at least one peer"):
+        parallel()
+
+
+# ---------------------------------------------------------------------------
+# Name format — names are embedded in srun flags, filenames, heredoc labels,
+# and the runner's colon-split --step selector (review regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "my worker",  # space → srun line word-splits
+        "a,b",  # comma → corrupts the --export clause
+        "a:b",  # colon → truncates the runner's --step parse
+        "a/b",  # slash → result path lands in a nonexistent dir
+        "a-b",  # dash → not identifier-safe for heredoc labels
+        "9lead",  # leading digit
+        "",  # empty
+    ],
+)
+def test_peer_name_format_rejected(bad_name):
+    with _expect_topology_error("not a valid identifier"):
+        spec = _build(Peer(_monitor, name=bad_name))
+        validate_spec(spec)
+
+
+def test_pool_name_format_rejected():
+    top = Topology(pools={"gpu pool": Pool(nodes=1, cpus_per_node=4)})
+    with _expect_topology_error("Pool name", "not a valid identifier"):
+        spec = _build(Peer(_monitor), topology=top)
+        validate_spec(spec)
+
+
+def test_identifier_names_still_validate():
+    spec = _build(Peer(_monitor, name="worker_2"))
+    validate_spec(spec)  # no error

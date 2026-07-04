@@ -132,3 +132,122 @@ def multi_node_identity_task() -> dict:
         "nodelist": os.environ.get("SLURM_JOB_NODELIST"),
         "nnodes": os.environ.get("SLURM_JOB_NUM_NODES"),
     }
+
+
+# ---------------------------------------------------------------------------
+# parallel(...) integration tasks
+#
+# Tasks used by tests/integration/test_parallel_end_to_end.py. They live here
+# (not in tests/) because remote peer processes import them by module name.
+# ---------------------------------------------------------------------------
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_named_peer_task(name: str) -> str:
+    """Return ``"peer:<name>"`` — minimal round-trip identity."""
+    return f"peer:{name}"
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_leader_task() -> int:
+    """Deterministic leader result for leader+sidecar integration tests."""
+    return 42
+
+
+@task(time="00:03:00", mem="100M")
+def parallel_long_lived_sidecar_task() -> str:
+    """Sleep long enough that a leader-exit cascade is observable.
+
+    Paired with ``parallel_leader_task`` in the cascade test: if the
+    supervisor's ``leader=True`` shutdown signal is broken, the sidecar
+    runs to natural completion and the allocation's elapsed time pokes
+    past this sleep. The ``on_failure="continue"`` policy on the peer
+    means a SIGTERM-driven exit still registers as a
+    ``shutdown_by_leader`` outcome rather than aborting the group.
+    """
+    import time
+
+    time.sleep(120)
+    return "side-ran-to-completion"
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_replica_identity_task(ctx: JobContext) -> dict:
+    """Return per-replica scheduler-populated identity — SLURM_PROCID etc.
+
+    Used to prove the runner sees a real Slurm-populated environment for
+    ``:by-taskid`` dispatch (not a synthesized one) and that the
+    per-replica result file picks up PROCID correctly.
+    """
+    import os
+    import socket
+
+    return {
+        "replica_index": ctx.replica_index,
+        "replica_count": ctx.replica_count,
+        "procid": os.environ.get("SLURM_PROCID"),
+        "ntasks": os.environ.get("SLURM_NTASKS"),
+        "hostname": socket.gethostname(),
+    }
+
+
+@task(time="00:02:00", mem="100M")
+def parallel_coordinator_task(ctx: JobContext) -> dict:
+    """Coordinator — announces its endpoint, then exits.
+
+    Mirrors the service-discovery how-to recipe. For the integration test
+    we don't need to actually serve traffic; the ``announce()`` itself is
+    the scheduler-agnostic surface we care about.
+    """
+    import socket
+
+    port = 29555
+    endpoint = f"tcp://{socket.gethostname()}:{port}"
+    ctx.announce(ready=True, endpoint=endpoint, role="coordinator")
+    return {"endpoint": endpoint, "port": port}
+
+
+@task(time="00:02:00", mem="100M")
+def parallel_worker_task(ctx: JobContext) -> dict:
+    """Worker — blocks on the coordinator's ``endpoint`` via ``wait_all``.
+
+    Proves bootstrap has written the registry, the coordinator's runner has
+    published its hostname, and ``wait_all(keys=["endpoint"])`` can pick
+    up an announced metadata key from a sibling peer running under real
+    Slurm.
+    """
+    ctx.peers["coordinator"].wait_all(keys=["endpoint"], timeout=60)
+    coord = ctx.peers["coordinator"].first
+    return {
+        "observed_endpoint": coord.metadata.get("endpoint"),
+        "observed_role": coord.metadata.get("role"),
+        "coordinator_state": coord.state,
+        "coordinator_hostname": coord.hostname,
+    }
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_upstream_token() -> str:
+    """Produce a token used as proof of an upstream dependency running first."""
+    return "upstream-token"
+
+
+@task(time="00:02:00", mem="100M")
+def parallel_slow_upstream_task() -> str:
+    """Upstream that runs long enough to observe downstream in a dep-gated state.
+
+    The dependency integration test submits this task, then submits a
+    downstream ``parallel(...).after(upstream)`` and queries
+    ``scontrol show job`` while this is still running. The sleep gives
+    headroom for scheduler latency between the resubmit and the query.
+    """
+    import time
+
+    time.sleep(20)
+    return "slow-upstream-token"
+
+
+@task(time="00:01:00", mem="100M")
+def parallel_downstream_peer_task() -> str:
+    """Downstream peer — just proves ``parallel(...).after(upstream)`` ran."""
+    return "downstream-ok"

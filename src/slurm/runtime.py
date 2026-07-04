@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import re
 import threading
@@ -10,9 +11,106 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple, get_args, get_origin
+from types import MappingProxyType
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Mapping,
+    Optional,
+    Tuple,
+    get_args,
+    get_origin,
+)
+
+if TYPE_CHECKING:
+    from .parallel.peer_info import PeerGroup
 
 _DEFAULT_MASTER_PORT = 29500
+
+logger = logging.getLogger("slurm.runtime")
+
+# Environment variable carrying the registry path through to user peer
+# code. Set by the supervisor when launching peer ``Popen``s; absent for
+# local-mode / non-parallel runs, in which case ``ctx.peers`` is an
+# empty read-only mapping and ``ctx.announce()`` is a no-op.
+_REGISTRY_PATH_ENV = "SLURM_SDK_REGISTRY_PATH"
+
+# Environment variable carrying the path to the per-allocation shared
+# directory. The bootstrap creates ``$JOB_DIR/shared/`` and the supervisor
+# exports this pointer into each peer's environment so ``ctx.shared_dir``
+# resolves to the same directory across every peer. Absent outside a
+# parallel allocation; ``ctx.shared_dir`` returns ``None`` in that case.
+_SHARED_DIR_ENV = "SLURM_SDK_SHARED_DIR"
+
+# Module-level shutdown flag flipped by the SIGTERM handler installed in
+# the runner's ``main()``. Peer user code checks it via
+# ``ctx.shutdown_requested`` to exit cleanly before the supervisor hard-
+# kills the step. Process-wide (one flag per process), thread-safe because
+# ``threading.Event`` already synchronises flag reads.
+_SHUTDOWN_EVENT: "threading.Event" = threading.Event()
+
+
+def install_shutdown_handler() -> None:
+    """Install a process-wide SIGTERM handler that flips the shutdown flag.
+
+    Safe to call more than once — ``signal.signal`` overwrites prior
+    handlers rather than stacking. Must be invoked from the main thread;
+    Python forbids installing signal handlers from worker threads.
+
+    The runner's ``main()`` is the intended caller. Peer code should poll
+    :attr:`JobContext.shutdown_requested` in its main loop:
+
+    .. code-block:: python
+
+        while not ctx.shutdown_requested:
+            do_work()
+    """
+    import signal as _signal
+
+    def _handler(_signum: int, _frame: object) -> None:
+        _SHUTDOWN_EVENT.set()
+        logger.info("Runner received SIGTERM — shutdown_requested flipped to True")
+
+    _signal.signal(_signal.SIGTERM, _handler)
+
+
+def resolve_current_hostname(
+    job_context: "JobContext",
+    *,
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """Resolve the hostname this process should use in the peer registry.
+
+    Hostname resolution follows the runtime-discovery precedence documented
+    for parallel peers:
+
+    1. ``job_context.hostnames[job_context.node_rank]`` when the Slurm env
+       exposed a concrete nodelist and the node rank points inside it.
+    2. ``HOSTNAME`` from the process environment.
+    3. :func:`socket.gethostname` as the final local fallback.
+
+    The runner's initial host publication path uses this so the hostname
+    key written into ``registry.json`` is stable.
+    """
+    if job_context.node_rank is not None and 0 <= job_context.node_rank < len(
+        job_context.hostnames
+    ):
+        hostname = job_context.hostnames[job_context.node_rank]
+        if hostname:
+            return hostname
+
+    env_map = env or os.environ
+    hostname = env_map.get("HOSTNAME")
+    if hostname:
+        return hostname
+
+    import socket
+
+    fallback = socket.gethostname()
+    return fallback or None
 
 
 @dataclass(frozen=True)
@@ -60,6 +158,122 @@ class JobContext:
         )
     )
     output_dir: Optional[Path] = None
+
+    # Topology identity — populated for peers launched via ``parallel(...)``.
+    peer_name: Optional[str] = None
+    peer_pool: Optional[str] = None
+    # Replica identity — populated only when the peer is a replica set
+    # (``Peer.replicas(...)``). For singleton peers both fields are ``None``.
+    replica_index: Optional[int] = None
+    replica_count: Optional[int] = None
+    # Path to the parallel allocation's ``registry.json``. Populated from
+    # ``SLURM_SDK_REGISTRY_PATH`` when the peer runs under the supervisor;
+    # ``None`` for non-parallel runs.
+    _registry_path: Optional[Path] = None
+
+    # ``$JOB_DIR/shared/`` when the supervisor exported ``SLURM_SDK_SHARED_DIR``
+    # (populated by :func:`build_job_context`); ``None`` for non-parallel
+    # runs. Bootstrap creates the directory before any peer launches so
+    # cross-peer reads race against neither bootstrap nor sibling writes.
+    shared_dir: Optional[Path] = None
+
+    @property
+    def shutdown_requested(self) -> bool:
+        """``True`` after the runner receives SIGTERM.
+
+        The runner's ``main()`` installs a SIGTERM handler that flips a
+        module-level :class:`threading.Event`. This property reads the
+        event's state — safe to poll from any thread. Peers should poll it
+        from their main loop so they exit gracefully within the
+        ``grace_period_seconds`` window before the supervisor hard-kills
+        the step.
+
+        Outside a parallel allocation (no runner / handler installed) the
+        flag is always ``False``.
+        """
+        return _SHUTDOWN_EVENT.is_set()
+
+    @property
+    def peers(self) -> Mapping[str, "PeerGroup"]:
+        """Read-only view of every peer in the parallel allocation.
+
+        Returns a mapping keyed by peer name. Each value is a
+        :class:`~slurm.parallel.peer_info.PeerGroup` exposing the peer's
+        replicas, their hostnames, announced metadata, and lifecycle state.
+
+        Always returns a real :class:`Mapping` — outside a parallel
+        allocation (no registry path set) the mapping is empty instead of
+        ``None`` so downstream code doesn't need to branch.
+
+        The mapping is re-read from disk on every access; callers wanting
+        a stable snapshot across multiple reads should hold the result of
+        a single ``ctx.peers`` call.
+        """
+        if self._registry_path is None:
+            return MappingProxyType({})
+        from .parallel.registry import load_peer_groups
+
+        return load_peer_groups(self._registry_path)
+
+    def announce(self, *, ready: bool = False, **fields: Any) -> None:
+        """Publish runtime metadata to the peer registry.
+
+        Merges ``fields`` into this peer's ``metadata`` dict so every other
+        peer in the allocation can read them via
+        ``ctx.peers["<name>"][i].metadata``. Writes are atomic
+        (``tmp + rename``); concurrent writers never produce torn files.
+
+        The dedicated ``ready=True`` signal flips the peer's ``state`` to
+        ``"ready"`` — the only way user code is allowed to influence state,
+        since all other state transitions are the supervisor's province.
+
+        Args:
+            ready: When ``True``, set ``state="ready"`` on this replica's
+                registry entry in addition to merging ``fields``. Peers
+                typically call ``ctx.announce(ready=True, ...)`` once the
+                service they run is actually accepting connections.
+            **fields: Arbitrary user-defined key/value pairs. Reserved
+                keys (those owned by the registry schema) are rejected —
+                see :data:`slurm.parallel.registry._RESERVED_ANNOUNCE_KEYS`.
+
+        Raises:
+            ValueError: If any key in ``fields`` is reserved.
+            RuntimeError: If this context has no peer identity
+                (``ctx.peer_name`` is ``None``). Announce is a parallel-
+                allocation operation; calling it from a non-parallel task
+                is a programmer error rather than a silent no-op.
+
+        Note:
+            If the supervisor isn't managing this process (no registry
+            path in the environment), the call is a no-op with a DEBUG
+            log. This keeps ``ctx.announce()`` safe to sprinkle through
+            code that also runs under ``cluster.run_local()``.
+        """
+        if self.peer_name is None:
+            raise RuntimeError(
+                "ctx.announce() requires a peer identity; this JobContext "
+                "has peer_name=None. announce() is only meaningful for "
+                "tasks launched via parallel(...)."
+            )
+        if self._registry_path is None:
+            logger.debug(
+                "announce(): no registry path — skipping (peer=%s, fields=%s, ready=%s)",
+                self.peer_name,
+                sorted(fields.keys()),
+                ready,
+            )
+            return
+
+        from .parallel.registry import announce_peer_metadata
+
+        replica = self.replica_index or 0
+        announce_peer_metadata(
+            self._registry_path,
+            self.peer_name,
+            replica,
+            fields=fields,
+            ready=ready,
+        )
 
     def torch_distributed_env(
         self, *, master_port: Optional[int] = None
@@ -150,6 +364,27 @@ def build_job_context(env: Optional[Dict[str, str]] = None) -> JobContext:
     if job_dir_str:
         output_dir = Path(job_dir_str)
 
+    peer_name = env_map.get("SLURM_SDK_PEER_NAME") or None
+    peer_pool = env_map.get("SLURM_SDK_PEER_POOL") or None
+
+    # Replica identity: the parallel renderer exports ``SLURM_SDK_REPLICA_COUNT``
+    # for replica peers (count > 1). When present, ``SLURM_PROCID`` is the
+    # replica index within the step. Singleton peers leave both at ``None`` so
+    # user code can branch cleanly between replica and non-replica contexts.
+    replica_count_env = _parse_int(env_map.get("SLURM_SDK_REPLICA_COUNT"))
+    if replica_count_env is not None and replica_count_env > 0:
+        replica_count_val: Optional[int] = replica_count_env
+        replica_index_val: Optional[int] = _parse_int(env_map.get("SLURM_PROCID")) or 0
+    else:
+        replica_count_val = None
+        replica_index_val = None
+
+    registry_path_raw = env_map.get(_REGISTRY_PATH_ENV)
+    registry_path = Path(registry_path_raw) if registry_path_raw else None
+
+    shared_dir_raw = env_map.get(_SHARED_DIR_ENV)
+    shared_dir = Path(shared_dir_raw) if shared_dir_raw else None
+
     return JobContext(
         job_id=job_id,
         step_id=step_id,
@@ -165,6 +400,12 @@ def build_job_context(env: Optional[Dict[str, str]] = None) -> JobContext:
         master_port=master_port,
         environment=slurm_environment,
         output_dir=output_dir,
+        peer_name=peer_name,
+        peer_pool=peer_pool,
+        replica_index=replica_index_val,
+        replica_count=replica_count_val,
+        _registry_path=registry_path,
+        shared_dir=shared_dir,
     )
 
 

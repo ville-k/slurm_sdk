@@ -562,6 +562,22 @@ class Job(Generic[T]):
                 + (diagnostics if diagnostics else "")
             )
 
+        return self._fetch_result()
+
+    def _fetch_result(self) -> T:
+        """Download/read and deserialize this job's result file, with no status gates.
+
+        Internal counterpart to :meth:`get_result` used when the caller has
+        an independent, authoritative success verdict — e.g. the parallel
+        registry recorded ``outcome="success"`` for a peer even though the
+        shared allocation's Slurm state is FAILED because a sibling peer
+        died. Callers are responsible for having established that the
+        result file should exist.
+
+        Raises:
+            DownloadError: If the result file is missing, unreadable, or
+                fails to deserialize.
+        """
         try:
             job_specific_dir = self._get_job_specific_output_path()
             if not job_specific_dir:

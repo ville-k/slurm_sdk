@@ -151,6 +151,17 @@ def setup_job_directory(
     sanitized_name = _sanitize_task_name(task_name)
 
     resolved_job_base_dir = cluster.backend.job_base_dir
+    if not resolved_job_base_dir:
+        # BackendBase declares job_base_dir = "" as the class default; the
+        # built-in backends always resolve it in __init__, but a custom
+        # backend that forgets would otherwise scatter job dirs and result
+        # pickles into whatever the current working directory happens to be.
+        raise SubmissionError(
+            f"Backend {type(cluster.backend).__name__} has no job_base_dir "
+            "set. Backends must resolve a job base directory before "
+            "submission — set job_base_dir in the backend's __init__ or "
+            "pass job_base_dir= when constructing the Cluster."
+        )
 
     from .context import _get_active_context
     from .workflow import WorkflowContext

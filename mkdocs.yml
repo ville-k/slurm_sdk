@@ -15,6 +15,7 @@ nav:
       - Parallelization Patterns: tutorials/parallelization_patterns.md
       - Workflow Graph Visualization: tutorials/workflow_graph_visualization.md
       - Parallel Train + Eval Workflow: tutorials/parallel-train-eval-workflow.md
+      - Your First Multi-Peer Job: tutorials/parallel_tasks.md
   - How-To Guides:
       - how-to/index.md
       - Using the CLI: how-to/cli.md
@@ -25,6 +26,9 @@ nav:
       - SSH Security: how-to/ssh_security.md
       - Custom Task Decorators: how-to/custom-task-decorators.md
       - Streaming Live Job Output: how-to/log-streaming.md
+      - Add Sidecars to a Training Job: how-to/sidecars.md
+      - Run N Copies of a Task in Parallel: how-to/replica_sets.md
+      - Discover Other Peers at Runtime: how-to/service_discovery.md
   - Reference:
       - reference/index.md
       - CLI Reference: reference/cli.md
@@ -36,6 +40,7 @@ nav:
           - Callbacks: reference/api/callbacks.md
           - Packaging (Container): reference/api/packaging_container.md
           - Errors: reference/api/errors.md
+          - Parallel Allocations: reference/parallel.md
   - Explanation:
       - explanation/index.md
       - System Overview: explanation/system_overview.md
@@ -46,6 +51,7 @@ nav:
       - Rendering and Runner: explanation/rendering_and_runner.md
       - Callbacks and Events: explanation/callbacks_and_events.md
       - Security Model: explanation/security-model.md
+      - How Parallel Allocations Work: explanation/slurm_allocations.md
   - Community:
       - Contributing: CONTRIBUTING.md
       - Changelog: CHANGELOG.md

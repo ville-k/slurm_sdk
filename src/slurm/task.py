@@ -529,6 +529,33 @@ class SlurmTask:
         new_task._container_dependencies = self._container_dependencies.copy()
         return new_task
 
+    def partial(self, *args: Any, **kwargs: Any) -> "BoundTask":
+        """Capture args to use this task in a multi-peer API.
+
+        Returns a :class:`BoundTask` wrapping this task plus the given args.
+        A ``BoundTask`` is the canonical way to hand a pre-configured task to
+        ``parallel(...)`` or ``Peer(...)`` — it captures args without
+        triggering a submission.
+
+        Args:
+            *args: Positional arguments to bind.
+            **kwargs: Keyword arguments to bind.
+
+        Returns:
+            A :class:`BoundTask` for this task with the provided arguments
+            pre-bound. Use ``.partial()`` again on the result to extend the
+            binding.
+
+        Example:
+            >>> @task(time="01:00:00")
+            ... def train(cfg: dict) -> dict: ...
+            >>> job = parallel(
+            ...     Peer(train.partial(cfg={"lr": 0.001}), leader=True),
+            ...     Peer(metrics, on_failure="continue"),
+            ... )
+        """
+        return BoundTask(task=self, args=args, kwargs=kwargs)
+
     def with_dependencies(self, tasks: List["SlurmTask"]) -> "SlurmTask":
         """Specify tasks that need their containers pre-built before this workflow runs.
 
@@ -591,3 +618,95 @@ class WorkflowTask(SlurmTask):
     """
 
     pass
+
+
+class BoundTask:
+    """A :class:`SlurmTask` with pre-bound arguments.
+
+    ``BoundTask`` is returned by :meth:`SlurmTask.partial`. It captures args
+    without triggering submission — the canonical way to hand a pre-configured
+    task to a multi-peer API (``parallel``, ``Peer``).
+
+    A ``BoundTask`` is **not directly callable**. Calling it raises a
+    ``TypeError`` steering the caller toward either the multi-peer primitives
+    or the plain ``SlurmTask`` (which *is* callable and submits).
+
+    ``.partial()`` composes: ``bt.partial(b=2)`` returns a new ``BoundTask``
+    with the original binding plus the extra args.
+
+    Attributes:
+        task: The underlying ``SlurmTask``.
+        args: Tuple of pre-bound positional arguments.
+        kwargs: Dict of pre-bound keyword arguments.
+
+    Examples:
+        Bind once, use in several peer declarations:
+
+            >>> bound = train.partial(lr=0.001, batch_size=64)
+            >>> job = parallel(
+            ...     Peer(bound, pool="gpu", leader=True),
+            ...     Peer(metrics, on_failure="continue"),
+            ... )
+
+        Compose bindings:
+
+            >>> base = train.partial(model="resnet50")
+            >>> variant_a = base.partial(lr=0.001)
+            >>> variant_b = base.partial(lr=0.01)
+    """
+
+    __slots__ = ("task", "args", "kwargs")
+
+    def __init__(
+        self,
+        task: "SlurmTask",
+        args: tuple = (),
+        kwargs: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not isinstance(task, SlurmTask):
+            raise TypeError(
+                "BoundTask requires a SlurmTask, got "
+                f"{type(task).__name__}. Use the @task decorator to create "
+                "one."
+            )
+        self.task = task
+        self.args = tuple(args)
+        self.kwargs = dict(kwargs) if kwargs else {}
+
+    def partial(self, *args: Any, **kwargs: Any) -> "BoundTask":
+        """Extend the binding with additional args / kwargs.
+
+        Returns a new ``BoundTask`` whose ``args`` are the existing tuple with
+        ``args`` appended and whose ``kwargs`` are the existing dict updated
+        with ``kwargs``. Later kwargs override earlier ones.
+
+        Args:
+            *args: Additional positional arguments.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            New ``BoundTask`` composing both bindings.
+        """
+        return BoundTask(
+            task=self.task,
+            args=self.args + tuple(args),
+            kwargs={**self.kwargs, **kwargs},
+        )
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """BoundTask is not directly callable.
+
+        Raises:
+            TypeError: Always. Use ``parallel(Peer(bound_task, ...), ...)``
+                or call the underlying ``SlurmTask`` directly for a
+                single-submission path.
+        """
+        raise TypeError(
+            f"BoundTask for {self.task.func.__name__!r} is not directly "
+            "callable. Use it inside parallel(Peer(bound_task, ...), ...), "
+            "or call the underlying SlurmTask for a single-job submission."
+        )
+
+    def __repr__(self) -> str:
+        name = self.task.func.__name__
+        return f"BoundTask({name}, args={self.args!r}, kwargs={self.kwargs!r})"

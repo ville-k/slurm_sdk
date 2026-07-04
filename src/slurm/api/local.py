@@ -9,7 +9,9 @@ such as workflow orchestrators running within a Slurm job.
 
 import os
 import re
+import shutil
 import subprocess  # nosec B404 - subprocess is required for SLURM command execution
+import sys
 import logging
 import threading
 import time as time_mod
@@ -67,6 +69,15 @@ class LocalBackend(BackendBase):
         # Create the base job directory if it doesn't exist
         os.makedirs(self.job_base_dir, exist_ok=True)
         logger.debug("Ensured job base directory exists: %s", self.job_base_dir)
+
+        # Parallel-job bookkeeping for the Slurm-less bypass path. When
+        # ``submit_job`` sees a rendered parallel script and ``sbatch`` is not
+        # available (or ``SLURM_SDK_FORCE_LOCAL_PARALLEL=1`` is set) it runs
+        # the Python supervisor directly and tracks the resulting Popen here
+        # so ``get_job_status`` / ``cancel_job`` / ``get_job_accounting`` can
+        # report on it without hitting a Slurm controller that isn't there.
+        self._local_parallel_jobs: Dict[str, Dict[str, Any]] = {}
+        self._local_parallel_lock = threading.Lock()
 
     def _resolve_path(self, path: str) -> str:
         """
@@ -195,15 +206,19 @@ class LocalBackend(BackendBase):
         os.makedirs(target_job_dir, exist_ok=True)
         logger.debug("Ensured target job directory exists: %s", target_job_dir)
 
-        # Write script to persistent location in job directory
-        script_filename = f"slurm_job_{pre_submission_id}_script.sh"
-        persistent_script_path = os.path.join(target_job_dir, script_filename)
+        persistent_script_path = self._persist_script(
+            script,
+            target_job_dir=target_job_dir,
+            filename=f"slurm_job_{pre_submission_id}_script.sh",
+        )
 
-        logger.debug("Writing script to job directory: %s", persistent_script_path)
-        with open(persistent_script_path, "w", newline="\n") as f:
-            f.write(script)
-        # nosec B103 - permissions are configurable, default 0o750 is more restrictive
-        os.chmod(persistent_script_path, self.script_permissions)
+        if self._should_bypass_sbatch(script):
+            raise RuntimeError(
+                "Parallel local-mode bypass now requires the prepared "
+                "submission path. submit_parallel_spec(...) should call "
+                "LocalBackend.submit_prepared_parallel_job(...) instead of "
+                "routing through submit_job(...)."
+            )
 
         try:
             # Build sbatch command as a list (uses shell=False for safety)
@@ -257,6 +272,231 @@ class LocalBackend(BackendBase):
                 logger.warning("Failed to clean up script file: %s", cleanup_error)
             raise
 
+    def _persist_script(
+        self,
+        script: str,
+        *,
+        target_job_dir: str,
+        filename: str,
+    ) -> str:
+        """Write a script to ``target_job_dir`` and return its full path."""
+        persistent_script_path = os.path.join(target_job_dir, filename)
+        logger.debug("Writing script to job directory: %s", persistent_script_path)
+        with open(persistent_script_path, "w", newline="\n") as f:
+            f.write(script)
+        # nosec B103 - permissions are configurable, default 0o750 is more restrictive
+        os.chmod(persistent_script_path, self.script_permissions)
+        return persistent_script_path
+
+    # -----------------------------------------------------------------
+    # Local parallel-mode helpers (bypass sbatch when Slurm is absent)
+    # -----------------------------------------------------------------
+
+    _PARALLEL_SCRIPT_SENTINEL = "slurm.parallel.topology_supervisor"
+
+    def _should_bypass_sbatch(self, script: str) -> bool:
+        """Return True when we should run the parallel supervisor directly.
+
+        The bypass fires when the script is a parallel(...) rendered script
+        AND ``sbatch`` is not on ``PATH`` (developer workstation without
+        Slurm). An explicit ``SLURM_SDK_FORCE_LOCAL_PARALLEL=1`` env var
+        forces the bypass even when sbatch is present — useful for tests
+        and for users who want to iterate on topology locally before
+        submitting to a real cluster.
+        """
+        if self._PARALLEL_SCRIPT_SENTINEL not in script:
+            return False
+        if os.environ.get("SLURM_SDK_FORCE_LOCAL_PARALLEL", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return True
+        return shutil.which("sbatch") is None
+
+    def submit_prepared_parallel_job(
+        self,
+        *,
+        prepared_submission: Any,
+        script: str,
+        target_job_dir: str,
+        pre_submission_id: str,
+    ) -> str:
+        """Run a prepared parallel submission locally without ``sbatch``.
+
+        The caller provides the prepared artifact bundle so local mode does
+        not need to infer side effects by mutating the rendered batch script.
+        The backend writes a dedicated prep script, runs it to materialize the
+        shared inputs, then launches bootstrap and the supervisor directly.
+        """
+        from ..parallel.rendering import render_parallel_local_prep_script
+
+        os.makedirs(target_job_dir, exist_ok=True)
+        self._persist_script(
+            script,
+            target_job_dir=target_job_dir,
+            filename=f"slurm_job_{pre_submission_id}_script.sh",
+        )
+        prep_script = render_parallel_local_prep_script(prepared_submission)
+        prep_script_path = self._persist_script(
+            prep_script,
+            target_job_dir=target_job_dir,
+            filename=f"slurm_job_{pre_submission_id}_local_prep.sh",
+        )
+
+        env = os.environ.copy()
+        env.update(self.env)
+        env.update(dict(prepared_submission.environment_exports))
+        env.update(dict(prepared_submission.python_runtime_exports))
+        env["JOB_DIR"] = target_job_dir
+        env["PY_EXEC_RESOLVED"] = sys.executable
+        env["PYTHONUNBUFFERED"] = "1"
+
+        prep_result = subprocess.run(  # nosec B603 - running our own generated prep script
+            ["/bin/bash", prep_script_path],
+            cwd=target_job_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if prep_result.returncode != 0:
+            raise RuntimeError(
+                "Local-mode parallel prep script failed with exit code "
+                f"{prep_result.returncode}:\nstdout: {prep_result.stdout}\n"
+                f"stderr: {prep_result.stderr}"
+            )
+
+        stdout_path = os.path.join(target_job_dir, f"slurm_{pre_submission_id}.out")
+        stderr_path = os.path.join(target_job_dir, f"slurm_{pre_submission_id}.err")
+        self._ensure_local_parallel_output_files(stdout_path, stderr_path)
+        self._append_text_if_present(stdout_path, prep_result.stdout)
+        self._append_text_if_present(stderr_path, prep_result.stderr)
+
+        bootstrap_result = subprocess.run(  # nosec B603 - trusted SDK module invocation
+            [
+                sys.executable,
+                "-m",
+                "slurm.parallel.topology_bootstrap",
+                "--job-dir",
+                target_job_dir,
+            ],
+            cwd=target_job_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self._append_text_if_present(stdout_path, bootstrap_result.stdout)
+        self._append_text_if_present(stderr_path, bootstrap_result.stderr)
+        if bootstrap_result.returncode != 0:
+            raise RuntimeError(
+                "Local-mode parallel bootstrap failed with exit code "
+                f"{bootstrap_result.returncode}:\nstdout: {bootstrap_result.stdout}\n"
+                f"stderr: {bootstrap_result.stderr}"
+            )
+
+        stdout_fh = open(stdout_path, "ab")
+        stderr_fh = open(stderr_path, "ab")
+        try:
+            proc = subprocess.Popen(  # nosec B603 - trusted SDK module invocation
+                [
+                    sys.executable,
+                    "-m",
+                    "slurm.parallel.topology_supervisor",
+                    "--job-dir",
+                    target_job_dir,
+                    "--local-mode",
+                ],
+                cwd=target_job_dir,
+                env=env,
+                stdout=stdout_fh,
+                stderr=stderr_fh,
+                start_new_session=True,
+            )
+        except Exception:
+            stdout_fh.close()
+            stderr_fh.close()
+            raise
+
+        job_id = str(proc.pid)
+        with self._local_parallel_lock:
+            self._local_parallel_jobs[job_id] = {
+                "process": proc,
+                "target_job_dir": target_job_dir,
+                "pre_submission_id": pre_submission_id,
+                "stdout_fh": stdout_fh,
+                "stderr_fh": stderr_fh,
+                "start_time": time_mod.time(),
+                "end_time": None,
+            }
+
+        logger.info(
+            "Parallel job launched locally (dedicated prep path) as PID %s in %s",
+            job_id,
+            target_job_dir,
+        )
+        return job_id
+
+    def _ensure_local_parallel_output_files(
+        self, stdout_path: str, stderr_path: str
+    ) -> None:
+        """Create the local-mode log files eagerly for tailing/polling."""
+        for path in (stdout_path, stderr_path):
+            if not os.path.exists(path):
+                with open(path, "a"):
+                    pass
+
+    def _append_text_if_present(self, path: str, text: str) -> None:
+        """Append captured text to ``path`` when there is anything to write."""
+        if not text:
+            return
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _local_job_info(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Return the bookkeeping dict for a locally-launched parallel job."""
+        with self._local_parallel_lock:
+            return self._local_parallel_jobs.get(job_id)
+
+    def _status_for_local_parallel(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        """Synthesize a scontrol-style status dict for a local parallel Popen."""
+        proc: subprocess.Popen = info["process"]
+        rc = proc.poll()
+        if rc is None:
+            return {
+                "JobId": str(proc.pid),
+                "JobState": "RUNNING",
+                "ExitCode": "0:0",
+                "Partition": "local",
+            }
+        # Terminal — cache end_time and translate the return code.
+        if info.get("end_time") is None:
+            info["end_time"] = time_mod.time()
+        if rc == 0:
+            state = "COMPLETED"
+            exit_code = "0:0"
+        elif rc < 0:
+            # Killed by signal — shell convention.
+            state = "CANCELLED"
+            exit_code = f"0:{-rc}"
+        else:
+            state = "FAILED"
+            exit_code = f"{rc}:0"
+        # Close the captured stdio handles once the process is terminal so
+        # file descriptors don't leak for long-running test sessions.
+        for key in ("stdout_fh", "stderr_fh"):
+            fh = info.get(key)
+            if fh is not None and not fh.closed:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+        return {
+            "JobId": str(proc.pid),
+            "JobState": state,
+            "ExitCode": exit_code,
+            "Partition": "local",
+        }
+
     def get_job_status(self, job_id: str) -> Dict[str, Any]:
         """
         Get the status of a job.
@@ -270,6 +510,9 @@ class LocalBackend(BackendBase):
         Raises:
             RuntimeError: If the command fails
         """
+        info = self._local_job_info(job_id)
+        if info is not None:
+            return self._status_for_local_parallel(info)
         try:
             stdout, stderr, return_code = self._run_command(
                 ["scontrol", "show", "job", job_id], check=False
@@ -331,6 +574,33 @@ class LocalBackend(BackendBase):
 
     def get_job_accounting(self, job_id: str) -> Dict[str, Any]:
         """Get job information from Slurm accounting (for completed jobs)."""
+        info = self._local_job_info(job_id)
+        if info is not None:
+            # Synthesize a minimal accounting record matching the sacct
+            # parser's shape. End-of-life data is pulled from the Popen
+            # bookkeeping — no Slurm involved.
+            status = self._status_for_local_parallel(info)
+            start = info.get("start_time")
+            end = info.get("end_time")
+            elapsed = (end - start) if (start and end) else 0
+            return {
+                "JobId": job_id,
+                "State": status["JobState"],
+                "JobState": status["JobState"],
+                "ExitCode": status["ExitCode"],
+                "Start": (
+                    time_mod.strftime("%Y-%m-%dT%H:%M:%S", time_mod.localtime(start))
+                    if start
+                    else ""
+                ),
+                "End": (
+                    time_mod.strftime("%Y-%m-%dT%H:%M:%S", time_mod.localtime(end))
+                    if end
+                    else ""
+                ),
+                "Elapsed": f"{int(elapsed // 3600):02d}:"
+                f"{int((elapsed % 3600) // 60):02d}:{int(elapsed % 60):02d}",
+            }
         try:
             result = subprocess.run(
                 [
@@ -427,6 +697,26 @@ class LocalBackend(BackendBase):
             BackendCommandError: If the job cancellation fails
         """
         logger.debug("Cancelling job: %s", job_id)
+
+        info = self._local_job_info(job_id)
+        if info is not None:
+            proc: subprocess.Popen = info["process"]
+            try:
+                # Terminate the supervisor's process group so its peer
+                # children receive SIGTERM too. The supervisor's own
+                # handler triggers the local-mode shutdown cascade.
+                import signal as _signal
+
+                os.killpg(os.getpgid(proc.pid), _signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                logger.debug("killpg for local parallel job %s failed: %s", job_id, exc)
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            return True
 
         stdout, stderr, return_code = self._run_command(
             ["scancel", job_id], check=False
