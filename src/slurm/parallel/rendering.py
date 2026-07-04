@@ -39,7 +39,12 @@ from ..rendering import (
     _job_directory_setup_lines,
 )
 from ..task import BoundTask
-from .plan import Plan, PlanPeer
+from .plan import (
+    PEER_ARGS_BASENAME,
+    PEER_REPLICA_ARGS_BASENAME,
+    Plan,
+    PlanPeer,
+)
 
 if TYPE_CHECKING:
     from ..cluster import Cluster
@@ -86,15 +91,11 @@ class PreparedParallelSubmission:
 
 
 # Names under $JOB_DIR for per-peer artifacts. Kept short so the output
-# directory listings read well during debugging.
-PEER_ARGS_BASENAME = "peer_{name}_args.pkl"
+# directory listings read well during debugging. The args templates
+# (PEER_ARGS_BASENAME / PEER_REPLICA_ARGS_BASENAME) live in plan.py so the
+# runner — which loads the pickles — shares them verbatim.
 PEER_KWARGS_BASENAME = "peer_{name}_kwargs.pkl"
 PEER_RESULT_BASENAME = "peer_{name}_result.pkl"
-# Replica sets (count > 1) write one pickle per replica index. Unlike the
-# singleton files above, these hold a single value (dict/tuple/scalar) that
-# the runner unpacks with ``unpack_item_to_args_kwargs`` — matching the
-# :meth:`SlurmTask.map` item shape.
-PEER_REPLICA_ARGS_BASENAME = "peer_{name}_{index}_args.pkl"
 
 
 def _build_local_python_runtime_exports() -> Dict[str, str]:

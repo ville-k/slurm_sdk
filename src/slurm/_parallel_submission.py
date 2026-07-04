@@ -544,7 +544,10 @@ def submit_parallel_spec(
                         peer_slurm_task,
                         args,
                         kwargs,
-                        f"{peer_pre}_{replica_idx}",
+                        # "_replica<idx>" matches apply_replica_output_suffix
+                        # in the runner, and cannot collide with a singleton
+                        # peer whose name ends in "_<digit>".
+                        f"{peer_pre}_replica{replica_idx}",
                         is_representative=is_representative,
                     )
                 )

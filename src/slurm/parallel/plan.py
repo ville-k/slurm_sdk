@@ -21,6 +21,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
+# Per-peer argument pickle filenames, shared verbatim by the renderer (which
+# writes the heredocs) and the runner (which loads them at step start). The
+# replica template embeds a "_replica<N>_" marker so a singleton peer named
+# "worker_2" can never collide with replica 2 of a peer named "worker" —
+# plain "_<N>_" suffixes made those paths identical.
+PEER_ARGS_BASENAME = "peer_{name}_args.pkl"
+PEER_REPLICA_ARGS_BASENAME = "peer_{name}_replica{index}_args.pkl"
+
 
 @dataclass
 class PlanPeer:

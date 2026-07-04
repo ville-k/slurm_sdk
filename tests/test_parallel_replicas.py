@@ -311,7 +311,7 @@ def test_replica_script_decodes_heredoc_payload(cluster, tmp_path):
     for index, expected in enumerate([{"env_id": 7}, {"env_id": 42}]):
         label = f"BASE64_PEER_REPLICA__INFERENCE_{index}"
         m = re.search(
-            rf'base64 -d > "peer__inference_{index}_args\.pkl" << "{label}"\n'
+            rf'base64 -d > "peer__inference_replica{index}_args\.pkl" << "{label}"\n'
             rf"(.*?)\n{label}",
             script,
             re.DOTALL,

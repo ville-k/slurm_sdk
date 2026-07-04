@@ -109,20 +109,24 @@ def apply_replica_output_suffix(output_file: str, replica_index: int) -> str:
     read garbage — or, worse, read whatever the last replica to finish
     happened to write.
 
-    The transform inserts ``_<replica_index>`` immediately before the
+    The transform inserts ``_replica<index>`` immediately before the
     canonical ``_result.pkl`` suffix so the emitted filename matches what
-    :meth:`Job._result_filename` expects.
+    :meth:`Job._result_filename` expects (``_parallel_submission`` builds
+    replica pre-submission ids with the same ``_replica<index>`` segment).
+    The explicit marker keeps replica files disjoint from singleton peers
+    whose *name* happens to end in ``_<digit>``.
 
-    ``slurm_job_foo_result.pkl`` + ``replica=3`` → ``slurm_job_foo_3_result.pkl``
+    ``slurm_job_foo_result.pkl`` + ``replica=3`` →
+    ``slurm_job_foo_replica3_result.pkl``
 
     Non-canonical filenames (shouldn't happen in practice but we guard
     against them) get the index appended as a trailing segment so nothing
     silently collides.
     """
     if not output_file.endswith(_REPLICA_RESULT_MARKER):
-        return f"{output_file}.{replica_index}"
+        return f"{output_file}.replica{replica_index}"
     base = output_file[: -len(_REPLICA_RESULT_MARKER)]
-    return f"{base}_{replica_index}{_REPLICA_RESULT_MARKER}"
+    return f"{base}_replica{replica_index}{_REPLICA_RESULT_MARKER}"
 
 
 def resolve_replica_output_file(args: "RunnerArgs") -> str:
@@ -454,9 +458,9 @@ def _load_peer_replica_arguments(
     """Load per-replica args for a ``:by-taskid`` peer step dispatch.
 
     The replica index is read from ``SLURM_PROCID`` (0..count-1 within the
-    step). The per-replica pickle lives at ``peer_<name>_<i>_args.pkl`` in
-    ``$JOB_DIR`` — written once per replica at submission time so the runner
-    only has to select and deserialise.
+    step). The per-replica pickle lives at ``peer_<name>_replica<i>_args.pkl``
+    in ``$JOB_DIR`` — written once per replica at submission time so the
+    runner only has to select and deserialise.
 
     The pickle contains a single value whose type drives unpacking: ``dict``
     becomes ``kwargs``, ``tuple`` becomes positional args, anything else is
@@ -498,7 +502,11 @@ def _load_peer_replica_arguments(
     if replica_index < 0:
         raise RuntimeError(f"SLURM_PROCID={replica_index} must be non-negative.")
 
-    args_filename = f"peer_{peer_name}_{replica_index}_args.pkl"
+    from slurm.parallel.plan import PEER_REPLICA_ARGS_BASENAME
+
+    args_filename = PEER_REPLICA_ARGS_BASENAME.format(
+        name=peer_name, index=replica_index
+    )
     args_path = args_filename
     if job_dir and not os.path.isabs(args_path):
         args_path = os.path.join(job_dir, args_path)

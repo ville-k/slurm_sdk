@@ -394,3 +394,39 @@ def test_multiple_problems_aggregated():
 def test_parallel_requires_at_least_one_peer():
     with pytest.raises(TopologyError, match="at least one peer"):
         parallel()
+
+
+# ---------------------------------------------------------------------------
+# Name format — names are embedded in srun flags, filenames, heredoc labels,
+# and the runner's colon-split --step selector (review regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "my worker",  # space → srun line word-splits
+        "a,b",  # comma → corrupts the --export clause
+        "a:b",  # colon → truncates the runner's --step parse
+        "a/b",  # slash → result path lands in a nonexistent dir
+        "a-b",  # dash → not identifier-safe for heredoc labels
+        "9lead",  # leading digit
+        "",  # empty
+    ],
+)
+def test_peer_name_format_rejected(bad_name):
+    with _expect_topology_error("not a valid identifier"):
+        spec = _build(Peer(_monitor, name=bad_name))
+        validate_spec(spec)
+
+
+def test_pool_name_format_rejected():
+    top = Topology(pools={"gpu pool": Pool(nodes=1, cpus_per_node=4)})
+    with _expect_topology_error("Pool name", "not a valid identifier"):
+        spec = _build(Peer(_monitor), topology=top)
+        validate_spec(spec)
+
+
+def test_identifier_names_still_validate():
+    spec = _build(Peer(_monitor, name="worker_2"))
+    validate_spec(spec)  # no error

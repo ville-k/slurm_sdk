@@ -113,6 +113,7 @@ def validate_spec(spec: _ParallelSpec) -> None:
     """
     problems: list[str] = []
 
+    _check_name_format(spec, problems)
     _check_unique_names(spec, problems)
     _check_pool_references(spec, problems)
     _check_announce_keys(spec, problems)
@@ -133,6 +134,34 @@ def validate_spec(spec: _ParallelSpec) -> None:
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
+
+
+# Peer names and pool keys are embedded verbatim in shell-facing surfaces:
+# the srun --export clause, heredoc labels, args/result filenames, and the
+# runner's colon-delimited --step selector. Restricting them to identifier
+# characters turns every "space in a name broke my srun line mid-allocation"
+# failure into a submission-time TopologyError.
+_NAME_FORMAT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _check_name_format(spec: _ParallelSpec, problems: list[str]) -> None:
+    for peer in spec.peers:
+        name = peer.resolved_name
+        if not _NAME_FORMAT.match(name):
+            problems.append(
+                f"Peer name {name!r} is not a valid identifier. Names are "
+                "embedded in srun flags, filenames, and the runner's "
+                "step selector, so they must match "
+                "[A-Za-z_][A-Za-z0-9_]* (letters, digits, underscores; "
+                "no spaces, dots, colons, or dashes)."
+            )
+    for pool_key in spec.topology.pools:
+        if not _NAME_FORMAT.match(pool_key):
+            problems.append(
+                f"Pool name {pool_key!r} is not a valid identifier. Pool "
+                "names are exported into each peer's environment, so they "
+                "must match [A-Za-z_][A-Za-z0-9_]*."
+            )
 
 
 def _check_unique_names(spec: _ParallelSpec, problems: list[str]) -> None:

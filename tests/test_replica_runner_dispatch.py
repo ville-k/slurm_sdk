@@ -68,9 +68,9 @@ def test_non_replica_peer_step_not_flagged_as_replica():
 
 
 def test_replica_loader_picks_by_procid_dict(tmp_path, monkeypatch):
-    _replica_args_pickle(tmp_path / "peer_worker_0_args.pkl", {"env_id": 0})
-    _replica_args_pickle(tmp_path / "peer_worker_1_args.pkl", {"env_id": 7})
-    _replica_args_pickle(tmp_path / "peer_worker_2_args.pkl", {"env_id": 42})
+    _replica_args_pickle(tmp_path / "peer_worker_replica0_args.pkl", {"env_id": 0})
+    _replica_args_pickle(tmp_path / "peer_worker_replica1_args.pkl", {"env_id": 7})
+    _replica_args_pickle(tmp_path / "peer_worker_replica2_args.pkl", {"env_id": 42})
 
     monkeypatch.setenv("SLURM_PROCID", "1")
     args = RunnerArgs(
@@ -86,7 +86,7 @@ def test_replica_loader_picks_by_procid_dict(tmp_path, monkeypatch):
 
 
 def test_replica_loader_tuple_becomes_positional(tmp_path, monkeypatch):
-    _replica_args_pickle(tmp_path / "peer_w_0_args.pkl", ("host-0", 0))
+    _replica_args_pickle(tmp_path / "peer_w_replica0_args.pkl", ("host-0", 0))
 
     monkeypatch.setenv("SLURM_PROCID", "0")
     args = RunnerArgs(
@@ -102,7 +102,7 @@ def test_replica_loader_tuple_becomes_positional(tmp_path, monkeypatch):
 
 
 def test_replica_loader_scalar_becomes_first_positional(tmp_path, monkeypatch):
-    _replica_args_pickle(tmp_path / "peer_w_3_args.pkl", 42)
+    _replica_args_pickle(tmp_path / "peer_w_replica3_args.pkl", 42)
 
     monkeypatch.setenv("SLURM_PROCID", "3")
     args = RunnerArgs(
@@ -118,7 +118,7 @@ def test_replica_loader_scalar_becomes_first_positional(tmp_path, monkeypatch):
 
 
 def test_replica_loader_dispatch_via_load_task_arguments(tmp_path, monkeypatch):
-    _replica_args_pickle(tmp_path / "peer_inference_2_args.pkl", {"env_id": 20})
+    _replica_args_pickle(tmp_path / "peer_inference_replica2_args.pkl", {"env_id": 20})
     monkeypatch.setenv("SLURM_PROCID", "2")
 
     args = RunnerArgs(
@@ -180,18 +180,18 @@ def test_replica_loader_missing_file_raises(tmp_path, monkeypatch):
 
 def test_apply_replica_output_suffix_canonical_filename():
     out = apply_replica_output_suffix("slurm_job_foo_result.pkl", 3)
-    assert out == "slurm_job_foo_3_result.pkl"
+    assert out == "slurm_job_foo_replica3_result.pkl"
 
 
 def test_apply_replica_output_suffix_preserves_parent_dir():
     out = apply_replica_output_suffix("/jobs/foo/slurm_job_abc_result.pkl", 7)
-    assert out == "/jobs/foo/slurm_job_abc_7_result.pkl"
+    assert out == "/jobs/foo/slurm_job_abc_replica7_result.pkl"
 
 
 def test_apply_replica_output_suffix_non_canonical_falls_back():
     # Weird extension — caller accepts an appended index segment.
     out = apply_replica_output_suffix("weird.output", 5)
-    assert out == "weird.output.5"
+    assert out == "weird.output.replica5"
 
 
 def test_resolve_replica_output_file_noop_for_non_replica():
@@ -214,7 +214,7 @@ def test_resolve_replica_output_file_uses_procid(monkeypatch):
         callbacks_file="c",
         step="peer:peer:by-taskid",
     )
-    assert resolve_replica_output_file(args) == "slurm_job_peer_2_result.pkl"
+    assert resolve_replica_output_file(args) == "slurm_job_peer_replica2_result.pkl"
 
 
 def test_resolve_replica_output_file_default_procid_zero(monkeypatch):
@@ -228,7 +228,7 @@ def test_resolve_replica_output_file_default_procid_zero(monkeypatch):
     )
     # No PROCID → default to 0 so the runner still picks a valid pickle path
     # even when invoked outside Slurm (tests, local-mode).
-    assert resolve_replica_output_file(args) == "slurm_job_peer_0_result.pkl"
+    assert resolve_replica_output_file(args) == "slurm_job_peer_replica0_result.pkl"
 
 
 def test_resolve_replica_output_file_distinct_across_replicas(monkeypatch):
@@ -245,3 +245,27 @@ def test_resolve_replica_output_file_distinct_across_replicas(monkeypatch):
         seen.add(resolve_replica_output_file(args))
     # Four distinct per-replica result files — no collisions.
     assert len(seen) == 4
+
+
+def test_replica_namespace_cannot_collide_with_singleton_names(tmp_path):
+    """Regression: peer "worker_2" vs replica 2 of peer "worker".
+
+    Both used to resolve to peer_worker_2_args.pkl and
+    slurm_job_<base>_peer_worker_2_result.pkl — the last heredoc silently
+    overwrote the first and both runners raced onto one result file. The
+    _replica<N> marker keeps the namespaces disjoint.
+    """
+    from slurm.parallel.plan import (
+        PEER_ARGS_BASENAME,
+        PEER_REPLICA_ARGS_BASENAME,
+    )
+
+    singleton_args = PEER_ARGS_BASENAME.format(name="worker_2")
+    replica_args = PEER_REPLICA_ARGS_BASENAME.format(name="worker", index=2)
+    assert singleton_args != replica_args
+
+    singleton_result = "slurm_job_base_peer_worker_2_result.pkl"
+    replica_result = apply_replica_output_suffix(
+        "slurm_job_base_peer_worker_result.pkl", 2
+    )
+    assert replica_result != singleton_result
