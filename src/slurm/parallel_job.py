@@ -343,24 +343,25 @@ class ParallelJob:
         return handle.representative_job
 
     def wait(self, timeout: Optional[float] = None) -> bool:
-        """Block until every peer (and replica) has reached a terminal state.
+        """Block until the allocation has reached a terminal state.
 
-        Every peer shares the same Slurm job id, so we only need to wait on one
-        of them — but we iterate for symmetry with :class:`ArrayJob` and to
-        surface a ``False`` return if any wait times out.
+        Every peer/replica Job shares the same Slurm job id — the allocation
+        is one sbatch — so waiting on a single representative Job is
+        equivalent to waiting on all of them, without issuing one scheduler
+        query per peer.
 
         Args:
             timeout: Optional wall-clock timeout in seconds.
 
         Returns:
-            ``True`` if every peer/replica reached a terminal state,
-            ``False`` on timeout.
+            ``True`` if the allocation completed successfully, ``False`` if
+            it failed, was cancelled, or the timeout elapsed — the same
+            contract as :meth:`Job.wait`.
         """
-        for handle in self._peer_handles.values():
-            for job in handle.ordered_jobs:
-                if not job.wait(timeout=timeout):
-                    return False
-        return True
+        first_handle = next(iter(self._peer_handles.values()), None)
+        if first_handle is None:
+            return True
+        return first_handle.representative_job.wait(timeout=timeout)
 
     def _registry_path(self) -> Optional[str]:
         """Locate ``registry.json`` for this job, preferring stored metadata.
@@ -504,24 +505,42 @@ class ParallelJob:
         ``count``, one entry per replica. Singleton peers produce a scalar
         value. The top-level dict mixes both when a job has both shapes.
 
-        The registry is the system-of-record — the per-peer ``Job.get_result``
-        call is still what deserializes user data. When no registry is
-        available (tests using mocks that bypass the supervisor), this falls
-        back to the Phase 3 behavior: propagate exceptions for ``on_failure=
-        "kill"`` peers, map ``on_failure="continue"`` failures to ``None``.
+        Blocks until the allocation reaches a terminal state before reading
+        outcomes — a still-running peer must not be misread as
+        ``not_started`` just because a sibling already recorded its outcome.
+        The registry is then the system-of-record for per-peer verdicts:
+        a peer whose outcome is ``"success"`` has its result fetched even
+        when the shared Slurm job state is FAILED because a *different*
+        peer died. When no registry is available (tests using mocks that
+        bypass the supervisor), this falls back to per-job ``get_result``:
+        exceptions propagate for ``on_failure="kill"`` peers and map to
+        ``None`` for ``on_failure="continue"`` peers.
 
         Args:
-            timeout: Optional per-peer timeout. Applied independently to each
-                peer's :meth:`Job.get_result`.
+            timeout: Optional seconds to wait for the allocation to reach a
+                terminal state before collecting.
 
         Returns:
             Dict keyed by peer name. Scalar value for singleton peers, list
             value (length = replica count) for replica peers.
 
         Raises:
+            TimeoutError: If the allocation is still running when ``timeout``
+                elapses.
             CompositeJobError: If any peer outcome is ``"fatal"`` or
-                ``"not_started"``.
+                ``"not_started"``, or a successful peer's result cannot be
+                fetched.
         """
+        first_handle = next(iter(self._peer_handles.values()), None)
+        if first_handle is not None:
+            self.wait(timeout=timeout)
+            if not first_handle.representative_job.is_completed():
+                raise TimeoutError(
+                    f"Parallel job {self.job_id} did not reach a terminal "
+                    f"state within timeout={timeout!r}; results are not "
+                    "collectable yet."
+                )
+
         outcomes = self.peer_outcomes()
         has_registry_data = any(
             outcome.status != OUTCOME_NOT_STARTED for outcome in outcomes.values()
@@ -586,7 +605,26 @@ class ParallelJob:
         """
         if has_registry_data and outcome is not None:
             if outcome.status == OUTCOME_SUCCESS:
-                return job.get_result(timeout=timeout) if job is not None else None
+                if job is None:
+                    return None
+                # The registry verdict is authoritative: fetch without the
+                # job-status success gate, because the shared Slurm job id
+                # reads FAILED whenever any *other* peer died fatally.
+                try:
+                    return job._fetch_result()
+                except Exception as exc:
+                    failures.append(
+                        PeerFailureError(
+                            peer_name=peer.resolved_name,
+                            replica_index=replica_index,
+                            exit_code=0,
+                            message=(
+                                "peer succeeded but its result could not be "
+                                f"fetched: {exc}"
+                            ),
+                        )
+                    )
+                    return None
             if outcome.status in (
                 OUTCOME_CONTINUE_ON_FAILURE,
                 OUTCOME_SHUTDOWN_BY_LEADER,
@@ -604,7 +642,8 @@ class ParallelJob:
             )
             return None
 
-        # Legacy path — no registry; fall back to Phase 3 behavior.
+        # Fallback path — no registry (mock-backed tests): rely on each
+        # job's own gated get_result.
         if job is None:
             return None
         try:

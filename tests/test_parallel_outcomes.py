@@ -39,9 +39,20 @@ class _FakeJob:
     def wait(self, timeout: Optional[float] = None) -> bool:  # noqa: ARG002
         return True
 
+    def is_completed(self) -> bool:
+        # Fakes model an allocation that already reached a terminal state —
+        # get_results() waits, then verifies via is_completed().
+        return True
+
     def get_result(self, timeout: Optional[float] = None) -> Any:  # noqa: ARG002
         if self._raises:
             raise RuntimeError("download failed")
+        return self._result
+
+    def _fetch_result(self) -> Any:
+        # Trusted-fetch path used when the registry records success. Unlike
+        # get_result it carries no job-status gate, so it succeeds even when
+        # `raises` models the shared job id reading FAILED (a sibling died).
         return self._result
 
 
@@ -211,6 +222,86 @@ def test_get_results_raises_composite_error_when_any_peer_fatal(tmp_path: Path):
     failure = info.value.failures[0]
     assert failure.peer_name == "dead"
     assert failure.exit_code == 42
+
+
+def test_mixed_success_fatal_uses_trusted_fetch_for_successful_peer(tmp_path: Path):
+    """Regression: a sibling's fatal exit must not poison a success slot.
+
+    Every peer Job shares the allocation's Slurm id, so when any peer dies
+    the shared state reads FAILED and the *gated* ``get_result`` raises for
+    the successful peer too. Before the fix that raw error propagated
+    mid-loop instead of the documented CompositeJobError. The registry's
+    success verdict must drive an ungated fetch.
+    """
+    spec = _spec_with_peers("good", "dead")
+    _write_registry_with_outcomes(
+        tmp_path,
+        {
+            "good": {"outcome": OUTCOME_SUCCESS, "final_exit_code": 0},
+            "dead": {"outcome": OUTCOME_FATAL, "final_exit_code": 7},
+        },
+    )
+    job = ParallelJob(
+        cluster=None,  # type: ignore[arg-type]
+        job_id="1",
+        peer_jobs={
+            # raises=True models the gated get_result failing because the
+            # shared job id reads FAILED; _fetch_result still succeeds.
+            "good": _FakeJob("OK", raises=True),
+            "dead": _FakeJob(None, raises=True),
+        },
+        spec=spec,
+        target_job_dir=str(tmp_path),
+    )
+    with pytest.raises(CompositeJobError) as info:
+        job.get_results()
+    # Only the genuinely fatal peer is reported — no bogus failure entry
+    # (or raw RuntimeError) from the successful peer's gated path.
+    assert [f.peer_name for f in info.value.failures] == ["dead"]
+
+
+def test_get_results_waits_instead_of_failing_running_peers(tmp_path: Path):
+    """Regression: a still-running allocation must not read as fatal.
+
+    A dead continue-policy sidecar populates the registry while the leader
+    is mid-run with no outcome yet. Before the fix, get_results() treated
+    the leader's missing outcome as ``not_started`` and raised
+    CompositeJobError instantly; now it waits and raises TimeoutError when
+    the allocation is still running at the deadline.
+    """
+
+    class _RunningJob(_FakeJob):
+        def wait(self, timeout=None):  # noqa: ARG002
+            return False
+
+        def is_completed(self) -> bool:
+            return False
+
+    spec = _spec_with_peers(
+        "leader", "sidecar", failure_policies={"sidecar": "continue"}
+    )
+    _write_registry_with_outcomes(
+        tmp_path,
+        {
+            "leader": {"outcome": None, "state": "ready"},
+            "sidecar": {
+                "outcome": OUTCOME_CONTINUE_ON_FAILURE,
+                "final_exit_code": 5,
+            },
+        },
+    )
+    job = ParallelJob(
+        cluster=None,  # type: ignore[arg-type]
+        job_id="1",
+        peer_jobs={
+            "leader": _RunningJob("unfinished"),
+            "sidecar": _RunningJob(None),
+        },
+        spec=spec,
+        target_job_dir=str(tmp_path),
+    )
+    with pytest.raises(TimeoutError, match="terminal state"):
+        job.get_results(timeout=0.1)
 
 
 def test_not_started_counts_as_fatal(tmp_path: Path):
