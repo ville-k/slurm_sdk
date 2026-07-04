@@ -215,6 +215,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `parallel(...)` batch headers no longer multiply the CPU request: the
+  pool's per-node budget renders as `--mincpus` instead of combining
+  `--cpus-per-task` with the summed `--ntasks` (which requested N× the
+  pool and could pend forever); `Pool.features` and `Pool.exclude_nodes`
+  now actually render (`--constraint` AND-join, `--exclude`); typed GPUs
+  emit `--gres` only instead of a conflicting `--gpus-per-node` pair
+- Peers that finish successfully no longer read as `"failed"`:
+  `PeerInfo.state` exposes the real lifecycle state and
+  `PeerGroup.wait_all()` treats an already-succeeded peer as satisfied
+  instead of hanging until timeout
+- A clean replica exit no longer overwrites a sibling replica's fatal
+  outcome in the registry (local mode records outcomes per replica)
+- `ParallelJob.get_results()` now waits for the allocation to finish
+  before reading outcomes (a still-running leader was previously
+  reported as a fatal `not_started`), fetches successful peers' results
+  even when a sibling's failure marked the shared Slurm job FAILED, and
+  aggregates every failure into the documented `CompositeJobError`
+- Peer and pool names are validated at submission time (identifier
+  characters only) — a space or colon in a name previously broke the
+  srun line or the runner's step selector mid-allocation; replica
+  artifact filenames gained a `_replica<N>` marker so a peer named
+  `worker_2` can no longer collide with replica 2 of a peer named
+  `worker`
+- Peer-level `task.after(...)` dependencies are honored by
+  `parallel(...)` (they were silently dropped, racing the upstream job)
+- `scancel` on a regular single-task job terminates it promptly again:
+  the SIGTERM-swallowing shutdown handler is now installed only for
+  parallel peers
+- Submitting through a backend with no `job_base_dir` set raises a clear
+  `SubmissionError` instead of silently scattering job directories into
+  the current working directory
 - `loads_pickled()` now raises a descriptive `ValueError` when the pickle
   payload is truncated after the header prefix, instead of a bare `IndexError`
 - `rendering.serialize_task_arguments()` replaces `assert` guards with explicit

@@ -100,9 +100,7 @@ def test_continue_policy_tolerates_failure():
     assert rc == 0
 
 
-def test_local_replica_success_does_not_overwrite_sibling_fatal(
-    tmp_path, monkeypatch
-):
+def test_local_replica_success_does_not_overwrite_sibling_fatal(tmp_path, monkeypatch):
     """Regression: a clean replica exit must not mask a sibling's fatal one.
 
     Local mode runs each replica as its own Popen. Before the fix, the
@@ -139,9 +137,7 @@ def test_local_replica_success_does_not_overwrite_sibling_fatal(
             start_new_session=True,
         )
 
-    monkeypatch.setattr(
-        topology_supervisor, "_launch_peer_local", _fake_local_launch
-    )
+    monkeypatch.setattr(topology_supervisor, "_launch_peer_local", _fake_local_launch)
 
     plan = _plan(
         PlanPeer(

@@ -256,7 +256,9 @@ def test_local_parallel_prep_materializes_replica_payloads(local_cluster):
     assert loads_pickled((job_dir / "peer_workers_kwargs.pkl").read_bytes()) == {}
 
     for idx in range(3):
-        payload = loads_pickled((job_dir / f"peer_workers_replica{idx}_args.pkl").read_bytes())
+        payload = loads_pickled(
+            (job_dir / f"peer_workers_replica{idx}_args.pkl").read_bytes()
+        )
         assert payload == {"worker_id": idx}
 
 

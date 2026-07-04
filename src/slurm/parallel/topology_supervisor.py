@@ -584,10 +584,9 @@ def run_supervisor(
         if processes:
             time.sleep(poll_interval)
 
-    # Peers that never had a process (shouldn't happen in this phase — every
-    # peer is launched up front — but record it for completeness so the
-    # OUTCOME_NOT_STARTED path has a source of truth once later phases stagger
-    # launches).
+    # Peers that never had a process. Every peer is launched up front today,
+    # so this only fires if a launch itself raised; recorded here so the
+    # OUTCOME_NOT_STARTED surface always has a source of truth.
     for name, peer in peers_by_name.items():
         if name not in recorded:
             _record_outcome(

@@ -299,8 +299,7 @@ def parallel(
         if isinstance(dep, Job):
             return [dep.id]
         raise TypeError(
-            f"{source} expects Job, ArrayJob, or ParallelJob; "
-            f"got {type(dep).__name__}"
+            f"{source} expects Job, ArrayJob, or ParallelJob; got {type(dep).__name__}"
         )
 
     collected_ids: List[str] = []
@@ -321,9 +320,7 @@ def parallel(
     for peer in spec.peers:
         pending = getattr(peer.task.task, "_pending_dependencies", ())
         for dep in pending:
-            collected_ids.extend(
-                _dep_ids(dep, source="Peer(task.after(...))")
-            )
+            collected_ids.extend(_dep_ids(dep, source="Peer(task.after(...))"))
 
     dependency_ids: Optional[List[str]] = None
     if collected_ids:
