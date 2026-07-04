@@ -278,6 +278,21 @@ def handle_workflow_context_injection(
     return task_args, task_kwargs, setup_result
 
 
+def _runs_as_parallel_peer(args) -> bool:
+    """Whether this runner invocation is a peer step of a parallel allocation.
+
+    Determined by the ``--step peer:<name>`` selector or the supervisor's
+    ``SLURM_SDK_PEER_NAME`` env export. Gates the SIGTERM shutdown handler:
+    only peers participate in the supervisor's graceful-shutdown protocol;
+    a single-task job must keep default SIGTERM semantics so ``scancel``
+    terminates it promptly.
+    """
+    return bool(
+        (getattr(args, "step", None) or "").startswith("peer:")
+        or os.environ.get("SLURM_SDK_PEER_NAME")
+    )
+
+
 def main():
     """Main entry point for the Slurm task runner.
 
@@ -296,15 +311,19 @@ def main():
     configure_logging(args.loglevel)
     log_startup_info(args)
 
-    # Install SIGTERM handler from the main thread so ``ctx.shutdown_requested``
-    # flips when the supervisor (or operator) signals the runner. This must
-    # happen in ``main()`` because Python only allows ``signal.signal`` from
-    # the main thread.
-    try:
-        install_shutdown_handler()
-    except ValueError:
-        # Not on the main thread (e.g. runner invoked under a test harness).
-        logger.debug("Could not install SIGTERM handler — not on main thread")
+    # Install the SIGTERM handler only for parallel peers, where the
+    # supervisor's graceful-shutdown protocol needs ``ctx.shutdown_requested``
+    # to flip instead of the process dying mid-flush. Single-task jobs keep
+    # the default disposition: swallowing SIGTERM there would turn every
+    # ``scancel`` into a silent wait for Slurm's SIGKILL after KillWait
+    # (~30s of wasted node time per cancellation). Must run in ``main()``
+    # because Python only allows ``signal.signal`` from the main thread.
+    if _runs_as_parallel_peer(args):
+        try:
+            install_shutdown_handler()
+        except ValueError:
+            # Not on the main thread (e.g. runner invoked under a test harness).
+            logger.debug("Could not install SIGTERM handler — not on main thread")
 
     # Get runtime context
     job_context: JobContext = current_job_context()

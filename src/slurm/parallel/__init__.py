@@ -285,33 +285,50 @@ def parallel(
 
     cluster = _resolve_cluster("parallel")
 
-    dependency_ids: Optional[List[str]] = None
-    if after is not None:
-        # Import lazily to avoid a circular import at module load time.
-        from ..array_job import ArrayJob
-        from ..job import Job
-        from ..parallel_job import ParallelJob
+    # Import lazily to avoid a circular import at module load time.
+    from ..array_job import ArrayJob
+    from ..job import Job
+    from ..parallel_job import ParallelJob
 
+    def _dep_ids(dep: object, *, source: str) -> List[str]:
+        if isinstance(dep, ParallelJob):
+            return [dep.job_id]
+        if isinstance(dep, ArrayJob):
+            if not dep._submitted:
+                dep._submit()
+            return [j.id for j in dep._jobs]
+        if isinstance(dep, Job):
+            return [dep.id]
+        raise TypeError(
+            f"{source} expects Job, ArrayJob, or ParallelJob; "
+            f"got {type(dep).__name__}"
+        )
+
+    collected_ids: List[str] = []
+    if after is not None:
         deps_list: List[object]
         if isinstance(after, (list, tuple)):
             deps_list = list(after)
         else:
             deps_list = [after]
-
-        dependency_ids = []
         for dep in deps_list:
-            if isinstance(dep, ParallelJob):
-                dependency_ids.append(dep.job_id)
-            elif isinstance(dep, ArrayJob):
-                if not dep._submitted:
-                    dep._submit()
-                dependency_ids.extend(j.id for j in dep._jobs)
-            elif isinstance(dep, Job):
-                dependency_ids.append(dep.id)
-            else:
-                raise TypeError(
-                    "parallel(after=...) expects Job, ArrayJob, or "
-                    f"ParallelJob; got {type(dep).__name__}"
-                )
+            collected_ids.extend(_dep_ids(dep, source="parallel(after=...)"))
+
+    # Peer-level dependencies compose with the after= kwarg: a peer built as
+    # Peer(train.after(prep).partial(...)) carries prep on its underlying
+    # task, and the allocation must not race it. Dependencies are
+    # allocation-level (one sbatch), so every peer's .after() jobs gate the
+    # whole submission. Previously these were silently dropped.
+    for peer in spec.peers:
+        pending = getattr(peer.task.task, "_pending_dependencies", ())
+        for dep in pending:
+            collected_ids.extend(
+                _dep_ids(dep, source="Peer(task.after(...))")
+            )
+
+    dependency_ids: Optional[List[str]] = None
+    if collected_ids:
+        # Dedupe while preserving first-seen order.
+        dependency_ids = list(dict.fromkeys(collected_ids))
 
     return submit_parallel_spec(cluster, spec, dependency_ids=dependency_ids)

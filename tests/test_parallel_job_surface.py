@@ -439,6 +439,88 @@ def test_parallel_after_kwarg_emits_afterok_in_header() -> None:
         assert "--dependency=afterok:1234" in script
 
 
+def test_peer_level_after_dependencies_are_honored() -> None:
+    """Regression: ``Peer(task.after(prep).partial(...))`` deps were dropped.
+
+    A user migrating from the single-job path keeps their ``.after()``
+    chaining on the task; the allocation must carry the afterok dependency
+    instead of silently racing the upstream job. Peer-level deps also
+    dedupe against the ``after=`` kwarg.
+    """
+    import os as _os
+    from typing import Optional as _Opt
+
+    from slurm import parallel as _parallel
+    from slurm import Peer as _Peer, task as _task
+    from cluster_factory import make_test_cluster as _mkc
+
+    class _Backend:
+        def __init__(self, base: str) -> None:
+            self.job_base_dir = base
+            self.scripts: list[str] = []
+            self._c = 0
+
+        def is_remote(self) -> bool:
+            return False
+
+        def submit_job(
+            self,
+            script: str,
+            *,
+            target_job_dir: str,
+            pre_submission_id: str,
+            account: _Opt[str] = None,
+            partition: _Opt[str] = None,
+            array_spec: _Opt[str] = None,
+            **kwargs: Any,
+        ) -> str:
+            self.scripts.append(script)
+            _os.makedirs(target_job_dir, exist_ok=True)
+            self._c += 1
+            return str(6000 + self._c)
+
+        def get_job_status(self, job_id: str) -> Dict[str, Any]:
+            return {"JobState": "PENDING"}
+
+        def get_cluster_info(self) -> Dict[str, Any]:
+            return {"partitions": []}
+
+        def cancel_job(self, job_id: str) -> bool:
+            return True
+
+        def get_queue(self) -> List[Dict[str, Any]]:
+            return []
+
+        def close(self) -> None:
+            return None
+
+    @_task(cpus_per_task=1, mem="1G")
+    def _t() -> int:
+        return 1
+
+    from slurm.job import Job
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        backend = _Backend(tmp)
+        cluster = _mkc(
+            backend=backend,
+            backend_type="local",
+            job_base_dir=tmp,
+            default_packaging="none",
+        )
+        prep = Job(id="777", cluster=cluster, target_job_dir=tmp)
+        with cluster:
+            # Peer-level dep via task.after(...), plus the same job through
+            # after= — the id must appear exactly once.
+            _parallel(_Peer(_t.after(prep).partial()), after=prep)
+        (script,) = backend.scripts
+        assert "--dependency=afterok:777" in script
+        assert script.count("afterok:777") == 1
+        assert "afterok:777:777" not in script
+
+
 def test_parallel_job_after_resubmits_with_dependency() -> None:
     """``ParallelJob.after(dep)`` cancels the original and re-submits with
     ``--dependency=afterok:<id>`` on the new allocation."""

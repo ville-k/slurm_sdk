@@ -197,3 +197,36 @@ def test_supervisor_launch_starts_new_session_for_signal_propagation():
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+# ---------------------------------------------------------------------------
+# Handler gating — regression: the handler must not swallow SIGTERM for
+# ordinary single-task jobs (scancel would silently wait for SIGKILL)
+# ---------------------------------------------------------------------------
+
+
+class _Args:
+    def __init__(self, step=None):
+        self.step = step
+
+
+def test_shutdown_handler_gated_to_parallel_peers(monkeypatch):
+    from slurm.runner.main import _runs_as_parallel_peer
+
+    monkeypatch.delenv("SLURM_SDK_PEER_NAME", raising=False)
+    # Ordinary single-task runner invocation: no handler.
+    assert _runs_as_parallel_peer(_Args(step=None)) is False
+    # Non-peer step selectors don't count either.
+    assert _runs_as_parallel_peer(_Args(step="workflow")) is False
+    # Peer steps (singleton and by-taskid) install the handler.
+    assert _runs_as_parallel_peer(_Args(step="peer:train")) is True
+    assert _runs_as_parallel_peer(_Args(step="peer:sim:by-taskid")) is True
+
+
+def test_shutdown_handler_gate_honors_supervisor_env(monkeypatch):
+    from slurm.runner.main import _runs_as_parallel_peer
+
+    # Local-mode peers are launched without --step but with the
+    # supervisor's env export.
+    monkeypatch.setenv("SLURM_SDK_PEER_NAME", "train")
+    assert _runs_as_parallel_peer(_Args(step=None)) is True
