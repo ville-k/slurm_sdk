@@ -245,3 +245,29 @@ def test_wait_all_without_registry_path_but_already_satisfied(tmp_path):
     )
     # Should not raise — already ready.
     group.wait_all(timeout=0.1)
+
+
+def test_wait_all_treats_succeeded_peer_as_satisfied(tmp_path):
+    """Regression: a peer that already exited 0 must not hang waiters.
+
+    The supervisor writes ``state="success"`` on clean exit. Before the
+    fix, PeerInfo collapsed that to ``"failed"`` and ``wait_all`` could
+    never complete once a short-lived peer finished before the wait began.
+    """
+    from slurm.parallel.registry import update_peer_entry
+
+    path = _registry(tmp_path, replicas=2)
+    # Replica 0 finished cleanly before anyone waited; replica 1 is ready.
+    update_peer_entry(path, "worker", 0, state="success", outcome="success")
+    announce_peer_metadata(path, "worker", 1, fields={}, ready=True)
+
+    group = load_peer_groups(path)["worker"]
+    start = time.monotonic()
+    group.wait_all(timeout=1.0)
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.2  # returned on the fast path, no polling stall
+
+    # The succeeded replica exposes its true state (not "failed") ...
+    assert group[0].state == "success"
+    # ... but is excluded from ready_only(), which is for live peers.
+    assert [r.replica_index for r in group.ready_only()] == [1]

@@ -140,9 +140,7 @@ _RESERVED_ANNOUNCE_KEYS = frozenset(
 # Registry entry state values used across bootstrap / supervisor / runner.
 STATE_PENDING = "pending"
 STATE_READY = "ready"
-STATE_RUNNING = "running"
 STATE_FAILED = "failed"
-STATE_SHUTTING_DOWN = "shutting_down"
 STATE_SHUTDOWN_BY_LEADER = "shutdown_by_leader"
 STATE_SUCCESS = "success"
 
@@ -466,9 +464,7 @@ __all__ = [
     "_RESERVED_ANNOUNCE_KEYS",
     "STATE_PENDING",
     "STATE_READY",
-    "STATE_RUNNING",
     "STATE_FAILED",
-    "STATE_SHUTTING_DOWN",
     "STATE_SHUTDOWN_BY_LEADER",
     "STATE_SUCCESS",
     "OUTCOME_SUCCESS",

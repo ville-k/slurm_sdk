@@ -31,7 +31,10 @@ from typing import Any, Iterator, Literal, Mapping, Optional, Sequence, Tuple
 logger = logging.getLogger("slurm.parallel.peer_info")
 
 
-_PeerState = Literal["pending", "ready", "failed"]
+_PeerState = Literal["pending", "ready", "failed", "success", "shutdown_by_leader"]
+_KNOWN_STATES = frozenset(
+    {"pending", "ready", "failed", "success", "shutdown_by_leader"}
+)
 _TOP_LEVEL_WAIT_FIELDS = frozenset({"hostname", "step_id"})
 
 
@@ -57,9 +60,12 @@ class PeerInfo:
         metadata: Arbitrary user-announced key/value pairs merged from
             :meth:`Peer.announce` (static) and :meth:`JobContext.announce`
             (runtime).
-        state: ``"pending"``, ``"ready"``, or ``"failed"``. Other values
-            (``"shutdown_by_leader"`` etc.) map to ``"failed"`` so user
-            code stays simple.
+        state: The replica's lifecycle state as recorded in the registry:
+            ``"pending"`` (not yet announced ready), ``"ready"`` (announced
+            via ``ctx.announce(ready=True)``), ``"success"`` (exited 0),
+            ``"failed"`` (exited non-zero), or ``"shutdown_by_leader"``
+            (terminated by the leader-exit cascade). Unknown values map to
+            ``"failed"``.
     """
 
     name: str
@@ -76,15 +82,13 @@ class PeerInfo:
     def from_entry(cls, data: Mapping[str, Any]) -> "PeerInfo":
         """Build a :class:`PeerInfo` from a raw registry entry dict."""
         raw_state = data.get("state", "pending")
-        # Collapse supervisor-internal states into the user-facing trio so
-        # callers can rely on the Literal type without knowing the full
-        # lifecycle vocabulary.
-        if raw_state == "ready":
-            state: _PeerState = "ready"
-        elif raw_state in ("pending", "running"):
-            state = "pending"
-        else:
-            state = "failed"
+        # Pass known lifecycle states through unchanged — collapsing
+        # "success" into "failed" previously made wait_all() hang on peers
+        # that had already finished cleanly. Unknown values map to "failed"
+        # so a corrupt registry surfaces as failure, not false readiness.
+        state: _PeerState = (
+            raw_state if raw_state in _KNOWN_STATES else "failed"  # type: ignore[assignment]
+        )
 
         return cls(
             name=str(data["name"]),
@@ -144,7 +148,14 @@ class PeerGroup:
         return tuple(r.hostname for r in self._replicas)
 
     def ready_only(self) -> Iterator[PeerInfo]:
-        """Iterator over replicas whose ``state == "ready"``."""
+        """Iterator over replicas whose ``state == "ready"``.
+
+        Deliberately excludes ``"success"``: a replica that already exited
+        is no longer accepting connections, so it is not useful for the
+        connect-to-live-peers pattern this method serves. Use
+        :meth:`wait_all` (which treats success as satisfied) when waiting
+        for peers to have *reached* readiness.
+        """
         return (r for r in self._replicas if r.state == "ready")
 
     def refresh(self) -> "PeerGroup":
@@ -177,7 +188,9 @@ class PeerGroup:
         """Block until every replica has announced the requested ``keys``.
 
         When ``keys`` is ``None``, waits for every replica's ``state`` to
-        reach ``"ready"``. When provided, each key is interpreted as either:
+        reach ``"ready"`` — or ``"success"``, since a replica that already
+        exited cleanly passed through readiness and must not hang waiters.
+        When provided, each key is interpreted as either:
 
         - one of the supported top-level runtime fields
           (``hostname``, ``step_id``), or
@@ -194,7 +207,8 @@ class PeerGroup:
 
         Args:
             keys: Field names every replica must have published. ``None``
-                means wait for ``state == "ready"`` instead. Supported
+                means wait for ``state`` to be ``"ready"`` (or ``"success"``)
+                instead. Supported
                 top-level runtime fields are ``hostname`` and ``step_id``;
                 any other key is matched against the replica's ``metadata``
                 mapping.
@@ -258,7 +272,9 @@ def _group_condition_met(group: PeerGroup, keys: Optional[Sequence[str]]) -> boo
     if not group._replicas:
         return False
     if keys is None:
-        return all(r.state == "ready" for r in group._replicas)
+        # A replica that already exited cleanly ("success") necessarily
+        # passed through readiness — waiting on it must not hang.
+        return all(r.state in ("ready", "success") for r in group._replicas)
     key_list = list(keys)
     return all(
         all(_replica_field_is_populated(replica, key) for key in key_list)
@@ -271,7 +287,7 @@ def _describe_pending(group: PeerGroup, keys: Optional[Sequence[str]]) -> str:
     missing: list[str] = []
     for r in group._replicas:
         if keys is None:
-            if r.state != "ready":
+            if r.state not in ("ready", "success"):
                 missing.append(f"{r.name}[{r.replica_index}]={r.state}")
         else:
             absent = [k for k in keys if not _replica_field_is_populated(r, k)]

@@ -100,6 +100,76 @@ def test_continue_policy_tolerates_failure():
     assert rc == 0
 
 
+def test_local_replica_success_does_not_overwrite_sibling_fatal(
+    tmp_path, monkeypatch
+):
+    """Regression: a clean replica exit must not mask a sibling's fatal one.
+
+    Local mode runs each replica as its own Popen. Before the fix, the
+    success branch blanket-wrote OUTCOME_SUCCESS across every replica
+    entry, so replica 1 finishing cleanly after replica 0 died rewrote the
+    registry to claim the whole set succeeded (while the supervisor still
+    exited non-zero).
+    """
+    from slurm.parallel.registry import read_registry, write_registry
+
+    registry_path = tmp_path / "registry.json"
+    entries = [
+        {
+            "name": "workers",
+            "pool": "default",
+            "replica_index": i,
+            "replica_count": 2,
+            "metadata": {},
+            "state": "pending",
+        }
+        for i in range(2)
+    ]
+    write_registry(registry_path, {"peers": {"workers": entries}})
+
+    # Replica 0 dies immediately (kill policy → group fatal). Replica 1
+    # ignores the shutdown SIGTERM and finishes cleanly afterwards.
+    replica_cmds = {0: "exit 3", 1: "trap '' TERM; sleep 0.4; exit 0"}
+
+    def _fake_local_launch(peer, *, replica_index, **_kwargs):
+        # start_new_session=True mirrors the real local launcher: shutdown
+        # signals the child's process group, which must not be pytest's.
+        return subprocess.Popen(  # nosec B603 - test-only synthetic peer
+            ["/bin/sh", "-c", replica_cmds[replica_index]],
+            start_new_session=True,
+        )
+
+    monkeypatch.setattr(
+        topology_supervisor, "_launch_peer_local", _fake_local_launch
+    )
+
+    plan = _plan(
+        PlanPeer(
+            name="workers",
+            pool="default",
+            leader=False,
+            on_failure="kill",
+            replica_count=2,
+            srun_command_line="unused-in-local-mode",
+        ),
+        grace=2,
+    )
+    rc = topology_supervisor.run_supervisor(
+        plan, registry_path=registry_path, local_mode=True
+    )
+    assert rc == 3
+
+    peers = read_registry(registry_path)["peers"]["workers"]
+    by_index = {int(e["replica_index"]): e for e in peers}
+    # Per-replica truth: the crashed replica stays fatal ...
+    assert by_index[0]["outcome"] == "fatal"
+    assert by_index[0]["state"] == "failed"
+    # ... and the clean replica records its own success without
+    # blanketing the sibling.
+    assert by_index[1]["outcome"] == "success"
+    assert by_index[1]["state"] == "success"
+
+
 def test_leader_success_triggers_sibling_shutdown():
     # Leader exits cleanly → supervisor returns leader's exit code (0) and
     # signals siblings. Siblings that would have run long get terminated.

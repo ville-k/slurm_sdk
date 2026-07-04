@@ -62,16 +62,21 @@ def test_peer_info_from_entry_materializes_all_fields():
     assert info.state == "ready"
 
 
-def test_peer_info_state_collapses_internal_states_to_failed():
-    for raw in ("failed", "shutdown_by_leader", "shutting_down"):
+def test_peer_info_known_states_pass_through():
+    """Every registry lifecycle state is exposed unchanged.
+
+    Regression guard: "success" used to collapse to "failed", which made
+    wait_all() hang on peers that had already finished cleanly.
+    """
+    for raw in ("pending", "ready", "failed", "success", "shutdown_by_leader"):
+        info = PeerInfo.from_entry({"name": "x", "pool": "p", "state": raw})
+        assert info.state == raw
+
+
+def test_peer_info_unknown_state_maps_to_failed():
+    for raw in ("shutting_down", "bogus", ""):
         info = PeerInfo.from_entry({"name": "x", "pool": "p", "state": raw})
         assert info.state == "failed", f"state={raw!r} should map to failed"
-
-
-def test_peer_info_state_pending_covers_pending_and_running():
-    for raw in ("pending", "running"):
-        info = PeerInfo.from_entry({"name": "x", "pool": "p", "state": raw})
-        assert info.state == "pending"
 
 
 def test_peer_info_mappings_are_read_only():

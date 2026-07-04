@@ -275,14 +275,15 @@ def _record_outcome(
     exit_code: Optional[int] = None,
     state: Optional[str] = None,
     message: Optional[str] = None,
+    replica_index: Optional[int] = None,
 ) -> None:
     """Persist a peer's terminal outcome to the registry atomically.
 
-    For replica peers (``peer.replica_count > 1``) the same outcome is
-    written to every replica entry — Phase 5's supervisor treats the srun
-    step as one atomic unit, so every replica inherits the step's exit code.
-    Phase 7 will add per-replica granular outcomes (via runner-written state
-    files) at which point this helper should narrow its write surface.
+    When ``replica_index`` is given (local mode, where each replica is its
+    own subprocess) only that replica's entry is written, so one replica's
+    outcome can never overwrite a sibling's. When ``None`` (Slurm mode, one
+    srun step per peer) the outcome is written to every replica entry — the
+    step is one atomic unit and every replica inherits its exit code.
     """
     if registry_path is None:
         return
@@ -293,15 +294,18 @@ def _record_outcome(
         changes["state"] = state
     if message is not None:
         changes["message"] = message
-    count = max(1, peer.replica_count)
-    for replica_index in range(count):
+    if replica_index is not None:
+        indices = [replica_index]
+    else:
+        indices = list(range(max(1, peer.replica_count)))
+    for idx in indices:
         try:
-            update_peer_entry(registry_path, peer.name, replica_index, **changes)
+            update_peer_entry(registry_path, peer.name, idx, **changes)
         except (FileNotFoundError, KeyError, OSError, IndexError) as exc:
             logger.debug(
                 "Could not record outcome for %s[%d]: %s",
                 peer.name,
-                replica_index,
+                idx,
                 exc,
             )
 
@@ -379,6 +383,10 @@ def run_supervisor(
 
     processes: Dict[int, subprocess.Popen] = {}
     peer_by_pid: Dict[int, PlanPeer] = {}
+    # Local mode only: which replica each Popen runs, so outcome recording
+    # can target that replica's registry entry instead of blanketing the
+    # whole set. None in Slurm mode (one srun step covers all replicas).
+    replica_by_pid: Dict[int, Optional[int]] = {}
     # Peers that still have an outstanding process.
     # Used to write OUTCOME_NOT_STARTED for peers that never got a chance
     # (e.g. an upstream peer aborted before they launched — rare but possible
@@ -420,6 +428,7 @@ def run_supervisor(
             proc = _launch_one(peer, replica_index)
             processes[proc.pid] = proc
             peer_by_pid[proc.pid] = peer
+            replica_by_pid[proc.pid] = replica_index if local_mode else None
 
     final_exit = 0
     shutdown_deadline: Optional[float] = None
@@ -449,6 +458,7 @@ def run_supervisor(
 
             del processes[pid]
             peer = peer_by_pid.pop(pid)
+            replica_idx = replica_by_pid.pop(pid, None)
             exit_code = _exit_code_of(proc)
             logger.info(
                 "Peer %s exited with code %s (leader=%s, policy=%s)",
@@ -466,8 +476,12 @@ def run_supervisor(
                     OUTCOME_SUCCESS,
                     exit_code=0,
                     state=STATE_SUCCESS,
+                    replica_index=replica_idx,
                 )
-                recorded[peer.name] = OUTCOME_SUCCESS
+                # Never downgrade an existing group decision: a sibling
+                # replica's earlier fatal exit must keep the group fatal
+                # even when this replica finishes cleanly afterwards.
+                recorded.setdefault(peer.name, OUTCOME_SUCCESS)
                 if peer.leader and shutdown_deadline is None:
                     logger.info(
                         "Leader %s exited cleanly — signalling %d sibling(s)",
@@ -487,15 +501,20 @@ def run_supervisor(
             # had already decided its own fate earlier (a leader that
             # itself exited non-zero, for instance).
             if shutdown_deadline is not None and not peer.leader:
-                if peer.name not in recorded:
+                # Per-replica writes (local mode) target only this replica's
+                # entry, so record every victim; the blanket write (Slurm
+                # mode) stays gated so it cannot overwrite a peer's earlier
+                # self-decided outcome across all entries.
+                if replica_idx is not None or peer.name not in recorded:
                     _record_outcome(
                         registry_path,
                         peer,
                         OUTCOME_SHUTDOWN_BY_LEADER,
                         exit_code=exit_code,
                         state=STATE_SHUTDOWN_BY_LEADER,
+                        replica_index=replica_idx,
                     )
-                    recorded[peer.name] = OUTCOME_SHUTDOWN_BY_LEADER
+                    recorded.setdefault(peer.name, OUTCOME_SHUTDOWN_BY_LEADER)
                 continue
 
             # Fresh failure — consult the peer's policy.
@@ -509,6 +528,7 @@ def run_supervisor(
                     exit_code=exit_code,
                     state=STATE_FAILED,
                     message=note,
+                    replica_index=replica_idx,
                 )
                 recorded[peer.name] = OUTCOME_CONTINUE_ON_FAILURE
                 # Leader with continue is rejected at validation time, so
@@ -523,6 +543,7 @@ def run_supervisor(
                 exit_code=exit_code,
                 state=STATE_FAILED,
                 message=note,
+                replica_index=replica_idx,
             )
             recorded[peer.name] = OUTCOME_FATAL
             if shutdown_deadline is None:
